@@ -33,6 +33,7 @@ pub mod color;
 pub mod convert;
 pub mod filter;
 pub mod histogram;
+pub mod icc;
 pub mod pixel;
 
 mod error;

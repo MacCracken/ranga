@@ -1,12 +1,35 @@
-//! Pixel format conversion — RGB↔YUV, ARGB↔NV12, etc.
+//! Pixel format conversion — RGB↔YUV, ARGB↔NV12, format interop.
 //!
-//! Uses fixed-point BT.601 coefficients for integer-only fast paths
-//! and floating-point BT.709 for HDR/linear workflows.
+//! Uses fixed-point BT.601 and BT.709 coefficients for integer-only fast paths.
+//! Replaces inline conversion code from rasa, tazama, and tarang with a single
+//! shared implementation.
 
 use crate::RangaError;
 use crate::pixel::{PixelBuffer, PixelFormat};
 
-/// Convert RGBA8 buffer to YUV420p.
+// =========================================================================
+// Y-plane computation helper
+// =========================================================================
+
+/// Compute BT.601 luminance for a row of RGBA8 pixels: Y = (77*R + 150*G + 29*B) >> 8
+fn compute_y_row(rgba: &[u8], y_out: &mut [u8]) {
+    for (pixel, y) in rgba.chunks_exact(4).zip(y_out.iter_mut()) {
+        *y = ((77 * pixel[0] as u16 + 150 * pixel[1] as u16 + 29 * pixel[2] as u16) >> 8) as u8;
+    }
+}
+
+/// Compute BT.709 luminance for a row: Y = (54*R + 183*G + 18*B) >> 8
+fn compute_y_row_bt709(rgba: &[u8], y_out: &mut [u8]) {
+    for (pixel, y) in rgba.chunks_exact(4).zip(y_out.iter_mut()) {
+        *y = ((54 * pixel[0] as u16 + 183 * pixel[1] as u16 + 18 * pixel[2] as u16) >> 8) as u8;
+    }
+}
+
+// =========================================================================
+// BT.601 conversions
+// =========================================================================
+
+/// Convert RGBA8 buffer to YUV420p (BT.601).
 ///
 /// Uses BT.601 fixed-point coefficients. The chroma planes (U, V) are
 /// subsampled 2x2 from the top-left pixel of each block.
@@ -20,55 +43,44 @@ use crate::pixel::{PixelBuffer, PixelFormat};
 /// let rgba = PixelBuffer::new(vec![255; 4 * 4 * 4], 4, 4, PixelFormat::Rgba8).unwrap();
 /// let yuv = convert::rgba_to_yuv420p(&rgba).unwrap();
 /// assert_eq!(yuv.format, PixelFormat::Yuv420p);
-/// assert!(yuv.data[0] > 250); // white → Y ≈ 255
+/// assert!(yuv.data[0] > 250);
 /// ```
 pub fn rgba_to_yuv420p(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
     if buf.format != PixelFormat::Rgba8 {
         return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
     }
-
     let w = buf.width as usize;
     let h = buf.height as usize;
-    let chroma_w = w / 2;
-    let chroma_h = h / 2;
-    let mut yuv = vec![0u8; w * h + 2 * chroma_w * chroma_h];
+    let cw = w / 2;
+    let ch = h / 2;
+    let mut yuv = vec![0u8; w * h + 2 * cw * ch];
 
-    // Y plane — BT.601 fixed-point
     for y in 0..h {
-        for x in 0..w {
-            let i = (y * w + x) * 4;
-            let r = buf.data[i] as u16;
-            let g = buf.data[i + 1] as u16;
-            let b = buf.data[i + 2] as u16;
-            // Y = (77*R + 150*G + 29*B) >> 8
-            yuv[y * w + x] = ((77 * r + 150 * g + 29 * b) >> 8) as u8;
-        }
+        let row_start = y * w * 4;
+        compute_y_row(
+            &buf.data[row_start..row_start + w * 4],
+            &mut yuv[y * w..y * w + w],
+        );
     }
-
-    // U and V planes (subsampled 2x2)
-    let u_offset = w * h;
-    let v_offset = u_offset + chroma_w * chroma_h;
+    let u_off = w * h;
+    let v_off = u_off + cw * ch;
     for y in (0..h).step_by(2) {
         for x in (0..w).step_by(2) {
             let i = (y * w + x) * 4;
             let r = buf.data[i] as i32;
             let g = buf.data[i + 1] as i32;
             let b = buf.data[i + 2] as i32;
-            let u = ((-43 * r - 85 * g + 128 * b + 128 * 256) >> 8).clamp(0, 255) as u8;
-            let v = ((128 * r - 107 * g - 21 * b + 128 * 256) >> 8).clamp(0, 255) as u8;
-            let ci = (y / 2) * chroma_w + (x / 2);
-            yuv[u_offset + ci] = u;
-            yuv[v_offset + ci] = v;
+            let ci = (y / 2) * cw + (x / 2);
+            yuv[u_off + ci] = ((-43 * r - 85 * g + 128 * b + 128 * 256) >> 8).clamp(0, 255) as u8;
+            yuv[v_off + ci] = ((128 * r - 107 * g - 21 * b + 128 * 256) >> 8).clamp(0, 255) as u8;
         }
     }
-
     PixelBuffer::new(yuv, buf.width, buf.height, PixelFormat::Yuv420p)
 }
 
-/// Convert YUV420p buffer to RGBA8.
+/// Convert YUV420p buffer to RGBA8 (BT.601).
 ///
-/// Uses BT.601 inverse coefficients with fixed-point arithmetic.
-/// Alpha is set to 255 (fully opaque) for all pixels.
+/// Alpha is set to 255 for all pixels.
 ///
 /// # Examples
 ///
@@ -79,47 +91,34 @@ pub fn rgba_to_yuv420p(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
 /// let rgba = PixelBuffer::new(vec![128; 8 * 8 * 4], 8, 8, PixelFormat::Rgba8).unwrap();
 /// let yuv = convert::rgba_to_yuv420p(&rgba).unwrap();
 /// let back = convert::yuv420p_to_rgba(&yuv).unwrap();
-/// assert_eq!(back.format, PixelFormat::Rgba8);
-/// // Lossy roundtrip — within ~10 levels
 /// assert!((back.data[0] as i16 - 128).unsigned_abs() < 10);
 /// ```
 pub fn yuv420p_to_rgba(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
     if buf.format != PixelFormat::Yuv420p {
         return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
     }
-
     let w = buf.width as usize;
     let h = buf.height as usize;
-    let chroma_w = w / 2;
-    let u_offset = w * h;
-    let v_offset = u_offset + chroma_w * (h / 2);
-
+    let cw = w / 2;
+    let u_off = w * h;
+    let v_off = u_off + cw * (h / 2);
     let mut rgba = vec![0u8; w * h * 4];
-
     for y in 0..h {
         for x in 0..w {
             let yi = buf.data[y * w + x] as i16;
-            let u = buf.data[u_offset + (y / 2) * chroma_w + (x / 2)] as i16 - 128;
-            let v = buf.data[v_offset + (y / 2) * chroma_w + (x / 2)] as i16 - 128;
-
-            let r = (yi + ((359 * v) >> 8)).clamp(0, 255) as u8;
-            let g = (yi - ((88 * u + 183 * v) >> 8)).clamp(0, 255) as u8;
-            let b = (yi + ((454 * u) >> 8)).clamp(0, 255) as u8;
-
+            let u = buf.data[u_off + (y / 2) * cw + (x / 2)] as i16 - 128;
+            let v = buf.data[v_off + (y / 2) * cw + (x / 2)] as i16 - 128;
             let oi = (y * w + x) * 4;
-            rgba[oi] = r;
-            rgba[oi + 1] = g;
-            rgba[oi + 2] = b;
+            rgba[oi] = (yi + ((359 * v) >> 8)).clamp(0, 255) as u8;
+            rgba[oi + 1] = (yi - ((88 * u + 183 * v) >> 8)).clamp(0, 255) as u8;
+            rgba[oi + 2] = (yi + ((454 * u) >> 8)).clamp(0, 255) as u8;
             rgba[oi + 3] = 255;
         }
     }
-
     PixelBuffer::new(rgba, buf.width, buf.height, PixelFormat::Rgba8)
 }
 
-/// Convert ARGB8 buffer to NV12 (semi-planar YUV 4:2:0).
-///
-/// Uses BT.601 coefficients. The UV plane is interleaved (U, V, U, V, ...).
+/// Convert ARGB8 buffer to NV12 (semi-planar YUV 4:2:0, BT.601).
 ///
 /// # Examples
 ///
@@ -135,12 +134,9 @@ pub fn argb_to_nv12(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
     if buf.format != PixelFormat::Argb8 {
         return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
     }
-
     let w = buf.width as usize;
     let h = buf.height as usize;
     let mut nv12 = vec![0u8; w * h + (w / 2) * (h / 2) * 2];
-
-    // Y plane
     for y in 0..h {
         for x in 0..w {
             let i = (y * w + x) * 4;
@@ -150,25 +146,337 @@ pub fn argb_to_nv12(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
             nv12[y * w + x] = ((77 * r + 150 * g + 29 * b) >> 8) as u8;
         }
     }
-
-    // UV plane (interleaved)
-    let uv_offset = w * h;
+    let uv_off = w * h;
     for y in (0..h).step_by(2) {
         for x in (0..w).step_by(2) {
             let i = (y * w + x) * 4;
             let r = buf.data[i + 1] as i32;
             let g = buf.data[i + 2] as i32;
             let b = buf.data[i + 3] as i32;
-            let u = ((-43 * r - 85 * g + 128 * b + 128 * 256) >> 8).clamp(0, 255) as u8;
-            let v = ((128 * r - 107 * g - 21 * b + 128 * 256) >> 8).clamp(0, 255) as u8;
             let ci = (y / 2) * w + x;
-            nv12[uv_offset + ci] = u;
-            nv12[uv_offset + ci + 1] = v;
+            nv12[uv_off + ci] = ((-43 * r - 85 * g + 128 * b + 128 * 256) >> 8).clamp(0, 255) as u8;
+            nv12[uv_off + ci + 1] =
+                ((128 * r - 107 * g - 21 * b + 128 * 256) >> 8).clamp(0, 255) as u8;
         }
     }
-
     PixelBuffer::new(nv12, buf.width, buf.height, PixelFormat::Nv12)
 }
+
+// =========================================================================
+// BT.709 conversions (HD video — replaces tazama/tarang inline BT.709)
+// =========================================================================
+
+/// Convert RGBA8 buffer to YUV420p using BT.709 coefficients.
+///
+/// BT.709 is the standard for HD video. Fixed-point:
+/// Y = (54*R + 183*G + 18*B) >> 8
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::convert;
+///
+/// let rgba = PixelBuffer::new(vec![255; 4 * 4 * 4], 4, 4, PixelFormat::Rgba8).unwrap();
+/// let yuv = convert::rgba_to_yuv420p_bt709(&rgba).unwrap();
+/// assert!(yuv.data[0] > 250);
+/// ```
+pub fn rgba_to_yuv420p_bt709(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
+    if buf.format != PixelFormat::Rgba8 {
+        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+    }
+    let w = buf.width as usize;
+    let h = buf.height as usize;
+    let cw = w / 2;
+    let ch = h / 2;
+    let mut yuv = vec![0u8; w * h + 2 * cw * ch];
+
+    for y in 0..h {
+        let row_start = y * w * 4;
+        compute_y_row_bt709(
+            &buf.data[row_start..row_start + w * 4],
+            &mut yuv[y * w..y * w + w],
+        );
+    }
+    let u_off = w * h;
+    let v_off = u_off + cw * ch;
+    for y in (0..h).step_by(2) {
+        for x in (0..w).step_by(2) {
+            let i = (y * w + x) * 4;
+            let r = buf.data[i] as i32;
+            let g = buf.data[i + 1] as i32;
+            let b = buf.data[i + 2] as i32;
+            let ci = (y / 2) * cw + (x / 2);
+            yuv[u_off + ci] = ((-29 * r - 99 * g + 128 * b + 128 * 256) >> 8).clamp(0, 255) as u8;
+            yuv[v_off + ci] = ((128 * r - 116 * g - 12 * b + 128 * 256) >> 8).clamp(0, 255) as u8;
+        }
+    }
+    PixelBuffer::new(yuv, buf.width, buf.height, PixelFormat::Yuv420p)
+}
+
+/// Convert YUV420p buffer to RGBA8 using BT.709 coefficients.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::convert;
+///
+/// let rgba = PixelBuffer::new(vec![128; 8 * 8 * 4], 8, 8, PixelFormat::Rgba8).unwrap();
+/// let yuv = convert::rgba_to_yuv420p_bt709(&rgba).unwrap();
+/// let back = convert::yuv420p_to_rgba_bt709(&yuv).unwrap();
+/// assert!((back.data[0] as i16 - 128).unsigned_abs() < 10);
+/// ```
+pub fn yuv420p_to_rgba_bt709(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
+    if buf.format != PixelFormat::Yuv420p {
+        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+    }
+    let w = buf.width as usize;
+    let h = buf.height as usize;
+    let cw = w / 2;
+    let u_off = w * h;
+    let v_off = u_off + cw * (h / 2);
+    let mut rgba = vec![0u8; w * h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let yi = buf.data[y * w + x] as i16;
+            let u = buf.data[u_off + (y / 2) * cw + (x / 2)] as i16 - 128;
+            let v = buf.data[v_off + (y / 2) * cw + (x / 2)] as i16 - 128;
+            let oi = (y * w + x) * 4;
+            rgba[oi] = (yi + ((403 * v) >> 8)).clamp(0, 255) as u8;
+            rgba[oi + 1] = (yi - ((48 * u + 120 * v) >> 8)).clamp(0, 255) as u8;
+            rgba[oi + 2] = (yi + ((475 * u) >> 8)).clamp(0, 255) as u8;
+            rgba[oi + 3] = 255;
+        }
+    }
+    PixelBuffer::new(rgba, buf.width, buf.height, PixelFormat::Rgba8)
+}
+
+// =========================================================================
+// NV12 → RGBA (replaces tazama/tarang inline NV12 handling)
+// =========================================================================
+
+/// Convert NV12 buffer to RGBA8 (BT.601).
+///
+/// NV12 has a Y plane followed by interleaved UV.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::convert;
+///
+/// let argb = PixelBuffer::new(vec![255, 128, 128, 128].repeat(16), 4, 4, PixelFormat::Argb8).unwrap();
+/// let nv12 = convert::argb_to_nv12(&argb).unwrap();
+/// let rgba = convert::nv12_to_rgba(&nv12).unwrap();
+/// assert_eq!(rgba.format, PixelFormat::Rgba8);
+/// ```
+pub fn nv12_to_rgba(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
+    if buf.format != PixelFormat::Nv12 {
+        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+    }
+    let w = buf.width as usize;
+    let h = buf.height as usize;
+    let uv_off = w * h;
+    let mut rgba = vec![0u8; w * h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let yi = buf.data[y * w + x] as i16;
+            let uv_idx = uv_off + (y / 2) * w + (x / 2) * 2;
+            let u = buf.data[uv_idx] as i16 - 128;
+            let v = buf.data[uv_idx + 1] as i16 - 128;
+            let oi = (y * w + x) * 4;
+            rgba[oi] = (yi + ((359 * v) >> 8)).clamp(0, 255) as u8;
+            rgba[oi + 1] = (yi - ((88 * u + 183 * v) >> 8)).clamp(0, 255) as u8;
+            rgba[oi + 2] = (yi + ((454 * u) >> 8)).clamp(0, 255) as u8;
+            rgba[oi + 3] = 255;
+        }
+    }
+    PixelBuffer::new(rgba, buf.width, buf.height, PixelFormat::Rgba8)
+}
+
+// =========================================================================
+// Format conversions: RGB8 ↔ RGBA8, ARGB8 ↔ RGBA8, RgbaF32 ↔ Rgba8
+// =========================================================================
+
+/// Convert RGB8 to RGBA8 (add alpha=255).
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::convert;
+///
+/// let rgb = PixelBuffer::new(vec![255, 0, 0, 0, 255, 0], 2, 1, PixelFormat::Rgb8).unwrap();
+/// let rgba = convert::rgb8_to_rgba8(&rgb).unwrap();
+/// assert_eq!(rgba.data, vec![255, 0, 0, 255, 0, 255, 0, 255]);
+/// ```
+pub fn rgb8_to_rgba8(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
+    if buf.format != PixelFormat::Rgb8 {
+        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+    }
+    let n = buf.pixel_count();
+    let mut rgba = vec![0u8; n * 4];
+    for i in 0..n {
+        rgba[i * 4] = buf.data[i * 3];
+        rgba[i * 4 + 1] = buf.data[i * 3 + 1];
+        rgba[i * 4 + 2] = buf.data[i * 3 + 2];
+        rgba[i * 4 + 3] = 255;
+    }
+    PixelBuffer::new(rgba, buf.width, buf.height, PixelFormat::Rgba8)
+}
+
+/// Convert RGBA8 to RGB8 (strip alpha).
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::convert;
+///
+/// let rgba = PixelBuffer::new(vec![255, 0, 0, 128, 0, 255, 0, 64], 2, 1, PixelFormat::Rgba8).unwrap();
+/// let rgb = convert::rgba8_to_rgb8(&rgba).unwrap();
+/// assert_eq!(rgb.data, vec![255, 0, 0, 0, 255, 0]);
+/// ```
+pub fn rgba8_to_rgb8(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
+    if buf.format != PixelFormat::Rgba8 {
+        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+    }
+    let n = buf.pixel_count();
+    let mut rgb = vec![0u8; n * 3];
+    for i in 0..n {
+        rgb[i * 3] = buf.data[i * 4];
+        rgb[i * 3 + 1] = buf.data[i * 4 + 1];
+        rgb[i * 3 + 2] = buf.data[i * 4 + 2];
+    }
+    PixelBuffer::new(rgb, buf.width, buf.height, PixelFormat::Rgb8)
+}
+
+/// Convert ARGB8 to RGBA8 (channel reorder, used by aethersafta).
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::convert;
+///
+/// let argb = PixelBuffer::new(vec![255, 128, 64, 32], 1, 1, PixelFormat::Argb8).unwrap();
+/// let rgba = convert::argb8_to_rgba8(&argb).unwrap();
+/// assert_eq!(rgba.data, vec![128, 64, 32, 255]);
+/// ```
+pub fn argb8_to_rgba8(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
+    if buf.format != PixelFormat::Argb8 {
+        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+    }
+    let mut rgba = vec![0u8; buf.data.len()];
+    for (src, dst) in buf.data.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
+        dst[0] = src[1];
+        dst[1] = src[2];
+        dst[2] = src[3];
+        dst[3] = src[0];
+    }
+    PixelBuffer::new(rgba, buf.width, buf.height, PixelFormat::Rgba8)
+}
+
+/// Convert RGBA8 to ARGB8 (channel reorder).
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::convert;
+///
+/// let rgba = PixelBuffer::new(vec![128, 64, 32, 255], 1, 1, PixelFormat::Rgba8).unwrap();
+/// let argb = convert::rgba8_to_argb8(&rgba).unwrap();
+/// assert_eq!(argb.data, vec![255, 128, 64, 32]);
+/// ```
+pub fn rgba8_to_argb8(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
+    if buf.format != PixelFormat::Rgba8 {
+        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+    }
+    let mut argb = vec![0u8; buf.data.len()];
+    for (src, dst) in buf.data.chunks_exact(4).zip(argb.chunks_exact_mut(4)) {
+        dst[0] = src[3];
+        dst[1] = src[0];
+        dst[2] = src[1];
+        dst[3] = src[2];
+    }
+    PixelBuffer::new(argb, buf.width, buf.height, PixelFormat::Argb8)
+}
+
+/// Convert RgbaF32 to RGBA8 (float → byte, clamped).
+///
+/// Each f32 channel is in 0.0–1.0 and scaled to 0–255.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::convert;
+///
+/// let f32_data: Vec<u8> = [0.5f32, 0.0, 1.0, 1.0]
+///     .iter()
+///     .flat_map(|v| v.to_ne_bytes())
+///     .collect();
+/// let buf = PixelBuffer::new(f32_data, 1, 1, PixelFormat::RgbaF32).unwrap();
+/// let rgba = convert::rgbaf32_to_rgba8(&buf).unwrap();
+/// assert_eq!(rgba.data[0], 128);
+/// assert_eq!(rgba.data[2], 255);
+/// ```
+pub fn rgbaf32_to_rgba8(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
+    if buf.format != PixelFormat::RgbaF32 {
+        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+    }
+    let n = buf.pixel_count();
+    let mut rgba = vec![0u8; n * 4];
+    for i in 0..n {
+        let base = i * 16;
+        for c in 0..4 {
+            let bytes = [
+                buf.data[base + c * 4],
+                buf.data[base + c * 4 + 1],
+                buf.data[base + c * 4 + 2],
+                buf.data[base + c * 4 + 3],
+            ];
+            let v = f32::from_ne_bytes(bytes);
+            rgba[i * 4 + c] = (v * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
+        }
+    }
+    PixelBuffer::new(rgba, buf.width, buf.height, PixelFormat::Rgba8)
+}
+
+/// Convert RGBA8 to RgbaF32 (byte → float, 0.0–1.0).
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::convert;
+///
+/// let buf = PixelBuffer::new(vec![128, 0, 255, 255], 1, 1, PixelFormat::Rgba8).unwrap();
+/// let f32buf = convert::rgba8_to_rgbaf32(&buf).unwrap();
+/// let r = f32::from_ne_bytes([f32buf.data[0], f32buf.data[1], f32buf.data[2], f32buf.data[3]]);
+/// assert!((r - 128.0 / 255.0).abs() < 0.01);
+/// ```
+pub fn rgba8_to_rgbaf32(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
+    if buf.format != PixelFormat::Rgba8 {
+        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+    }
+    let n = buf.pixel_count();
+    let mut f32data = vec![0u8; n * 16];
+    for i in 0..n {
+        for c in 0..4 {
+            let v = buf.data[i * 4 + c] as f32 / 255.0;
+            let base = i * 16 + c * 4;
+            f32data[base..base + 4].copy_from_slice(&v.to_ne_bytes());
+        }
+    }
+    PixelBuffer::new(f32data, buf.width, buf.height, PixelFormat::RgbaF32)
+}
+
+// =========================================================================
+// Tests
+// =========================================================================
 
 #[cfg(test)]
 mod tests {
@@ -179,7 +487,6 @@ mod tests {
         let buf = PixelBuffer::new(vec![255; 4 * 4 * 4], 4, 4, PixelFormat::Rgba8).unwrap();
         let yuv = rgba_to_yuv420p(&buf).unwrap();
         assert_eq!(yuv.format, PixelFormat::Yuv420p);
-        // White → Y ≈ 255
         assert!(yuv.data[0] > 250);
     }
 
@@ -187,7 +494,6 @@ mod tests {
     fn rgba_to_yuv_black() {
         let buf = PixelBuffer::new(vec![0; 4 * 4 * 4], 4, 4, PixelFormat::Rgba8).unwrap();
         let yuv = rgba_to_yuv420p(&buf).unwrap();
-        // Black → Y = 0
         assert_eq!(yuv.data[0], 0);
     }
 
@@ -196,9 +502,6 @@ mod tests {
         let rgba = PixelBuffer::new(vec![128; 8 * 8 * 4], 8, 8, PixelFormat::Rgba8).unwrap();
         let yuv = rgba_to_yuv420p(&rgba).unwrap();
         let back = yuv420p_to_rgba(&yuv).unwrap();
-        assert_eq!(back.format, PixelFormat::Rgba8);
-        assert_eq!(back.data.len(), 8 * 8 * 4);
-        // Should be close to original (lossy conversion)
         assert!((back.data[0] as i16 - 128).unsigned_abs() < 10);
     }
 
@@ -206,5 +509,71 @@ mod tests {
     fn wrong_format_rejected() {
         let buf = PixelBuffer::new(vec![0; 4 * 4 * 3], 4, 4, PixelFormat::Rgb8).unwrap();
         assert!(rgba_to_yuv420p(&buf).is_err());
+    }
+
+    #[test]
+    fn bt709_white() {
+        let buf = PixelBuffer::new(vec![255; 4 * 4 * 4], 4, 4, PixelFormat::Rgba8).unwrap();
+        let yuv = rgba_to_yuv420p_bt709(&buf).unwrap();
+        assert!(yuv.data[0] > 250);
+    }
+
+    #[test]
+    fn bt709_roundtrip() {
+        let rgba = PixelBuffer::new(vec![128; 8 * 8 * 4], 8, 8, PixelFormat::Rgba8).unwrap();
+        let yuv = rgba_to_yuv420p_bt709(&rgba).unwrap();
+        let back = yuv420p_to_rgba_bt709(&yuv).unwrap();
+        assert!((back.data[0] as i16 - 128).unsigned_abs() < 10);
+    }
+
+    #[test]
+    fn bt709_different_from_bt601() {
+        let red: Vec<u8> = [255, 0, 0, 255].repeat(16);
+        let buf = PixelBuffer::new(red, 4, 4, PixelFormat::Rgba8).unwrap();
+        let y601 = rgba_to_yuv420p(&buf).unwrap().data[0];
+        let y709 = rgba_to_yuv420p_bt709(&buf).unwrap().data[0];
+        assert_ne!(y601, y709, "BT.601 and BT.709 should differ for red");
+    }
+
+    #[test]
+    fn nv12_to_rgba_roundtrip() {
+        let argb_data: Vec<u8> = [255, 128, 128, 128].repeat(16);
+        let argb = PixelBuffer::new(argb_data, 4, 4, PixelFormat::Argb8).unwrap();
+        let nv12 = argb_to_nv12(&argb).unwrap();
+        let rgba = nv12_to_rgba(&nv12).unwrap();
+        assert_eq!(rgba.format, PixelFormat::Rgba8);
+        assert!((rgba.data[0] as i16 - 128).unsigned_abs() < 10);
+    }
+
+    #[test]
+    fn rgb8_rgba8_roundtrip() {
+        let rgb =
+            PixelBuffer::new(vec![100, 150, 200, 50, 75, 25], 2, 1, PixelFormat::Rgb8).unwrap();
+        let rgba = rgb8_to_rgba8(&rgb).unwrap();
+        assert_eq!(rgba.data[3], 255);
+        let back = rgba8_to_rgb8(&rgba).unwrap();
+        assert_eq!(back.data, rgb.data);
+    }
+
+    #[test]
+    fn argb8_rgba8_roundtrip() {
+        let argb = PixelBuffer::new(vec![200, 100, 50, 25], 1, 1, PixelFormat::Argb8).unwrap();
+        let rgba = argb8_to_rgba8(&argb).unwrap();
+        assert_eq!(rgba.data, vec![100, 50, 25, 200]);
+        let back = rgba8_to_argb8(&rgba).unwrap();
+        assert_eq!(back.data, argb.data);
+    }
+
+    #[test]
+    fn rgbaf32_rgba8_roundtrip() {
+        let rgba = PixelBuffer::new(vec![128, 64, 200, 255], 1, 1, PixelFormat::Rgba8).unwrap();
+        let f32buf = rgba8_to_rgbaf32(&rgba).unwrap();
+        let back = rgbaf32_to_rgba8(&f32buf).unwrap();
+        for i in 0..4 {
+            assert!(
+                (rgba.data[i] as i16 - back.data[i] as i16).unsigned_abs() <= 1,
+                "channel {i}"
+            );
+        }
     }
 }

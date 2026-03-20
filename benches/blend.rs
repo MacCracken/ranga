@@ -22,5 +22,18 @@ fn bench_blend_row(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_blend_pixel, bench_blend_row);
+fn bench_blend_row_1080p(c: &mut Criterion) {
+    let src = vec![128u8; 1920 * 4];
+    let mut dst = vec![64u8; 1920 * 4];
+    c.bench_function("blend_row_1080p_width", |b| {
+        b.iter(|| blend_row_normal(black_box(&src), black_box(&mut dst), 200))
+    });
+}
+
+criterion_group!(
+    benches,
+    bench_blend_pixel,
+    bench_blend_row,
+    bench_blend_row_1080p
+);
 criterion_main!(benches);
