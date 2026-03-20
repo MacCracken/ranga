@@ -4,20 +4,7 @@
 
 ---
 
-## v0.20.3 — Foundation (current)
-
-- [x] Color types: LinRgba, Srgba, Hsl, ColorSpace
-- [x] sRGB ↔ linear gamma conversion
-- [x] PixelBuffer with 6 format types
-- [x] 12 blend modes (Porter-Duff + Photoshop-style)
-- [x] BT.601 fixed-point color conversion (RGBA↔YUV420p, ARGB→NV12)
-- [x] CPU filters: brightness, contrast, saturation, levels, curves, grayscale, invert
-- [x] Luminance + RGB histograms, chi-squared distance
-- [x] 40+ unit tests
-
----
-
-## v0.21.3 — Color Science & SIMD
+## v0.20.3 — Foundation + Color Science & SIMD (current)
 
 ### Color science
 - [ ] BT.709 conversion (HD video standard)
@@ -41,7 +28,7 @@
 
 ---
 
-## v0.22.3 — Advanced Filters & GPU
+## v0.21.3 — Advanced Filters & GPU
 
 ### Filters
 - [ ] Gaussian blur (separable kernel, configurable radius)
@@ -62,7 +49,7 @@
 
 ---
 
-## v0.23.3 — Integration & Performance
+## v0.22.3 — Integration & Performance
 
 ### Consumer integration
 - [ ] rasa adopts ranga (replace rasa-core color math + rasa-engine filters)
@@ -76,10 +63,8 @@
 - [ ] Cache-aware tiling for large images
 
 ### Quality
-- [ ] Property-based tests (proptest: random dims, formats, values)
-- [ ] Fuzz targets (convert, blend, filter)
 - [ ] 85%+ code coverage
-- [ ] cargo-semver-checks in CI
+- [ ] Benchmark regression tracking in CI
 
 ---
 

@@ -1,10 +1,31 @@
 //! Blend modes — Porter-Duff and Photoshop-style compositing.
 //!
 //! 12 blend modes with optional SIMD acceleration.
+//!
+//! # Examples
+//!
+//! ```
+//! use ranga::blend::{BlendMode, blend_pixel};
+//!
+//! let result = blend_pixel([255, 0, 0, 255], [0, 0, 255, 255], BlendMode::Normal, 255);
+//! assert!(result[0] > 200); // mostly red
+//! ```
 
 use serde::{Deserialize, Serialize};
 
 /// Supported blend modes.
+///
+/// Implements standard Photoshop-style compositing modes. All modes operate
+/// on sRGB byte values (0–255) with premultiplied alpha.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::blend::BlendMode;
+///
+/// let mode = BlendMode::Multiply;
+/// assert_ne!(mode, BlendMode::Screen);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BlendMode {
     Normal,
@@ -24,7 +45,27 @@ pub enum BlendMode {
 /// Blend a source pixel over a destination pixel using the given mode and opacity.
 ///
 /// All values are 0–255 (sRGB byte space). Alpha is premultiplied in the blend.
+/// Returns the composited pixel as `[R, G, B, A]`.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::blend::{BlendMode, blend_pixel};
+///
+/// // Opaque red over opaque blue → mostly red
+/// let result = blend_pixel([255, 0, 0, 255], [0, 0, 255, 255], BlendMode::Normal, 255);
+/// assert!(result[0] > 200);
+///
+/// // Transparent source leaves destination unchanged
+/// let result = blend_pixel([255, 0, 0, 0], [0, 0, 255, 255], BlendMode::Normal, 255);
+/// assert_eq!(result, [0, 0, 255, 255]);
+///
+/// // Multiply darkens
+/// let result = blend_pixel([128, 128, 128, 255], [200, 200, 200, 255], BlendMode::Multiply, 255);
+/// assert!(result[0] < 200);
+/// ```
 #[inline]
+#[must_use]
 pub fn blend_pixel(src: [u8; 4], dst: [u8; 4], mode: BlendMode, opacity: u8) -> [u8; 4] {
     let sa = ((src[3] as u16 * opacity as u16) >> 8) as u8;
     if sa == 0 {
@@ -48,10 +89,18 @@ pub fn blend_pixel(src: [u8; 4], dst: [u8; 4], mode: BlendMode, opacity: u8) -> 
             BlendMode::Darken => s.min(d),
             BlendMode::Lighten => s.max(d),
             BlendMode::ColorDodge => {
-                if s >= 1.0 { 1.0 } else { (d / (1.0 - s)).min(1.0) }
+                if s >= 1.0 {
+                    1.0
+                } else {
+                    (d / (1.0 - s)).min(1.0)
+                }
             }
             BlendMode::ColorBurn => {
-                if s <= 0.0 { 0.0 } else { 1.0 - ((1.0 - d) / s).min(1.0) }
+                if s <= 0.0 {
+                    0.0
+                } else {
+                    1.0 - ((1.0 - d) / s).min(1.0)
+                }
             }
             BlendMode::SoftLight => {
                 if s <= 0.5 {
@@ -96,7 +145,19 @@ pub fn blend_pixel(src: [u8; 4], dst: [u8; 4], mode: BlendMode, opacity: u8) -> 
 
 /// Blend an entire source row over a destination row (RGBA8, Normal mode).
 ///
+/// Both slices must have equal length and be a multiple of 4 bytes.
 /// When the `simd` feature is enabled, uses SSE2 on x86_64 for ~4x throughput.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::blend::blend_row_normal;
+///
+/// let src = vec![255, 0, 0, 255, 0, 255, 0, 255]; // red, green
+/// let mut dst = vec![0, 0, 255, 255, 0, 0, 255, 255]; // blue, blue
+/// blend_row_normal(&src, &mut dst, 128);
+/// assert_eq!(dst.len(), 8);
+/// ```
 pub fn blend_row_normal(src: &[u8], dst: &mut [u8], opacity: u8) {
     debug_assert_eq!(src.len(), dst.len());
     debug_assert_eq!(src.len() % 4, 0);
@@ -168,10 +229,18 @@ mod tests {
     #[test]
     fn all_modes_dont_panic() {
         let modes = [
-            BlendMode::Normal, BlendMode::Multiply, BlendMode::Screen,
-            BlendMode::Overlay, BlendMode::Darken, BlendMode::Lighten,
-            BlendMode::ColorDodge, BlendMode::ColorBurn, BlendMode::SoftLight,
-            BlendMode::HardLight, BlendMode::Difference, BlendMode::Exclusion,
+            BlendMode::Normal,
+            BlendMode::Multiply,
+            BlendMode::Screen,
+            BlendMode::Overlay,
+            BlendMode::Darken,
+            BlendMode::Lighten,
+            BlendMode::ColorDodge,
+            BlendMode::ColorBurn,
+            BlendMode::SoftLight,
+            BlendMode::HardLight,
+            BlendMode::Difference,
+            BlendMode::Exclusion,
         ];
         for mode in modes {
             let _ = blend_pixel([128, 64, 200, 200], [50, 100, 150, 255], mode, 180);

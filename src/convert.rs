@@ -3,10 +3,25 @@
 //! Uses fixed-point BT.601 coefficients for integer-only fast paths
 //! and floating-point BT.709 for HDR/linear workflows.
 
-use crate::pixel::{PixelBuffer, PixelFormat};
 use crate::RangaError;
+use crate::pixel::{PixelBuffer, PixelFormat};
 
 /// Convert RGBA8 buffer to YUV420p.
+///
+/// Uses BT.601 fixed-point coefficients. The chroma planes (U, V) are
+/// subsampled 2x2 from the top-left pixel of each block.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::convert;
+///
+/// let rgba = PixelBuffer::new(vec![255; 4 * 4 * 4], 4, 4, PixelFormat::Rgba8).unwrap();
+/// let yuv = convert::rgba_to_yuv420p(&rgba).unwrap();
+/// assert_eq!(yuv.format, PixelFormat::Yuv420p);
+/// assert!(yuv.data[0] > 250); // white → Y ≈ 255
+/// ```
 pub fn rgba_to_yuv420p(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
     if buf.format != PixelFormat::Rgba8 {
         return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
@@ -51,6 +66,23 @@ pub fn rgba_to_yuv420p(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
 }
 
 /// Convert YUV420p buffer to RGBA8.
+///
+/// Uses BT.601 inverse coefficients with fixed-point arithmetic.
+/// Alpha is set to 255 (fully opaque) for all pixels.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::convert;
+///
+/// let rgba = PixelBuffer::new(vec![128; 8 * 8 * 4], 8, 8, PixelFormat::Rgba8).unwrap();
+/// let yuv = convert::rgba_to_yuv420p(&rgba).unwrap();
+/// let back = convert::yuv420p_to_rgba(&yuv).unwrap();
+/// assert_eq!(back.format, PixelFormat::Rgba8);
+/// // Lossy roundtrip — within ~10 levels
+/// assert!((back.data[0] as i16 - 128).unsigned_abs() < 10);
+/// ```
 pub fn yuv420p_to_rgba(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
     if buf.format != PixelFormat::Yuv420p {
         return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
@@ -86,6 +118,19 @@ pub fn yuv420p_to_rgba(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
 }
 
 /// Convert ARGB8 buffer to NV12 (semi-planar YUV 4:2:0).
+///
+/// Uses BT.601 coefficients. The UV plane is interleaved (U, V, U, V, ...).
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::convert;
+///
+/// let argb = PixelBuffer::new(vec![255; 4 * 4 * 4], 4, 4, PixelFormat::Argb8).unwrap();
+/// let nv12 = convert::argb_to_nv12(&argb).unwrap();
+/// assert_eq!(nv12.format, PixelFormat::Nv12);
+/// ```
 pub fn argb_to_nv12(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
     if buf.format != PixelFormat::Argb8 {
         return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));

@@ -1,0 +1,11 @@
+# cargo-vet audit records for ranga
+# Run `cargo vet` to verify supply chain integrity.
+
+# Local audit records go here. Dependencies that have not been audited
+# by a trusted source should be exempted below until they can be reviewed.
+
+[criteria.safe-to-deploy]
+description = "This crate can be compiled, deployed, and run in production."
+
+[criteria.safe-to-run]
+description = "This crate can be compiled and run in tests and development."

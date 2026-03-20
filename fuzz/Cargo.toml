@@ -1,0 +1,31 @@
+[package]
+name = "ranga-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ranga = { path = ".." }
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "fuzz_blend"
+path = "fuzz_targets/fuzz_blend.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_convert"
+path = "fuzz_targets/fuzz_convert.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_filter"
+path = "fuzz_targets/fuzz_filter.rs"
+doc = false

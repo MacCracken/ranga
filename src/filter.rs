@@ -1,10 +1,26 @@
 //! CPU image filters — brightness, contrast, saturation, levels, curves.
+//!
+//! All filters operate on RGBA8 pixel buffers in-place. Pass a mutable
+//! reference to a [`PixelBuffer`] and the filter modifies RGB channels
+//! while preserving alpha.
 
-use crate::pixel::{PixelBuffer, PixelFormat};
 use crate::RangaError;
+use crate::pixel::{PixelBuffer, PixelFormat};
 
 /// Adjust brightness of an RGBA8 buffer in-place.
+///
 /// `offset` is in -1.0 to 1.0 range (maps to -255 to +255).
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::filter;
+///
+/// let mut buf = PixelBuffer::new(vec![100, 100, 100, 255], 1, 1, PixelFormat::Rgba8).unwrap();
+/// filter::brightness(&mut buf, 0.5).unwrap();
+/// assert!(buf.data[0] > 200);
+/// ```
 pub fn brightness(buf: &mut PixelBuffer, offset: f32) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
         return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
@@ -19,7 +35,21 @@ pub fn brightness(buf: &mut PixelBuffer, offset: f32) -> Result<(), RangaError> 
 }
 
 /// Adjust contrast of an RGBA8 buffer in-place.
+///
 /// `factor` of 1.0 is unchanged; >1.0 increases, <1.0 decreases.
+/// Contrast is centered around 128.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::filter;
+///
+/// let mut buf = PixelBuffer::new(vec![128, 128, 128, 255], 1, 1, PixelFormat::Rgba8).unwrap();
+/// filter::contrast(&mut buf, 2.0).unwrap();
+/// // 128 is the center point, so it stays at 128
+/// assert_eq!(buf.data[0], 128);
+/// ```
 pub fn contrast(buf: &mut PixelBuffer, factor: f32) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
         return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
@@ -33,7 +63,22 @@ pub fn contrast(buf: &mut PixelBuffer, factor: f32) -> Result<(), RangaError> {
 }
 
 /// Adjust saturation of an RGBA8 buffer in-place.
+///
 /// `factor` of 1.0 is unchanged; 0.0 is grayscale; >1.0 increases saturation.
+/// Uses BT.601 luminance coefficients.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::filter;
+///
+/// let mut buf = PixelBuffer::new(vec![255, 0, 0, 255], 1, 1, PixelFormat::Rgba8).unwrap();
+/// filter::saturation(&mut buf, 0.0).unwrap();
+/// // At zero saturation, all channels equal (grayscale)
+/// assert_eq!(buf.data[0], buf.data[1]);
+/// assert_eq!(buf.data[1], buf.data[2]);
+/// ```
 pub fn saturation(buf: &mut PixelBuffer, factor: f32) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
         return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
@@ -51,13 +96,23 @@ pub fn saturation(buf: &mut PixelBuffer, factor: f32) -> Result<(), RangaError> 
 }
 
 /// Apply levels adjustment (black point, white point, gamma).
-/// All values in 0.0–1.0 range. Gamma of 1.0 is linear.
-pub fn levels(
-    buf: &mut PixelBuffer,
-    black: f32,
-    white: f32,
-    gamma: f32,
-) -> Result<(), RangaError> {
+///
+/// All values in 0.0–1.0 range. Gamma of 1.0 is linear. Uses a pre-computed
+/// lookup table for performance.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::filter;
+///
+/// let mut buf = PixelBuffer::new(vec![128, 128, 128, 255], 1, 1, PixelFormat::Rgba8).unwrap();
+/// // Identity transform: black=0, white=1, gamma=1
+/// let original = buf.data.clone();
+/// filter::levels(&mut buf, 0.0, 1.0, 1.0).unwrap();
+/// assert_eq!(buf.data, original);
+/// ```
+pub fn levels(buf: &mut PixelBuffer, black: f32, white: f32, gamma: f32) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
         return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
     }
@@ -79,6 +134,25 @@ pub fn levels(
 }
 
 /// Apply a curves adjustment using a 256-entry lookup table.
+///
+/// Each input byte value is mapped through `lut` to produce the output.
+/// An identity LUT (`lut[i] = i`) leaves the image unchanged.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::filter;
+///
+/// // Invert via curves
+/// let mut lut = [0u8; 256];
+/// for i in 0..256 {
+///     lut[i] = (255 - i) as u8;
+/// }
+/// let mut buf = PixelBuffer::new(vec![100, 150, 200, 255], 1, 1, PixelFormat::Rgba8).unwrap();
+/// filter::curves(&mut buf, &lut).unwrap();
+/// assert_eq!(buf.data[0], 155);
+/// ```
 pub fn curves(buf: &mut PixelBuffer, lut: &[u8; 256]) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
         return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
@@ -92,12 +166,28 @@ pub fn curves(buf: &mut PixelBuffer, lut: &[u8; 256]) -> Result<(), RangaError> 
 }
 
 /// Convert an RGBA8 buffer to grayscale in-place (BT.601 luminance).
+///
+/// Sets R, G, B channels to the luminance value while preserving alpha.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::filter;
+///
+/// let mut buf = PixelBuffer::new(vec![200, 100, 50, 255], 1, 1, PixelFormat::Rgba8).unwrap();
+/// filter::grayscale(&mut buf).unwrap();
+/// assert_eq!(buf.data[0], buf.data[1]); // all channels equal
+/// assert_eq!(buf.data[1], buf.data[2]);
+/// assert_eq!(buf.data[3], 255); // alpha preserved
+/// ```
 pub fn grayscale(buf: &mut PixelBuffer) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
         return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
     }
     for pixel in buf.data.chunks_exact_mut(4) {
-        let gray = ((77 * pixel[0] as u16 + 150 * pixel[1] as u16 + 29 * pixel[2] as u16) >> 8) as u8;
+        let gray =
+            ((77 * pixel[0] as u16 + 150 * pixel[1] as u16 + 29 * pixel[2] as u16) >> 8) as u8;
         pixel[0] = gray;
         pixel[1] = gray;
         pixel[2] = gray;
@@ -106,6 +196,22 @@ pub fn grayscale(buf: &mut PixelBuffer) -> Result<(), RangaError> {
 }
 
 /// Invert all color channels in-place.
+///
+/// Each RGB channel is replaced with `255 - value`. Alpha is preserved.
+/// Applying invert twice restores the original image.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::filter;
+///
+/// let mut buf = PixelBuffer::new(vec![100, 150, 200, 255], 1, 1, PixelFormat::Rgba8).unwrap();
+/// filter::invert(&mut buf).unwrap();
+/// assert_eq!(buf.data[0], 155);
+/// assert_eq!(buf.data[1], 105);
+/// assert_eq!(buf.data[2], 55);
+/// ```
 pub fn invert(buf: &mut PixelBuffer) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
         return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
@@ -152,8 +258,11 @@ mod tests {
     fn saturation_zero_is_gray() {
         let mut buf = PixelBuffer::new(
             vec![255, 0, 0, 255, 0, 255, 0, 255],
-            2, 1, PixelFormat::Rgba8,
-        ).unwrap();
+            2,
+            1,
+            PixelFormat::Rgba8,
+        )
+        .unwrap();
         saturation(&mut buf, 0.0).unwrap();
         // All channels should be equal (gray)
         assert_eq!(buf.data[0], buf.data[1]);
@@ -162,10 +271,7 @@ mod tests {
 
     #[test]
     fn grayscale_makes_uniform() {
-        let mut buf = PixelBuffer::new(
-            vec![200, 100, 50, 255],
-            1, 1, PixelFormat::Rgba8,
-        ).unwrap();
+        let mut buf = PixelBuffer::new(vec![200, 100, 50, 255], 1, 1, PixelFormat::Rgba8).unwrap();
         grayscale(&mut buf).unwrap();
         assert_eq!(buf.data[0], buf.data[1]);
         assert_eq!(buf.data[1], buf.data[2]);

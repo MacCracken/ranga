@@ -1,10 +1,27 @@
 //! Histogram computation for luminance and color channels.
+//!
+//! Provides normalized histogram computation and comparison for RGBA8 buffers.
 
-use crate::pixel::{PixelBuffer, PixelFormat};
 use crate::RangaError;
+use crate::pixel::{PixelBuffer, PixelFormat};
 
 /// Compute a luminance histogram from an RGBA8 buffer.
+///
 /// Returns `bins` normalized values summing to approximately 1.0.
+/// Uses BT.601 luminance coefficients.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::histogram;
+///
+/// let buf = PixelBuffer::new(vec![128; 8 * 8 * 4], 8, 8, PixelFormat::Rgba8).unwrap();
+/// let hist = histogram::luminance_histogram(&buf, 256).unwrap();
+/// assert_eq!(hist.len(), 256);
+/// let sum: f64 = hist.iter().sum();
+/// assert!((sum - 1.0).abs() < 1e-6);
+/// ```
 pub fn luminance_histogram(buf: &PixelBuffer, bins: usize) -> Result<Vec<f64>, RangaError> {
     if buf.format != PixelFormat::Rgba8 {
         return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
@@ -26,7 +43,21 @@ pub fn luminance_histogram(buf: &PixelBuffer, bins: usize) -> Result<Vec<f64>, R
 }
 
 /// Compute per-channel (R, G, B) histograms from an RGBA8 buffer.
-/// Returns 3 histograms of 256 entries each, normalized.
+///
+/// Returns 3 histograms of 256 entries each, normalized to sum to 1.0.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::histogram;
+///
+/// let buf = PixelBuffer::new(vec![128; 4 * 4 * 4], 4, 4, PixelFormat::Rgba8).unwrap();
+/// let [r, g, b] = histogram::rgb_histograms(&buf).unwrap();
+/// assert_eq!(r.len(), 256);
+/// // All pixels are 128, so bin 128 should be 1.0
+/// assert!((r[128] - 1.0).abs() < 1e-6);
+/// ```
 pub fn rgb_histograms(buf: &PixelBuffer) -> Result<[Vec<f64>; 3], RangaError> {
     if buf.format != PixelFormat::Rgba8 {
         return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
@@ -53,6 +84,24 @@ pub fn rgb_histograms(buf: &PixelBuffer) -> Result<[Vec<f64>; 3], RangaError> {
 }
 
 /// Chi-squared distance between two histograms.
+///
+/// Returns 0.0 for identical distributions and positive values for
+/// different distributions. Both slices should have equal length.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::histogram::chi_squared;
+///
+/// let a = vec![0.25, 0.25, 0.25, 0.25];
+/// let b = vec![0.25, 0.25, 0.25, 0.25];
+/// assert!(chi_squared(&a, &b).abs() < 1e-10);
+///
+/// let c = vec![1.0, 0.0, 0.0, 0.0];
+/// let d = vec![0.0, 0.0, 0.0, 1.0];
+/// assert!(chi_squared(&c, &d) > 0.0);
+/// ```
+#[must_use]
 pub fn chi_squared(a: &[f64], b: &[f64]) -> f64 {
     a.iter()
         .zip(b.iter())

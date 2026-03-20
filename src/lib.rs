@@ -17,6 +17,16 @@
 //!
 //! - `simd` (default) — SSE2/AVX2/NEON SIMD acceleration for blend and convert
 //! - `gpu` — wgpu-based GPU compute pipelines for filters and compositing
+//!
+//! ## Example
+//!
+//! ```
+//! use ranga::pixel::{PixelBuffer, PixelFormat};
+//! use ranga::filter;
+//!
+//! let mut buf = PixelBuffer::zeroed(4, 4, PixelFormat::Rgba8);
+//! filter::brightness(&mut buf, 0.5).unwrap();
+//! ```
 
 pub mod blend;
 pub mod color;

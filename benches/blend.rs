@@ -1,5 +1,5 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use ranga::blend::{blend_pixel, blend_row_normal, BlendMode};
+use ranga::blend::{BlendMode, blend_pixel, blend_row_normal};
 
 fn bench_blend_pixel(c: &mut Criterion) {
     c.bench_function("blend_pixel_normal", |b| {
