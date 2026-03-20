@@ -17,6 +17,7 @@
 //!
 //! - `simd` (default) — SSE2/AVX2/NEON SIMD acceleration for blend and convert
 //! - `gpu` — wgpu-based GPU compute pipelines for filters and compositing
+//! - `hwaccel` — hardware accelerator detection via ai-hwaccel
 //!
 //! ## Example
 //!
@@ -33,6 +34,8 @@ pub mod color;
 pub mod convert;
 pub mod filter;
 pub mod histogram;
+#[cfg(feature = "hwaccel")]
+pub mod hwaccel;
 pub mod icc;
 pub mod pixel;
 
