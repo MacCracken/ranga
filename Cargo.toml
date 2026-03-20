@@ -1,0 +1,37 @@
+[package]
+name = "ranga"
+version = "0.20.3"
+edition = "2024"
+rust-version = "1.89"
+license = "AGPL-3.0-only"
+description = "Core image processing library — color spaces, blend modes, pixel buffers, filters, and GPU compute for Rust"
+homepage = "https://github.com/MacCracken/ranga"
+repository = "https://github.com/MacCracken/ranga"
+readme = "README.md"
+keywords = ["image", "color", "blend", "filter", "gpu"]
+categories = ["graphics", "multimedia::images"]
+
+[features]
+default = ["simd"]
+simd = []
+gpu = ["dep:wgpu"]
+full = ["simd", "gpu"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+wgpu = { version = "24", optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1"
+
+[[bench]]
+name = "color_convert"
+harness = false
+
+[[bench]]
+name = "blend"
+harness = false
