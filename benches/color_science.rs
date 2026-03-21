@@ -87,6 +87,37 @@ fn bench_hsl_roundtrip(c: &mut Criterion) {
     });
 }
 
+fn bench_icc_apply(c: &mut Criterion) {
+    // Build a minimal test profile in memory (gamma 2.2, sRGB matrix)
+    // Using raw bytes is verbose, so we benchmark ToneCurve::apply directly
+    let tc = ranga::icc::ToneCurve::Gamma(2.2);
+    c.bench_function("icc_tone_curve_apply", |b| {
+        b.iter(|| tc.apply(black_box(0.5)))
+    });
+}
+
+fn bench_buffer_pool(c: &mut Criterion) {
+    use ranga::pixel::BufferPool;
+    c.bench_function("buffer_pool_acquire_release", |b| {
+        let mut pool = BufferPool::new(4);
+        b.iter(|| {
+            let buf = pool.acquire(1920 * 1080 * 4);
+            pool.release(buf);
+        })
+    });
+}
+
+fn bench_pixel_view(c: &mut Criterion) {
+    use ranga::pixel::{PixelBuffer, PixelFormat, PixelView};
+    let buf = PixelBuffer::zeroed(1920, 1080, PixelFormat::Rgba8);
+    c.bench_function("pixel_view_create", |b| {
+        b.iter(|| {
+            let view = PixelView::new(black_box(&buf.data), 1920, 1080, PixelFormat::Rgba8);
+            let _ = view;
+        })
+    });
+}
+
 criterion_group!(
     benches,
     bench_srgb_to_lab,
@@ -96,5 +127,8 @@ criterion_group!(
     bench_cmyk_roundtrip,
     bench_color_temperature,
     bench_hsl_roundtrip,
+    bench_icc_apply,
+    bench_buffer_pool,
+    bench_pixel_view,
 );
 criterion_main!(benches);

@@ -90,11 +90,51 @@ fn bench_gpu_vs_cpu_brightness(c: &mut Criterion) {
     });
 }
 
+fn bench_gpu_vs_cpu_saturation(c: &mut Criterion) {
+    let ctx = match get_ctx() {
+        Some(ctx) => ctx,
+        None => return,
+    };
+
+    let data = vec![128u8; 1920 * 1080 * 4];
+
+    c.bench_function("gpu_saturation_1080p", |b| {
+        let mut buf = PixelBuffer::new(data.clone(), 1920, 1080, PixelFormat::Rgba8).unwrap();
+        b.iter(|| gpu::gpu_saturation(&ctx, black_box(&mut buf), 1.5).unwrap())
+    });
+
+    c.bench_function("cpu_saturation_1080p", |b| {
+        let mut buf = PixelBuffer::new(data.clone(), 1920, 1080, PixelFormat::Rgba8).unwrap();
+        b.iter(|| filter::saturation(black_box(&mut buf), 1.5).unwrap())
+    });
+}
+
+fn bench_gpu_vs_cpu_blur(c: &mut Criterion) {
+    let ctx = match get_ctx() {
+        Some(ctx) => ctx,
+        None => return,
+    };
+
+    let data: Vec<u8> = (0..1920 * 1080 * 4).map(|i| (i % 256) as u8).collect();
+
+    c.bench_function("gpu_gaussian_blur_r3_1080p", |b| {
+        let buf = PixelBuffer::new(data.clone(), 1920, 1080, PixelFormat::Rgba8).unwrap();
+        b.iter(|| gpu::gpu_gaussian_blur(&ctx, black_box(&buf), 3).unwrap())
+    });
+
+    c.bench_function("cpu_gaussian_blur_r3_1080p", |b| {
+        let buf = PixelBuffer::new(data.clone(), 1920, 1080, PixelFormat::Rgba8).unwrap();
+        b.iter(|| ranga::filter::gaussian_blur(black_box(&buf), 3).unwrap())
+    });
+}
+
 criterion_group!(
     benches,
     bench_gpu_vs_cpu_blend,
     bench_gpu_vs_cpu_invert,
     bench_gpu_vs_cpu_grayscale,
     bench_gpu_vs_cpu_brightness,
+    bench_gpu_vs_cpu_saturation,
+    bench_gpu_vs_cpu_blur,
 );
 criterion_main!(benches);

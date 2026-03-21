@@ -6,6 +6,11 @@ fn make_buf() -> PixelBuffer {
     PixelBuffer::new(vec![128; 1920 * 1080 * 4], 1920, 1080, PixelFormat::Rgba8).unwrap()
 }
 
+fn make_varied_buf() -> PixelBuffer {
+    let data: Vec<u8> = (0..1920 * 1080 * 4).map(|i| (i % 256) as u8).collect();
+    PixelBuffer::new(data, 1920, 1080, PixelFormat::Rgba8).unwrap()
+}
+
 fn bench_brightness(c: &mut Criterion) {
     let mut buf = make_buf();
     c.bench_function("brightness_1080p", |b| {
@@ -59,6 +64,91 @@ fn bench_curves(c: &mut Criterion) {
     });
 }
 
+fn bench_gaussian_blur(c: &mut Criterion) {
+    let buf = make_varied_buf();
+    c.bench_function("gaussian_blur_r3_1080p", |b| {
+        b.iter(|| filter::gaussian_blur(black_box(&buf), 3).unwrap())
+    });
+}
+
+fn bench_box_blur(c: &mut Criterion) {
+    let buf = make_varied_buf();
+    c.bench_function("box_blur_r3_1080p", |b| {
+        b.iter(|| filter::box_blur(black_box(&buf), 3).unwrap())
+    });
+}
+
+fn bench_unsharp_mask(c: &mut Criterion) {
+    let buf = make_varied_buf();
+    c.bench_function("unsharp_mask_r2_1080p", |b| {
+        b.iter(|| filter::unsharp_mask(black_box(&buf), 2, 1.0).unwrap())
+    });
+}
+
+fn bench_hue_shift(c: &mut Criterion) {
+    let mut buf = make_varied_buf();
+    c.bench_function("hue_shift_1080p", |b| {
+        b.iter(|| filter::hue_shift(black_box(&mut buf), 30.0).unwrap())
+    });
+}
+
+fn bench_color_balance(c: &mut Criterion) {
+    let mut buf = make_varied_buf();
+    c.bench_function("color_balance_1080p", |b| {
+        b.iter(|| {
+            filter::color_balance(
+                black_box(&mut buf),
+                [0.0, 0.0, 0.05],
+                [0.05, 0.0, -0.05],
+                [0.0, 0.0, 0.0],
+            )
+            .unwrap()
+        })
+    });
+}
+
+fn bench_vignette(c: &mut Criterion) {
+    let mut buf = make_buf();
+    c.bench_function("vignette_1080p", |b| {
+        b.iter(|| filter::vignette(black_box(&mut buf), 0.5).unwrap())
+    });
+}
+
+fn bench_lut3d(c: &mut Criterion) {
+    // Build a 17x17x17 identity LUT (standard size)
+    let size = 17;
+    let mut cube = format!("LUT_3D_SIZE {size}\n");
+    for b in 0..size {
+        for g in 0..size {
+            for r in 0..size {
+                let rf = r as f32 / (size - 1) as f32;
+                let gf = g as f32 / (size - 1) as f32;
+                let bf = b as f32 / (size - 1) as f32;
+                cube.push_str(&format!("{rf} {gf} {bf}\n"));
+            }
+        }
+    }
+    let lut = filter::Lut3d::from_cube(&cube).unwrap();
+    let mut buf = make_varied_buf();
+    c.bench_function("lut3d_17cube_1080p", |b| {
+        b.iter(|| filter::apply_lut3d(black_box(&mut buf), &lut).unwrap())
+    });
+}
+
+fn bench_noise_gaussian(c: &mut Criterion) {
+    let mut buf = make_buf();
+    c.bench_function("noise_gaussian_1080p", |b| {
+        b.iter(|| filter::noise_gaussian(black_box(&mut buf), 0.1, 42).unwrap())
+    });
+}
+
+fn bench_noise_salt_pepper(c: &mut Criterion) {
+    let mut buf = make_buf();
+    c.bench_function("noise_salt_pepper_1080p", |b| {
+        b.iter(|| filter::noise_salt_pepper(black_box(&mut buf), 0.05, 42).unwrap())
+    });
+}
+
 criterion_group!(
     benches,
     bench_brightness,
@@ -68,5 +158,14 @@ criterion_group!(
     bench_invert,
     bench_levels,
     bench_curves,
+    bench_gaussian_blur,
+    bench_box_blur,
+    bench_unsharp_mask,
+    bench_hue_shift,
+    bench_color_balance,
+    bench_vignette,
+    bench_lut3d,
+    bench_noise_gaussian,
+    bench_noise_salt_pepper,
 );
 criterion_main!(benches);
