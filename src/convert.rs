@@ -64,8 +64,9 @@ pub fn rgba_to_yuv420p(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
     }
     let u_off = w * h;
     let v_off = u_off + cw * ch;
-    for y in (0..h).step_by(2) {
-        for x in (0..w).step_by(2) {
+    // Chroma loops must stay within cw*ch bounds — clamp to even pixel pairs
+    for y in (0..ch * 2).step_by(2) {
+        for x in (0..cw * 2).step_by(2) {
             let i = (y * w + x) * 4;
             let r = buf.data[i] as i32;
             let g = buf.data[i + 1] as i32;
@@ -102,12 +103,15 @@ pub fn yuv420p_to_rgba(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
     let cw = w / 2;
     let u_off = w * h;
     let v_off = u_off + cw * (h / 2);
+    let ch = h / 2;
     let mut rgba = vec![0u8; w * h * 4];
     for y in 0..h {
+        let cy = (y / 2).min(ch.saturating_sub(1));
         for x in 0..w {
+            let cx = (x / 2).min(cw.saturating_sub(1));
             let yi = buf.data[y * w + x] as i16;
-            let u = buf.data[u_off + (y / 2) * cw + (x / 2)] as i16 - 128;
-            let v = buf.data[v_off + (y / 2) * cw + (x / 2)] as i16 - 128;
+            let u = buf.data[u_off + cy * cw + cx] as i16 - 128;
+            let v = buf.data[v_off + cy * cw + cx] as i16 - 128;
             let oi = (y * w + x) * 4;
             rgba[oi] = (yi + ((359 * v) >> 8)).clamp(0, 255) as u8;
             rgba[oi + 1] = (yi - ((88 * u + 183 * v) >> 8)).clamp(0, 255) as u8;
@@ -147,13 +151,15 @@ pub fn argb_to_nv12(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
         }
     }
     let uv_off = w * h;
-    for y in (0..h).step_by(2) {
-        for x in (0..w).step_by(2) {
+    let nv12_cw = w / 2;
+    let nv12_ch = h / 2;
+    for y in (0..nv12_ch * 2).step_by(2) {
+        for x in (0..nv12_cw * 2).step_by(2) {
             let i = (y * w + x) * 4;
             let r = buf.data[i + 1] as i32;
             let g = buf.data[i + 2] as i32;
             let b = buf.data[i + 3] as i32;
-            let ci = (y / 2) * w + x;
+            let ci = (y / 2) * nv12_cw * 2 + x;
             nv12[uv_off + ci] = ((-43 * r - 85 * g + 128 * b + 128 * 256) >> 8).clamp(0, 255) as u8;
             nv12[uv_off + ci + 1] =
                 ((128 * r - 107 * g - 21 * b + 128 * 256) >> 8).clamp(0, 255) as u8;
@@ -200,8 +206,8 @@ pub fn rgba_to_yuv420p_bt709(buf: &PixelBuffer) -> Result<PixelBuffer, RangaErro
     }
     let u_off = w * h;
     let v_off = u_off + cw * ch;
-    for y in (0..h).step_by(2) {
-        for x in (0..w).step_by(2) {
+    for y in (0..ch * 2).step_by(2) {
+        for x in (0..cw * 2).step_by(2) {
             let i = (y * w + x) * 4;
             let r = buf.data[i] as i32;
             let g = buf.data[i + 1] as i32;
@@ -234,14 +240,17 @@ pub fn yuv420p_to_rgba_bt709(buf: &PixelBuffer) -> Result<PixelBuffer, RangaErro
     let w = buf.width as usize;
     let h = buf.height as usize;
     let cw = w / 2;
+    let ch = h / 2;
     let u_off = w * h;
-    let v_off = u_off + cw * (h / 2);
+    let v_off = u_off + cw * ch;
     let mut rgba = vec![0u8; w * h * 4];
     for y in 0..h {
+        let cy = (y / 2).min(ch.saturating_sub(1));
         for x in 0..w {
+            let cx = (x / 2).min(cw.saturating_sub(1));
             let yi = buf.data[y * w + x] as i16;
-            let u = buf.data[u_off + (y / 2) * cw + (x / 2)] as i16 - 128;
-            let v = buf.data[v_off + (y / 2) * cw + (x / 2)] as i16 - 128;
+            let u = buf.data[u_off + cy * cw + cx] as i16 - 128;
+            let v = buf.data[v_off + cy * cw + cx] as i16 - 128;
             let oi = (y * w + x) * 4;
             rgba[oi] = (yi + ((403 * v) >> 8)).clamp(0, 255) as u8;
             rgba[oi + 1] = (yi - ((48 * u + 120 * v) >> 8)).clamp(0, 255) as u8;
@@ -277,12 +286,17 @@ pub fn nv12_to_rgba(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
     }
     let w = buf.width as usize;
     let h = buf.height as usize;
+    let cw = w / 2;
+    let ch = h / 2;
     let uv_off = w * h;
+    let uv_stride = cw * 2; // interleaved UV pairs per row
     let mut rgba = vec![0u8; w * h * 4];
     for y in 0..h {
+        let cy = (y / 2).min(ch.saturating_sub(1));
         for x in 0..w {
+            let cx = (x / 2).min(cw.saturating_sub(1));
             let yi = buf.data[y * w + x] as i16;
-            let uv_idx = uv_off + (y / 2) * w + (x / 2) * 2;
+            let uv_idx = uv_off + cy * uv_stride + cx * 2;
             let u = buf.data[uv_idx] as i16 - 128;
             let v = buf.data[uv_idx + 1] as i16 - 128;
             let oi = (y * w + x) * 4;
@@ -575,5 +589,33 @@ mod tests {
                 "channel {i}"
             );
         }
+    }
+
+    // Edge case: odd dimensions must not panic
+    #[test]
+    fn yuv420p_odd_dimensions_no_panic() {
+        let buf = PixelBuffer::new(vec![128; 5 * 3 * 4], 5, 3, PixelFormat::Rgba8).unwrap();
+        let yuv = rgba_to_yuv420p(&buf).unwrap();
+        let _back = yuv420p_to_rgba(&yuv).unwrap();
+    }
+
+    #[test]
+    fn yuv420p_bt709_odd_dimensions_no_panic() {
+        let buf = PixelBuffer::new(vec![128; 7 * 5 * 4], 7, 5, PixelFormat::Rgba8).unwrap();
+        let yuv = rgba_to_yuv420p_bt709(&buf).unwrap();
+        let _back = yuv420p_to_rgba_bt709(&yuv).unwrap();
+    }
+
+    #[test]
+    fn nv12_odd_dimensions_no_panic() {
+        let buf = PixelBuffer::new(vec![128; 5 * 3 * 4], 5, 3, PixelFormat::Argb8).unwrap();
+        let nv12 = argb_to_nv12(&buf).unwrap();
+        let _rgba = nv12_to_rgba(&nv12).unwrap();
+    }
+
+    #[test]
+    fn yuv420p_1x1_no_panic() {
+        let buf = PixelBuffer::new(vec![128; 4], 1, 1, PixelFormat::Rgba8).unwrap();
+        let _yuv = rgba_to_yuv420p(&buf).unwrap();
     }
 }
