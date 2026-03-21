@@ -1,6 +1,30 @@
 # Changelog
 
+## [0.21.4] — 2026-03-21
+
+### Changed
+
+- Bumped `ai-hwaccel` dependency from 0.20 to 0.21.3
+- Cleaned up roadmap: removed completed items, added ai-hwaccel 0.21.3 review task
+
 ## [0.21.3] — 2026-03-21
+
+### Fixed
+
+- **Compositing precision** — replaced `>> 8` (divide-by-256) with proper `div255` rounding across all blend and composite paths (scalar, SSE2, AVX2, NEON), eliminating ~0.4% cumulative brightness loss per compositing pass
+- **NEON brightness OOB read** — `simd_pixels` now rounds to multiple of 8 (matching `vld4_u8` stride), preventing buffer overread on aarch64
+- **ARGB fast-path alpha** — `composite_at` and `composite_at_argb` fast-path now requires full opacity, preventing raw source alpha from bypassing opacity adjustment
+- **ICC LUT index ordering** — CLUT indexing corrected to have B channel varying fastest per ICC spec, fixing color output for real-world LUT-based profiles
+- **BT.709 Y coefficients** — changed from (54, 183, 18) sum=255 to (54, 183, 19) sum=256 so white correctly maps to Y=255
+- **YUV420p odd-dimension buffer sizing** — `buffer_size()` and all conversion functions now use `div_ceil(2)` for chroma plane dimensions, fixing undersized buffers for odd-width/height images
+- **Histogram `bins=0` panic** — `luminance_histogram()` now returns an error instead of panicking on zero bins
+- **`auto_levels` color shift** — switched from luminance-based offset to per-channel min/max stretching, preventing color distortion
+- **`auto_white_balance` extreme scale** — raised near-zero threshold from 0.5 to 5.0 and clamped scale factors to [0.5, 3.0]
+- **GPU `pixel_count` truncation** — GPU pipeline functions now return an error instead of silently truncating images exceeding `u32::MAX` pixels
+- **ICC tag offset overflow** — `parse_tag_table` now validates offset+size against profile length, preventing potential bounds bypass on crafted profiles
+- **Gradient interpolation clamp** — `gradient_linear` and `gradient_linear_angled` now clamp interpolated values before u8 cast
+- Added `debug_assert!` guards on NEON Y-plane coefficient values to catch u8 truncation
+- Updated `srgb_v2_profile` docs to clarify gamma 2.2 is a v2 approximation of the piecewise sRGB TRC
 
 ### Added
 

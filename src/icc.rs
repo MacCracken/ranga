@@ -329,8 +329,9 @@ impl IccLutProfile {
         let fb = bf - bf.floor();
 
         let gs = self.grid_size;
+        // ICC spec: last input channel (B) varies fastest in CLUT data
         let lut_idx = |ri: usize, gi: usize, bi: usize, ch: usize| -> f64 {
-            self.lut[(ri + gi * gs + bi * gs * gs) * 3 + ch]
+            self.lut[(bi + gi * gs + ri * gs * gs) * 3 + ch]
         };
 
         let mut out = [0.0f64; 3];
@@ -516,7 +517,10 @@ fn parse_mft1_lut(
 /// Generate a minimal sRGB v2 ICC profile.
 ///
 /// Returns a byte vector containing a valid ICC v2 profile with the
-/// standard sRGB matrix (IEC 61966-2-1) and gamma 2.2 TRC curves.
+/// standard sRGB matrix (IEC 61966-2-1) and approximate gamma 2.2 TRC
+/// curves. Note: the actual sRGB transfer function is piecewise (gamma
+/// ~2.4 with a linear segment), but v2 `curv` tags only support simple
+/// gamma, so 2.2 is the standard v2 approximation.
 /// Suitable for embedding in image file metadata (PNG, JPEG, TIFF).
 ///
 /// # Examples
@@ -658,6 +662,11 @@ fn parse_tag_table(data: &[u8], count: usize) -> Result<Vec<TagEntry>, RangaErro
         signature.copy_from_slice(&data[base..base + 4]);
         let offset = read_u32_be(data, base + 4) as usize;
         let size = read_u32_be(data, base + 8) as usize;
+        if offset.checked_add(size).is_none_or(|end| end > data.len()) {
+            return Err(RangaError::InvalidFormat(
+                "ICC tag offset+size exceeds profile data".to_string(),
+            ));
+        }
         tags.push(TagEntry {
             signature,
             offset,

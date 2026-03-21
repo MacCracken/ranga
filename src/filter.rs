@@ -116,10 +116,10 @@ unsafe fn brightness_sse2(data: &mut [u8], shift: i16) {
 unsafe fn brightness_neon(data: &mut [u8], shift: i16) {
     use std::arch::aarch64::*;
     let pixel_count = data.len() / 4;
-    let simd_pixels = pixel_count / 4 * 4;
+    let simd_pixels = pixel_count / 8 * 8; // vld4_u8 loads 8 pixels per iteration
     let byte_count = simd_pixels * 4;
 
-    // SAFETY: NEON is baseline for aarch64. Processing 16 bytes (4 pixels) per iteration.
+    // SAFETY: NEON is baseline for aarch64. Processing 32 bytes (8 pixels) per iteration.
     unsafe {
         let mut i = 0usize;
         while i < byte_count {
@@ -1397,10 +1397,10 @@ pub fn auto_white_balance(buf: &mut PixelBuffer) -> Result<(), RangaError> {
     let avg_b = sum_b as f32 / count as f32;
     let avg_gray = (avg_r + avg_g + avg_b) / 3.0;
 
-    // Avoid division by zero.
-    let scale_r = if avg_r > 0.5 { avg_gray / avg_r } else { 1.0 };
-    let scale_g = if avg_g > 0.5 { avg_gray / avg_g } else { 1.0 };
-    let scale_b = if avg_b > 0.5 { avg_gray / avg_b } else { 1.0 };
+    // Avoid division by near-zero and clamp scale to prevent extreme distortion.
+    let scale_r = if avg_r > 5.0 { (avg_gray / avg_r).clamp(0.5, 3.0) } else { 1.0 };
+    let scale_g = if avg_g > 5.0 { (avg_gray / avg_g).clamp(0.5, 3.0) } else { 1.0 };
+    let scale_b = if avg_b > 5.0 { (avg_gray / avg_b).clamp(0.5, 3.0) } else { 1.0 };
 
     for pixel in buf.data.chunks_exact_mut(4) {
         pixel[0] = (pixel[0] as f32 * scale_r).clamp(0.0, 255.0) as u8;

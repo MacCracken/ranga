@@ -50,7 +50,9 @@ pub fn gpu_blend(
         });
     }
 
-    let pixel_count = src.pixel_count() as u32;
+    let pixel_count = u32::try_from(src.pixel_count()).map_err(|_| {
+        RangaError::Other("image too large for GPU pipeline (exceeds u32 pixel count)".into())
+    })?;
     let mode_id: u32 = match mode {
         BlendMode::Normal => 0,
         BlendMode::Multiply => 1,
@@ -115,7 +117,9 @@ pub fn gpu_invert(ctx: &GpuContext, buf: &mut PixelBuffer) -> Result<(), RangaEr
     if buf.format != PixelFormat::Rgba8 {
         return Err(RangaError::InvalidFormat("GPU requires RGBA8".into()));
     }
-    let pixel_count = buf.pixel_count() as u32;
+    let pixel_count = u32::try_from(buf.pixel_count()).map_err(|_| {
+        RangaError::Other("image too large for GPU pipeline (exceeds u32 pixel count)".into())
+    })?;
     let gpu_buf = GpuBuffer::upload(ctx, buf);
     let params = [pixel_count];
     // SAFETY: params is a contiguous array of u32, reinterpreted as bytes.
@@ -159,7 +163,9 @@ pub fn gpu_grayscale(ctx: &GpuContext, buf: &mut PixelBuffer) -> Result<(), Rang
     if buf.format != PixelFormat::Rgba8 {
         return Err(RangaError::InvalidFormat("GPU requires RGBA8".into()));
     }
-    let pixel_count = buf.pixel_count() as u32;
+    let pixel_count = u32::try_from(buf.pixel_count()).map_err(|_| {
+        RangaError::Other("image too large for GPU pipeline (exceeds u32 pixel count)".into())
+    })?;
     let gpu_buf = GpuBuffer::upload(ctx, buf);
     let params = [pixel_count];
     // SAFETY: params is a contiguous array of u32, reinterpreted as bytes.
@@ -208,7 +214,9 @@ pub fn gpu_brightness_contrast(
     if buf.format != PixelFormat::Rgba8 {
         return Err(RangaError::InvalidFormat("GPU requires RGBA8".into()));
     }
-    let pixel_count = buf.pixel_count() as u32;
+    let pixel_count = u32::try_from(buf.pixel_count()).map_err(|_| {
+        RangaError::Other("image too large for GPU pipeline (exceeds u32 pixel count)".into())
+    })?;
     let gpu_buf = GpuBuffer::upload(ctx, buf);
     let params = [pixel_count, brightness.to_bits(), contrast.to_bits(), 0u32];
     // SAFETY: params is a contiguous array of u32, reinterpreted as bytes.
@@ -256,7 +264,9 @@ pub fn gpu_saturation(
     if buf.format != PixelFormat::Rgba8 {
         return Err(RangaError::InvalidFormat("GPU requires RGBA8".into()));
     }
-    let pixel_count = buf.pixel_count() as u32;
+    let pixel_count = u32::try_from(buf.pixel_count()).map_err(|_| {
+        RangaError::Other("image too large for GPU pipeline (exceeds u32 pixel count)".into())
+    })?;
     let gpu_buf = GpuBuffer::upload(ctx, buf);
     let params = [pixel_count, factor.to_bits(), 0u32, 0u32];
     // SAFETY: params is a contiguous array of u32, reinterpreted as bytes.

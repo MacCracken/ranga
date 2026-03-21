@@ -26,6 +26,9 @@ pub fn luminance_histogram(buf: &PixelBuffer, bins: usize) -> Result<Vec<f64>, R
     if buf.format != PixelFormat::Rgba8 {
         return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
     }
+    if bins == 0 {
+        return Err(RangaError::Other("bins must be > 0".into()));
+    }
     let mut hist = vec![0u64; bins];
     let scale = bins as f64 / 256.0;
 
@@ -215,28 +218,38 @@ pub fn auto_levels(buf: &mut PixelBuffer) -> Result<(), RangaError> {
         return Ok(());
     }
 
-    // Find min/max luminance.
-    let mut min_lum = 255u8;
-    let mut max_lum = 0u8;
+    // Find per-channel min/max to avoid color shifts from luminance-based stretching.
+    let mut min_r = 255u8;
+    let mut max_r = 0u8;
+    let mut min_g = 255u8;
+    let mut max_g = 0u8;
+    let mut min_b = 255u8;
+    let mut max_b = 0u8;
     for pixel in buf.data.chunks_exact(4) {
-        let lum =
-            ((77u16 * pixel[0] as u16 + 150 * pixel[1] as u16 + 29 * pixel[2] as u16) >> 8) as u8;
-        min_lum = min_lum.min(lum);
-        max_lum = max_lum.max(lum);
+        min_r = min_r.min(pixel[0]);
+        max_r = max_r.max(pixel[0]);
+        min_g = min_g.min(pixel[1]);
+        max_g = max_g.max(pixel[1]);
+        min_b = min_b.min(pixel[2]);
+        max_b = max_b.max(pixel[2]);
     }
 
-    let range = max_lum as f32 - min_lum as f32;
-    if range < 1.0 {
-        return Ok(());
-    }
-
-    let scale = 255.0 / range;
-    let offset = min_lum as f32;
+    let stretch = |min: u8, max: u8| -> (f32, f32) {
+        let range = max as f32 - min as f32;
+        if range < 1.0 {
+            (0.0, 1.0)
+        } else {
+            (min as f32, 255.0 / range)
+        }
+    };
+    let (off_r, scale_r) = stretch(min_r, max_r);
+    let (off_g, scale_g) = stretch(min_g, max_g);
+    let (off_b, scale_b) = stretch(min_b, max_b);
 
     for pixel in buf.data.chunks_exact_mut(4) {
-        pixel[0] = ((pixel[0] as f32 - offset) * scale).clamp(0.0, 255.0) as u8;
-        pixel[1] = ((pixel[1] as f32 - offset) * scale).clamp(0.0, 255.0) as u8;
-        pixel[2] = ((pixel[2] as f32 - offset) * scale).clamp(0.0, 255.0) as u8;
+        pixel[0] = ((pixel[0] as f32 - off_r) * scale_r).clamp(0.0, 255.0) as u8;
+        pixel[1] = ((pixel[1] as f32 - off_g) * scale_g).clamp(0.0, 255.0) as u8;
+        pixel[2] = ((pixel[2] as f32 - off_b) * scale_b).clamp(0.0, 255.0) as u8;
     }
     Ok(())
 }

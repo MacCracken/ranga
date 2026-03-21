@@ -64,8 +64,8 @@ impl PixelFormat {
         match self {
             Self::Rgba8 | Self::Argb8 => w * h * 4,
             Self::Rgb8 => w * h * 3,
-            Self::Yuv420p => w * h + 2 * (w / 2) * (h / 2),
-            Self::Nv12 => w * h + (w / 2) * (h / 2) * 2,
+            Self::Yuv420p => w * h + 2 * w.div_ceil(2) * h.div_ceil(2),
+            Self::Nv12 => w * h + w.div_ceil(2) * h.div_ceil(2) * 2,
             Self::RgbaF32 => w * h * 16,
         }
     }

@@ -31,20 +31,22 @@ fn compute_y_row(rgba: &[u8], y_out: &mut [u8]) {
 
 /// Compute BT.709 luminance for a row: Y = (54*R + 183*G + 18*B) >> 8
 fn compute_y_row_bt709(rgba: &[u8], y_out: &mut [u8]) {
+    // BT.709: 0.2126*R + 0.7152*G + 0.0722*B, scaled by 256 and rounded
+    // (54, 183, 19) sums to 256 so white (255,255,255) correctly maps to Y=255
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     {
         // SAFETY: SSE2 is baseline for x86_64.
-        unsafe { compute_y_row_simd_sse2(rgba, y_out, 54, 183, 18) };
+        unsafe { compute_y_row_simd_sse2(rgba, y_out, 54, 183, 19) };
     }
 
     #[cfg(all(feature = "simd", target_arch = "aarch64"))]
     {
         // SAFETY: NEON is baseline for aarch64.
-        unsafe { compute_y_row_simd_neon(rgba, y_out, 54, 183, 18) };
+        unsafe { compute_y_row_simd_neon(rgba, y_out, 54, 183, 19) };
     }
 
     #[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64"))))]
-    compute_y_row_scalar(rgba, y_out, 54, 183, 18);
+    compute_y_row_scalar(rgba, y_out, 54, 183, 19);
 }
 
 fn compute_y_row_scalar(rgba: &[u8], y_out: &mut [u8], cr: u16, cg: u16, cb: u16) {
@@ -109,6 +111,9 @@ unsafe fn compute_y_row_simd_neon(rgba: &[u8], y_out: &mut [u8], cr: u16, cg: u1
 
     // SAFETY: NEON is baseline for aarch64. vld4_u8 loads 8 pixels.
     unsafe {
+        debug_assert!(cr <= 255, "NEON Y coefficient cr={cr} exceeds u8");
+        debug_assert!(cg <= 255, "NEON Y coefficient cg={cg} exceeds u8");
+        debug_assert!(cb <= 255, "NEON Y coefficient cb={cb} exceeds u8");
         let vcr = vdup_n_u8(cr as u8);
         let vcg = vdup_n_u8(cg as u8);
         let vcb = vdup_n_u8(cb as u8);
@@ -164,8 +169,8 @@ pub fn rgba_to_yuv420p(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
     }
     let w = buf.width as usize;
     let h = buf.height as usize;
-    let cw = w / 2;
-    let ch = h / 2;
+    let cw = w.div_ceil(2);
+    let ch = h.div_ceil(2);
     let mut yuv = vec![0u8; w * h + 2 * cw * ch];
 
     for y in 0..h {
@@ -213,10 +218,10 @@ pub fn yuv420p_to_rgba(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
     }
     let w = buf.width as usize;
     let h = buf.height as usize;
-    let cw = w / 2;
+    let cw = w.div_ceil(2);
     let u_off = w * h;
-    let v_off = u_off + cw * (h / 2);
-    let ch = h / 2;
+    let v_off = u_off + cw * (h.div_ceil(2));
+    let ch = h.div_ceil(2);
     let mut rgba = vec![0u8; w * h * 4];
     for y in 0..h {
         let cy = (y / 2).min(ch.saturating_sub(1));
@@ -253,7 +258,7 @@ pub fn argb_to_nv12(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
     }
     let w = buf.width as usize;
     let h = buf.height as usize;
-    let mut nv12 = vec![0u8; w * h + (w / 2) * (h / 2) * 2];
+    let mut nv12 = vec![0u8; w * h + (w.div_ceil(2)) * (h.div_ceil(2)) * 2];
     for y in 0..h {
         for x in 0..w {
             let i = (y * w + x) * 4;
@@ -264,8 +269,8 @@ pub fn argb_to_nv12(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
         }
     }
     let uv_off = w * h;
-    let nv12_cw = w / 2;
-    let nv12_ch = h / 2;
+    let nv12_cw = w.div_ceil(2);
+    let nv12_ch = h.div_ceil(2);
     for y in (0..nv12_ch * 2).step_by(2) {
         for x in (0..nv12_cw * 2).step_by(2) {
             let i = (y * w + x) * 4;
@@ -306,8 +311,8 @@ pub fn rgba_to_yuv420p_bt709(buf: &PixelBuffer) -> Result<PixelBuffer, RangaErro
     }
     let w = buf.width as usize;
     let h = buf.height as usize;
-    let cw = w / 2;
-    let ch = h / 2;
+    let cw = w.div_ceil(2);
+    let ch = h.div_ceil(2);
     let mut yuv = vec![0u8; w * h + 2 * cw * ch];
 
     for y in 0..h {
@@ -352,8 +357,8 @@ pub fn yuv420p_to_rgba_bt709(buf: &PixelBuffer) -> Result<PixelBuffer, RangaErro
     }
     let w = buf.width as usize;
     let h = buf.height as usize;
-    let cw = w / 2;
-    let ch = h / 2;
+    let cw = w.div_ceil(2);
+    let ch = h.div_ceil(2);
     let u_off = w * h;
     let v_off = u_off + cw * ch;
     let mut rgba = vec![0u8; w * h * 4];
@@ -407,8 +412,8 @@ pub fn rgba_to_yuv420p_bt2020(buf: &PixelBuffer) -> Result<PixelBuffer, RangaErr
     }
     let w = buf.width as usize;
     let h = buf.height as usize;
-    let cw = w / 2;
-    let ch = h / 2;
+    let cw = w.div_ceil(2);
+    let ch = h.div_ceil(2);
     let mut yuv = vec![0u8; w * h + 2 * cw * ch];
 
     for y in 0..h {
@@ -456,8 +461,8 @@ pub fn yuv420p_to_rgba_bt2020(buf: &PixelBuffer) -> Result<PixelBuffer, RangaErr
     }
     let w = buf.width as usize;
     let h = buf.height as usize;
-    let cw = w / 2;
-    let ch = h / 2;
+    let cw = w.div_ceil(2);
+    let ch = h.div_ceil(2);
     let u_off = w * h;
     let v_off = u_off + cw * ch;
     let mut rgba = vec![0u8; w * h * 4];
@@ -507,8 +512,8 @@ pub fn nv12_to_rgba(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
     }
     let w = buf.width as usize;
     let h = buf.height as usize;
-    let cw = w / 2;
-    let ch = h / 2;
+    let cw = w.div_ceil(2);
+    let ch = h.div_ceil(2);
     let uv_off = w * h;
     let uv_stride = cw * 2; // interleaved UV pairs per row
     let mut rgba = vec![0u8; w * h * 4];

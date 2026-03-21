@@ -6,6 +6,13 @@
 use crate::RangaError;
 use crate::pixel::{PixelBuffer, PixelFormat};
 
+/// Fast, accurate division by 255: `(val + 128 + ((val + 128) >> 8)) >> 8`.
+#[inline(always)]
+fn div255(val: u16) -> u16 {
+    let tmp = val + 128;
+    (tmp + (tmp >> 8)) >> 8
+}
+
 fn validate_rgba8(buf: &PixelBuffer) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
         return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
@@ -269,7 +276,8 @@ pub fn gradient_linear(
             let i = (y * buf.width as usize + x) * 4;
             for c in 0..4 {
                 buf.data[i + c] =
-                    (start[c] as f32 + t * (end[c] as f32 - start[c] as f32) + 0.5) as u8;
+                    (start[c] as f32 + t * (end[c] as f32 - start[c] as f32) + 0.5)
+                        .clamp(0.0, 255.0) as u8;
             }
         }
     }
@@ -334,7 +342,8 @@ pub fn gradient_linear_angled(
             let i = (y * buf.width as usize + x) * 4;
             for c in 0..4 {
                 buf.data[i + c] =
-                    (start[c] as f32 + t * (end[c] as f32 - start[c] as f32) + 0.5) as u8;
+                    (start[c] as f32 + t * (end[c] as f32 - start[c] as f32) + 0.5)
+                        .clamp(0.0, 255.0) as u8;
             }
         }
     }
@@ -375,7 +384,8 @@ pub fn gradient_radial(
             let i = (y * buf.width as usize + x) * 4;
             for c in 0..4 {
                 buf.data[i + c] =
-                    (start[c] as f32 + t * (end[c] as f32 - start[c] as f32) + 0.5) as u8;
+                    (start[c] as f32 + t * (end[c] as f32 - start[c] as f32) + 0.5)
+                        .clamp(0.0, 255.0) as u8;
             }
         }
     }
@@ -444,21 +454,21 @@ pub fn composite_at(
             let si = (sy * src_stride + sx) * 4;
             let di = (dy as usize * dst_stride + dx as usize) * 4;
 
-            let sa = (src.data[si + 3] as u16 * op) >> 8;
+            let sa = div255(src.data[si + 3] as u16 * op);
             if sa == 0 {
                 continue;
             }
-            if sa >= 255 {
+            if sa >= 255 && op >= 255 {
                 dst.data[di..di + 4].copy_from_slice(&src.data[si..si + 4]);
                 continue;
             }
             let inv_sa = 255u16 - sa;
-            dst.data[di] = ((src.data[si] as u16 * sa + dst.data[di] as u16 * inv_sa) >> 8) as u8;
+            dst.data[di] = div255(src.data[si] as u16 * sa + dst.data[di] as u16 * inv_sa) as u8;
             dst.data[di + 1] =
-                ((src.data[si + 1] as u16 * sa + dst.data[di + 1] as u16 * inv_sa) >> 8) as u8;
+                div255(src.data[si + 1] as u16 * sa + dst.data[di + 1] as u16 * inv_sa) as u8;
             dst.data[di + 2] =
-                ((src.data[si + 2] as u16 * sa + dst.data[di + 2] as u16 * inv_sa) >> 8) as u8;
-            dst.data[di + 3] = ((sa + dst.data[di + 3] as u16 * inv_sa / 255).min(255)) as u8;
+                div255(src.data[si + 2] as u16 * sa + dst.data[di + 2] as u16 * inv_sa) as u8;
+            dst.data[di + 3] = div255(sa * 255 + dst.data[di + 3] as u16 * inv_sa).min(255) as u8;
         }
     }
     Ok(())
@@ -522,22 +532,22 @@ pub fn composite_at_argb(
             let di = (dy as usize * dst_stride + dx as usize) * 4;
 
             // ARGB layout: [A, R, G, B]
-            let sa = (src.data[si] as u16 * op) >> 8;
+            let sa = div255(src.data[si] as u16 * op);
             if sa == 0 {
                 continue;
             }
-            if sa >= 255 {
+            if sa >= 255 && op >= 255 {
                 dst.data[di..di + 4].copy_from_slice(&src.data[si..si + 4]);
                 continue;
             }
             let inv_sa = 255u16 - sa;
-            dst.data[di] = ((sa + dst.data[di] as u16 * inv_sa / 255).min(255)) as u8;
+            dst.data[di] = div255(sa * 255 + dst.data[di] as u16 * inv_sa).min(255) as u8;
             dst.data[di + 1] =
-                ((src.data[si + 1] as u16 * sa + dst.data[di + 1] as u16 * inv_sa) >> 8) as u8;
+                div255(src.data[si + 1] as u16 * sa + dst.data[di + 1] as u16 * inv_sa) as u8;
             dst.data[di + 2] =
-                ((src.data[si + 2] as u16 * sa + dst.data[di + 2] as u16 * inv_sa) >> 8) as u8;
+                div255(src.data[si + 2] as u16 * sa + dst.data[di + 2] as u16 * inv_sa) as u8;
             dst.data[di + 3] =
-                ((src.data[si + 3] as u16 * sa + dst.data[di + 3] as u16 * inv_sa) >> 8) as u8;
+                div255(src.data[si + 3] as u16 * sa + dst.data[di + 3] as u16 * inv_sa) as u8;
         }
     }
     Ok(())

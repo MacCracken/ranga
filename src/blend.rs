@@ -13,6 +13,13 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Fast, accurate division by 255: `(val + 128 + ((val + 128) >> 8)) >> 8`.
+#[inline(always)]
+fn div255(val: u16) -> u16 {
+    let tmp = val + 128;
+    (tmp + (tmp >> 8)) >> 8
+}
+
 /// Supported blend modes.
 ///
 /// Implements standard Photoshop-style compositing modes. All modes operate
@@ -87,7 +94,7 @@ impl std::fmt::Display for BlendMode {
 #[inline]
 #[must_use]
 pub fn blend_pixel(src: [u8; 4], dst: [u8; 4], mode: BlendMode, opacity: u8) -> [u8; 4] {
-    let sa = ((src[3] as u16 * opacity as u16) >> 8) as u8;
+    let sa = div255(src[3] as u16 * opacity as u16) as u8;
     if sa == 0 {
         return dst;
     }
@@ -156,25 +163,25 @@ pub fn blend_pixel(src: [u8; 4], dst: [u8; 4], mode: BlendMode, opacity: u8) -> 
     let inv_sa = 255u16 - sa16;
 
     [
-        ((br as u16 * sa16 + dst[0] as u16 * inv_sa) >> 8) as u8,
-        ((bg as u16 * sa16 + dst[1] as u16 * inv_sa) >> 8) as u8,
-        ((bb as u16 * sa16 + dst[2] as u16 * inv_sa) >> 8) as u8,
-        ((sa16 + dst[3] as u16 * inv_sa / 255).min(255)) as u8,
+        div255(br as u16 * sa16 + dst[0] as u16 * inv_sa) as u8,
+        div255(bg as u16 * sa16 + dst[1] as u16 * inv_sa) as u8,
+        div255(bb as u16 * sa16 + dst[2] as u16 * inv_sa) as u8,
+        (div255(sa16 * 255 + dst[3] as u16 * inv_sa)).min(255) as u8,
     ]
 }
 
 /// Scalar fallback for Normal-mode row blending.
 fn blend_row_normal_scalar(src: &[u8], dst: &mut [u8], opacity: u8) {
     for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
-        let sa = (s[3] as u16 * opacity as u16) >> 8;
+        let sa = div255(s[3] as u16 * opacity as u16);
         if sa == 0 {
             continue;
         }
         let inv_sa = 255u16 - sa;
-        d[0] = ((s[0] as u16 * sa + d[0] as u16 * inv_sa) >> 8) as u8;
-        d[1] = ((s[1] as u16 * sa + d[1] as u16 * inv_sa) >> 8) as u8;
-        d[2] = ((s[2] as u16 * sa + d[2] as u16 * inv_sa) >> 8) as u8;
-        d[3] = ((sa + d[3] as u16 * inv_sa / 255).min(255)) as u8;
+        d[0] = div255(s[0] as u16 * sa + d[0] as u16 * inv_sa) as u8;
+        d[1] = div255(s[1] as u16 * sa + d[1] as u16 * inv_sa) as u8;
+        d[2] = div255(s[2] as u16 * sa + d[2] as u16 * inv_sa) as u8;
+        d[3] = div255(sa * 255 + d[3] as u16 * inv_sa).min(255) as u8;
     }
 }
 
@@ -215,15 +222,20 @@ unsafe fn blend_row_normal_sse2(src: &[u8], dst: &mut [u8], opacity: u8) {
             let alpha_lo = _mm_shufflelo_epi16(s16, 0xFF);
             let alpha = _mm_shufflehi_epi16(alpha_lo, 0xFF);
 
-            // sa = (alpha * opacity) >> 8
+            // sa = div255(alpha * opacity)
             let opacity_vec = _mm_set1_epi16(opacity_val as i16);
-            let sa = _mm_srli_epi16(_mm_mullo_epi16(alpha, opacity_vec), 8);
+            let round_128 = _mm_set1_epi16(128);
+            let raw = _mm_mullo_epi16(alpha, opacity_vec);
+            let tmp = _mm_add_epi16(raw, round_128);
+            let sa = _mm_srli_epi16(_mm_add_epi16(tmp, _mm_srli_epi16(tmp, 8)), 8);
             let inv_sa = _mm_sub_epi16(ones_255, sa);
 
-            // result_rgb = (src * sa + dst * inv_sa) >> 8
+            // result_rgb = div255(src * sa + dst * inv_sa)
             let src_term = _mm_mullo_epi16(s16, sa);
             let dst_term = _mm_mullo_epi16(d16, inv_sa);
-            let blended = _mm_srli_epi16(_mm_add_epi16(src_term, dst_term), 8);
+            let sum = _mm_add_epi16(src_term, dst_term);
+            let tmp2 = _mm_add_epi16(sum, round_128);
+            let blended = _mm_srli_epi16(_mm_add_epi16(tmp2, _mm_srli_epi16(tmp2, 8)), 8);
 
             // Save original dst alpha before overwriting
             let orig_da = [dst[i + 3], dst[i + 7]];
@@ -234,14 +246,12 @@ unsafe fn blend_row_normal_sse2(src: &[u8], dst: &mut [u8], opacity: u8) {
             // SAFETY: Store 8 bytes back. Same bounds reasoning as the load above.
             _mm_storel_epi64(dst.as_mut_ptr().add(i) as *mut __m128i, packed);
 
-            // Fix up alpha channel: result[3] = min(sa + dst_a_orig * inv_sa / 255, 255)
-            // The SIMD blend computed (src_a * sa + dst_a * inv_sa) >> 8, but we need
-            // the Porter-Duff formula instead. Fix the 2 alpha bytes using saved originals.
+            // Fix up alpha channel using Porter-Duff formula with div255.
             for (px, &da) in orig_da.iter().enumerate() {
                 let px_off = i + px * 4;
-                let sa_px = (src[px_off + 3] as u16 * opacity_val) >> 8;
+                let sa_px = div255(src[px_off + 3] as u16 * opacity_val);
                 let inv_sa_px = 255u16 - sa_px;
-                dst[px_off + 3] = ((sa_px + da as u16 * inv_sa_px / 255).min(255)) as u8;
+                dst[px_off + 3] = div255(sa_px * 255 + da as u16 * inv_sa_px).min(255) as u8;
             }
 
             i += 8;
@@ -274,6 +284,7 @@ unsafe fn blend_row_normal_avx2(src: &[u8], dst: &mut [u8], opacity: u8) {
         let opacity_val = opacity as u16;
         let ones_255 = _mm256_set1_epi16(255);
         let opacity_vec = _mm256_set1_epi16(opacity_val as i16);
+        let round_128 = _mm256_set1_epi16(128);
 
         let mut i = 0usize;
         while i < byte_count {
@@ -290,14 +301,18 @@ unsafe fn blend_row_normal_avx2(src: &[u8], dst: &mut [u8], opacity: u8) {
             let alpha_lo = _mm256_shufflelo_epi16(s16, 0xFF);
             let alpha = _mm256_shufflehi_epi16(alpha_lo, 0xFF);
 
-            // sa = (alpha * opacity) >> 8
-            let sa = _mm256_srli_epi16(_mm256_mullo_epi16(alpha, opacity_vec), 8);
+            // sa = div255(alpha * opacity)
+            let raw = _mm256_mullo_epi16(alpha, opacity_vec);
+            let tmp = _mm256_add_epi16(raw, round_128);
+            let sa = _mm256_srli_epi16(_mm256_add_epi16(tmp, _mm256_srli_epi16(tmp, 8)), 8);
             let inv_sa = _mm256_sub_epi16(ones_255, sa);
 
-            // result = (src * sa + dst * inv_sa) >> 8
+            // result = div255(src * sa + dst * inv_sa)
             let src_term = _mm256_mullo_epi16(s16, sa);
             let dst_term = _mm256_mullo_epi16(d16, inv_sa);
-            let blended = _mm256_srli_epi16(_mm256_add_epi16(src_term, dst_term), 8);
+            let sum = _mm256_add_epi16(src_term, dst_term);
+            let tmp2 = _mm256_add_epi16(sum, round_128);
+            let blended = _mm256_srli_epi16(_mm256_add_epi16(tmp2, _mm256_srli_epi16(tmp2, 8)), 8);
 
             // Save original dst alpha before overwriting
             let orig_da = [dst[i + 3], dst[i + 7], dst[i + 11], dst[i + 15]];
@@ -312,12 +327,12 @@ unsafe fn blend_row_normal_avx2(src: &[u8], dst: &mut [u8], opacity: u8) {
                 _mm256_castsi256_si128(result),
             );
 
-            // Fix up alpha channel: result[3] = min(sa + dst_a_orig * inv_sa / 255, 255)
+            // Fix up alpha channel using Porter-Duff formula with div255.
             for (px, &da) in orig_da.iter().enumerate() {
                 let px_off = i + px * 4;
-                let sa_px = (src[px_off + 3] as u16 * opacity_val) >> 8;
+                let sa_px = div255(src[px_off + 3] as u16 * opacity_val);
                 let inv_sa_px = 255u16 - sa_px;
-                dst[px_off + 3] = ((sa_px + da as u16 * inv_sa_px / 255).min(255)) as u8;
+                dst[px_off + 3] = div255(sa_px * 255 + da as u16 * inv_sa_px).min(255) as u8;
             }
 
             i += 16;
@@ -354,32 +369,32 @@ unsafe fn blend_row_normal_neon(src: &[u8], dst: &mut [u8], opacity: u8) {
             let s = vld4_u8(src.as_ptr().add(i));
             let d = vld4_u8(dst.as_ptr().add(i));
 
-            // Compute sa = (src_alpha * opacity) >> 8  (8 pixels at once)
-            let sa_wide = vshrq_n_u16(vmull_u8(s.3, vdup_n_u8(opacity)), 8);
+            // Compute sa = div255(src_alpha * opacity)  (8 pixels at once)
+            let round_128 = vdupq_n_u16(128);
+            let raw_sa = vmull_u8(s.3, vdup_n_u8(opacity));
+            let tmp_sa = vaddq_u16(raw_sa, round_128);
+            let sa_wide = vshrq_n_u16(vaddq_u16(tmp_sa, vshrq_n_u16(tmp_sa, 8)), 8);
             let sa = vmovn_u16(sa_wide);
 
             // inv_sa = 255 - sa
             let inv_sa = vsub_u8(vdup_n_u8(255), sa);
 
-            // For each channel: result = (src_c * sa + dst_c * inv_sa) >> 8
-            let r = vmovn_u16(vshrq_n_u16(
-                vaddq_u16(vmull_u8(s.0, sa), vmull_u8(d.0, inv_sa)),
-                8,
-            ));
-            let g = vmovn_u16(vshrq_n_u16(
-                vaddq_u16(vmull_u8(s.1, sa), vmull_u8(d.1, inv_sa)),
-                8,
-            ));
-            let b = vmovn_u16(vshrq_n_u16(
-                vaddq_u16(vmull_u8(s.2, sa), vmull_u8(d.2, inv_sa)),
-                8,
-            ));
+            // For each channel: result = div255(src_c * sa + dst_c * inv_sa)
+            let div255_neon = |val: uint16x8_t| -> uint8x8_t {
+                let tmp = vaddq_u16(val, round_128);
+                vmovn_u16(vshrq_n_u16(vaddq_u16(tmp, vshrq_n_u16(tmp, 8)), 8))
+            };
+            let r = div255_neon(vaddq_u16(vmull_u8(s.0, sa), vmull_u8(d.0, inv_sa)));
+            let g = div255_neon(vaddq_u16(vmull_u8(s.1, sa), vmull_u8(d.1, inv_sa)));
+            let b = div255_neon(vaddq_u16(vmull_u8(s.2, sa), vmull_u8(d.2, inv_sa)));
 
-            // Alpha: min(sa + dst_a * inv_sa / 255, 255)
-            // Approximate: sa + (dst_a * inv_sa) >> 8 (same as scalar path uses >>8)
-            let da_wide = vshrq_n_u16(vmull_u8(d.3, inv_sa), 8);
-            let a_wide = vaddq_u16(vmovl_u8(sa), da_wide);
-            let a = vqmovn_u16(a_wide); // saturating narrow to u8
+            // Alpha: div255(sa * 255 + dst_a * inv_sa), saturating narrow
+            let sa255 = vmull_u8(sa, vdup_n_u8(255));
+            let da_term = vmull_u8(d.3, inv_sa);
+            let a_sum = vaddq_u16(sa255, da_term);
+            let a_tmp = vaddq_u16(a_sum, round_128);
+            let a_wide = vshrq_n_u16(vaddq_u16(a_tmp, vshrq_n_u16(a_tmp, 8)), 8);
+            let a = vqmovn_u16(a_wide);
 
             let result = uint8x8x4_t(r, g, b, a);
             // SAFETY: Store 32 bytes back, same bounds as load.
@@ -485,7 +500,7 @@ pub fn blend_row_normal_argb(src: &[u8], dst: &mut [u8], opacity: u8) {
 
     let opacity_fp = opacity as u16;
     for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
-        let sa = (s[0] as u16 * opacity_fp) >> 8;
+        let sa = div255(s[0] as u16 * opacity_fp);
         if sa == 0 {
             continue;
         }
@@ -494,10 +509,10 @@ pub fn blend_row_normal_argb(src: &[u8], dst: &mut [u8], opacity: u8) {
             continue;
         }
         let inv_sa = 255u16 - sa;
-        d[0] = ((sa + d[0] as u16 * inv_sa / 255).min(255)) as u8; // A
-        d[1] = ((s[1] as u16 * sa + d[1] as u16 * inv_sa) >> 8) as u8; // R
-        d[2] = ((s[2] as u16 * sa + d[2] as u16 * inv_sa) >> 8) as u8; // G
-        d[3] = ((s[3] as u16 * sa + d[3] as u16 * inv_sa) >> 8) as u8; // B
+        d[0] = div255(sa * 255 + d[0] as u16 * inv_sa).min(255) as u8; // A
+        d[1] = div255(s[1] as u16 * sa + d[1] as u16 * inv_sa) as u8; // R
+        d[2] = div255(s[2] as u16 * sa + d[2] as u16 * inv_sa) as u8; // G
+        d[3] = div255(s[3] as u16 * sa + d[3] as u16 * inv_sa) as u8; // B
     }
 }
 
