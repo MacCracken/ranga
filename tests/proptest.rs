@@ -213,3 +213,119 @@ proptest! {
         prop_assert!((0.0..=1.0).contains(&b), "b={b}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Transform properties
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #[test]
+    fn crop_never_exceeds_source(
+        w in 1u32..=100, h in 1u32..=100,
+        l in 0u32..=100, t in 0u32..=100,
+        r in 0u32..=200, b in 0u32..=200,
+    ) {
+        let buf = PixelBuffer::zeroed(w, h, PixelFormat::Rgba8);
+        let cropped = ranga::transform::crop(&buf, l, t, r, b).unwrap();
+        prop_assert!(cropped.width <= w);
+        prop_assert!(cropped.height <= h);
+    }
+
+    #[test]
+    fn resize_produces_correct_dimensions(
+        w in 1u32..=50, h in 1u32..=50,
+        nw in 1u32..=100, nh in 1u32..=100,
+    ) {
+        let buf = PixelBuffer::zeroed(w, h, PixelFormat::Rgba8);
+        let resized = ranga::transform::resize(&buf, nw, nh, ranga::transform::ScaleFilter::Nearest).unwrap();
+        prop_assert_eq!(resized.width, nw);
+        prop_assert_eq!(resized.height, nh);
+    }
+
+    #[test]
+    fn flip_h_is_involution(
+        w in 1u32..=20, h in 1u32..=20,
+    ) {
+        let data: Vec<u8> = (0..(w * h * 4) as u8).collect();
+        if let Ok(buf) = PixelBuffer::new(data.clone(), w, h, PixelFormat::Rgba8) {
+            let f1 = ranga::transform::flip_horizontal(&buf).unwrap();
+            let f2 = ranga::transform::flip_horizontal(&f1).unwrap();
+            prop_assert_eq!(&f2.data, &data);
+        }
+    }
+
+    #[test]
+    fn affine_identity_preserves(x in -100.0f64..=100.0, y in -100.0f64..=100.0) {
+        let (ox, oy) = ranga::transform::Affine::IDENTITY.apply(x, y);
+        prop_assert!((ox - x).abs() < 1e-10);
+        prop_assert!((oy - y).abs() < 1e-10);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Composite properties
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #[test]
+    fn dissolve_at_zero_is_a(
+        r in 0u8..=255, g in 0u8..=255, b in 0u8..=255,
+    ) {
+        let a = PixelBuffer::new(vec![r, g, b, 255], 1, 1, PixelFormat::Rgba8).unwrap();
+        let b_buf = PixelBuffer::new(vec![0, 0, 0, 255], 1, 1, PixelFormat::Rgba8).unwrap();
+        let result = ranga::composite::dissolve(&a, &b_buf, 0.0).unwrap();
+        prop_assert_eq!(result.data[0], r);
+        prop_assert_eq!(result.data[1], g);
+        prop_assert_eq!(result.data[2], b);
+    }
+
+    #[test]
+    fn dissolve_at_one_is_b(
+        rv in 0u8..=255, gv in 0u8..=255, bv in 0u8..=255,
+    ) {
+        let a_buf = PixelBuffer::new(vec![0, 0, 0, 255], 1, 1, PixelFormat::Rgba8).unwrap();
+        let b_buf = PixelBuffer::new(vec![rv, gv, bv, 255], 1, 1, PixelFormat::Rgba8).unwrap();
+        let result = ranga::composite::dissolve(&a_buf, &b_buf, 1.0).unwrap();
+        prop_assert_eq!(result.data[0], rv);
+        prop_assert_eq!(result.data[1], gv);
+        prop_assert_eq!(result.data[2], bv);
+    }
+
+    #[test]
+    fn premultiply_opaque_is_identity(
+        r in 0u8..=255, g in 0u8..=255, b in 0u8..=255,
+    ) {
+        let mut buf = PixelBuffer::new(vec![r, g, b, 255], 1, 1, PixelFormat::Rgba8).unwrap();
+        ranga::composite::premultiply_alpha(&mut buf).unwrap();
+        prop_assert_eq!(buf.data[0], r);
+        prop_assert_eq!(buf.data[1], g);
+        prop_assert_eq!(buf.data[2], b);
+    }
+
+    #[test]
+    fn threshold_is_binary(
+        r in 0u8..=255, g in 0u8..=255, b in 0u8..=255, t in 0u8..=255,
+    ) {
+        let mut buf = PixelBuffer::new(vec![r, g, b, 255], 1, 1, PixelFormat::Rgba8).unwrap();
+        ranga::filter::threshold(&mut buf, t).unwrap();
+        // Result must be either 0 or 255
+        prop_assert!(buf.data[0] == 0 || buf.data[0] == 255);
+        // R == G == B (grayscale output)
+        prop_assert_eq!(buf.data[0], buf.data[1]);
+        prop_assert_eq!(buf.data[1], buf.data[2]);
+    }
+
+    #[test]
+    fn channel_mixer_identity_preserves(
+        r in 0u8..=255, g in 0u8..=255, b in 0u8..=255,
+    ) {
+        let mut buf = PixelBuffer::new(vec![r, g, b, 255], 1, 1, PixelFormat::Rgba8).unwrap();
+        ranga::filter::channel_mixer(
+            &mut buf,
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        ).unwrap();
+        prop_assert_eq!(buf.data[0], r);
+        prop_assert_eq!(buf.data[1], g);
+        prop_assert_eq!(buf.data[2], b);
+    }
+}

@@ -257,3 +257,129 @@ fn convert_rejects_wrong_format() {
     // argb_to_nv12 expects Argb8
     assert!(argb_to_nv12(&rgba_buf).is_err());
 }
+
+// ---------------------------------------------------------------------------
+// Transform integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn crop_and_resize_pipeline() {
+    use ranga::transform::{self, ScaleFilter};
+
+    let buf = PixelBuffer::zeroed(100, 100, PixelFormat::Rgba8);
+    let cropped = transform::crop(&buf, 10, 10, 60, 60).unwrap();
+    assert_eq!(cropped.width, 50);
+    assert_eq!(cropped.height, 50);
+    let resized = transform::resize(&cropped, 200, 200, ScaleFilter::Bilinear).unwrap();
+    assert_eq!(resized.width, 200);
+    assert_eq!(resized.height, 200);
+}
+
+#[test]
+fn affine_rotate_and_back() {
+    use ranga::transform::{self, Affine, ScaleFilter};
+
+    let mut buf = PixelBuffer::zeroed(32, 32, PixelFormat::Rgba8);
+    buf.set_rgba(16, 16, [255, 0, 0, 255]);
+
+    let rotated =
+        transform::affine_transform(&buf, &Affine::rotate(0.1), 32, 32, ScaleFilter::Bilinear)
+            .unwrap();
+    assert_eq!(rotated.width, 32);
+    // The red pixel should have moved slightly
+}
+
+#[test]
+fn flip_preserves_pixel_count() {
+    let data: Vec<u8> = (0..64u8).flat_map(|i| [i, i, i, 255]).collect();
+    let buf = PixelBuffer::new(data, 8, 8, PixelFormat::Rgba8).unwrap();
+    let fh = ranga::transform::flip_horizontal(&buf).unwrap();
+    let fv = ranga::transform::flip_vertical(&buf).unwrap();
+    assert_eq!(fh.data.len(), buf.data.len());
+    assert_eq!(fv.data.len(), buf.data.len());
+}
+
+// ---------------------------------------------------------------------------
+// Composite integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn compositor_pipeline() {
+    use ranga::composite;
+
+    // Simulate aethersafta workflow: checkerboard bg → composite layer → fade
+    let mut bg = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
+    composite::fill_checkerboard(&mut bg, 8, [200, 200, 200, 255], [255, 255, 255, 255]).unwrap();
+
+    let overlay =
+        PixelBuffer::new([255, 0, 0, 128].repeat(16 * 16), 16, 16, PixelFormat::Rgba8).unwrap();
+    composite::composite_at(&overlay, &mut bg, 24, 24, 0.8).unwrap();
+
+    // Pixel at (24,24) should have red content blended over checkerboard
+    let px = bg.get_rgba(24, 24).unwrap();
+    assert!(px[0] > 100, "red channel should be present");
+}
+
+#[test]
+fn dissolve_then_fade_pipeline() {
+    use ranga::composite;
+
+    let a = PixelBuffer::new(vec![200; 4 * 4 * 4], 4, 4, PixelFormat::Rgba8).unwrap();
+    let b = PixelBuffer::new(vec![50; 4 * 4 * 4], 4, 4, PixelFormat::Rgba8).unwrap();
+
+    let mut mid = composite::dissolve(&a, &b, 0.5).unwrap();
+    assert!(mid.data[0] > 100 && mid.data[0] < 150);
+
+    composite::fade(&mut mid, 0.5).unwrap();
+    assert!(mid.data[0] < 80); // faded to half
+}
+
+#[test]
+fn premultiply_composite_unpremultiply() {
+    use ranga::composite;
+
+    let mut layer = PixelBuffer::new(vec![255, 0, 0, 128], 1, 1, PixelFormat::Rgba8).unwrap();
+    composite::premultiply_alpha(&mut layer).unwrap();
+    assert_eq!(layer.data[0], 128); // 255 * 128 / 255
+
+    composite::unpremultiply_alpha(&mut layer).unwrap();
+    assert!(layer.data[0] > 250); // back to ~255
+}
+
+// ---------------------------------------------------------------------------
+// New filter integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn median_removes_salt_pepper() {
+    let mut buf = PixelBuffer::new(vec![128; 16 * 16 * 4], 16, 16, PixelFormat::Rgba8).unwrap();
+    filter::noise_salt_pepper(&mut buf, 0.3, 42).unwrap();
+
+    let noisy_extremes = buf
+        .data
+        .chunks_exact(4)
+        .filter(|p| p[0] == 0 || p[0] == 255)
+        .count();
+    assert!(noisy_extremes > 0, "should have noise");
+
+    let filtered = filter::median(&buf, 1).unwrap();
+    let clean_extremes = filtered
+        .data
+        .chunks_exact(4)
+        .filter(|p| p[0] == 0 || p[0] == 255)
+        .count();
+    assert!(
+        clean_extremes < noisy_extremes,
+        "median should reduce extremes"
+    );
+}
+
+#[test]
+fn flood_fill_then_threshold() {
+    let mut buf = PixelBuffer::new(vec![100; 8 * 8 * 4], 8, 8, PixelFormat::Rgba8).unwrap();
+    filter::flood_fill(&mut buf, 0, 0, [200, 200, 200, 255], 10).unwrap();
+    assert_eq!(buf.data[0], 200);
+
+    filter::threshold(&mut buf, 150).unwrap();
+    assert_eq!(buf.data[0], 255); // 200 > 150 → white
+}

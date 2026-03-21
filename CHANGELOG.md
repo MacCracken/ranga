@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.20.4] — 2026-03-21
+
+### Added
+
+- **Geometry transforms** (`transform` module) — crop, resize (nearest/bilinear), affine transform, flip horizontal/vertical
+- **Compositing** (`composite` module) — premultiplied alpha, layer masks, dissolve/fade/wipe transitions, solid/gradient/checkerboard fill, positioned composite with clipping
+- **Filters** — median, bilateral, vibrance, channel mixer, threshold, flood fill (6 new, 23 total)
+- **API improvements** — `Display` for `PixelFormat`/`BlendMode`/`ColorSpace`, `rows()`/`rows_mut()` iterators, `get_rgba()`/`set_rgba()` accessors, `from_view()`
+
+### Changed
+
+- `deny.toml` updated for cargo-deny v2 compatibility
+- Coverage gate set to 75% in codecov.yml
+- Documentation expanded: performance guide, testing guide, troubleshooting guide, comprehensive README
+
+### Fixed
+
+- Odd-dimension YUV/NV12 conversion OOB panic (chroma subsampling clamped)
+- SIMD blend equivalence test tolerance for alpha rounding
+
 ## [0.20.3] — 2026-03-20
 
 First release. Core image processing primitives for the AGNOS creative suite,

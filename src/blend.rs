@@ -43,6 +43,25 @@ pub enum BlendMode {
     Exclusion,
 }
 
+impl std::fmt::Display for BlendMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Normal => write!(f, "Normal"),
+            Self::Multiply => write!(f, "Multiply"),
+            Self::Screen => write!(f, "Screen"),
+            Self::Overlay => write!(f, "Overlay"),
+            Self::Darken => write!(f, "Darken"),
+            Self::Lighten => write!(f, "Lighten"),
+            Self::ColorDodge => write!(f, "Color Dodge"),
+            Self::ColorBurn => write!(f, "Color Burn"),
+            Self::SoftLight => write!(f, "Soft Light"),
+            Self::HardLight => write!(f, "Hard Light"),
+            Self::Difference => write!(f, "Difference"),
+            Self::Exclusion => write!(f, "Exclusion"),
+        }
+    }
+}
+
 /// Blend a source pixel over a destination pixel using the given mode and opacity.
 ///
 /// All values are 0–255 (sRGB byte space). Alpha is premultiplied in the blend.

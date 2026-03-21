@@ -111,13 +111,26 @@ Run benchmarks: `cargo bench` or `cargo bench --all-features`
 
 ## Documentation
 
-- [API Reference](https://docs.rs/ranga) — rustdoc for all public items
+### Guides
+- [Architecture Overview](docs/architecture/overview.md) — module map, data flow, design principles
+- [Performance Guide](docs/guides/performance.md) — CPU/GPU crossover, SIMD tiers, benchmarking
+- [Testing Guide](docs/guides/testing.md) — test matrix, coverage, fuzzing, CI
+- [Troubleshooting](docs/guides/troubleshooting.md) — common build and runtime issues
 - [Migration Guide](docs/development/migration-guide.md) — adopting ranga in rasa/tazama/aethersafta
+
+### Feature Guides
+- [Color Science](docs/guides/features/color-science.md) — color spaces, Delta-E, ICC, temperature
+- [Blend Modes](docs/guides/features/blend-modes.md) — 12 modes, SIMD, GPU, positioned composite
+- [Filters](docs/guides/features/filters.md) — 23 filters with usage patterns and performance tips
+- [Transforms](docs/guides/features/transforms.md) — crop, resize, affine, flip
+- [Compositing](docs/guides/features/compositing.md) — layer masks, transitions, fill operations
+- [GPU Compute](docs/guides/features/gpu-compute.md) — wgpu shaders, pipeline caching, async readback
+- [Pixel Buffers](docs/guides/features/pixel-buffers.md) — formats, views, pool, conversion
+
+### Reference
+- [API Reference](https://docs.rs/ranga) — rustdoc for all public items
 - [Threat Model](docs/development/threat-model.md) — security trust boundaries
-- [Performance Guide](docs/guides/performance.md) — optimization tips
-- [Testing Guide](docs/guides/testing.md) — running tests, coverage, fuzzing
-- [Troubleshooting](docs/guides/troubleshooting.md) — common issues
-- Architecture Decisions: [001-pure-rust-core](docs/decisions/001-pure-rust-core.md), [002-semver-versioning](docs/decisions/002-semver-versioning.md)
+- Architecture Decisions: [001](docs/decisions/001-pure-rust-core.md), [002](docs/decisions/002-semver-versioning.md), [003](docs/decisions/003-packed-u32-gpu-shaders.md), [004](docs/decisions/004-feature-gated-optional-deps.md)
 
 ## Minimum Supported Rust Version
 

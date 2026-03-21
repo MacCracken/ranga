@@ -822,6 +822,325 @@ pub fn noise_salt_pepper(buf: &mut PixelBuffer, density: f32, seed: u64) -> Resu
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Median, bilateral, vibrance, channel mixer, threshold, flood fill
+// ---------------------------------------------------------------------------
+
+/// Apply a median filter with the given pixel radius (noise reduction).
+///
+/// Non-linear filter that replaces each pixel with the median of its
+/// neighborhood. Effective at removing salt-and-pepper noise while
+/// preserving edges better than Gaussian blur.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::filter;
+///
+/// let buf = PixelBuffer::new(vec![128; 8 * 8 * 4], 8, 8, PixelFormat::Rgba8).unwrap();
+/// let filtered = filter::median(&buf, 1).unwrap();
+/// assert_eq!(filtered.data[0], 128); // uniform → unchanged
+/// ```
+pub fn median(buf: &PixelBuffer, radius: u32) -> Result<PixelBuffer, RangaError> {
+    if buf.format != PixelFormat::Rgba8 {
+        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+    }
+    if radius == 0 {
+        return Ok(buf.clone());
+    }
+    let w = buf.width as usize;
+    let h = buf.height as usize;
+    let r = radius as i32;
+    let mut out = vec![0u8; buf.data.len()];
+    let mut window = Vec::with_capacity(((2 * r + 1) * (2 * r + 1)) as usize);
+
+    for y in 0..h {
+        for x in 0..w {
+            let di = (y * w + x) * 4;
+            for c in 0..3 {
+                window.clear();
+                for ky in -r..=r {
+                    let sy = (y as i32 + ky).clamp(0, h as i32 - 1) as usize;
+                    for kx in -r..=r {
+                        let sx = (x as i32 + kx).clamp(0, w as i32 - 1) as usize;
+                        window.push(buf.data[(sy * w + sx) * 4 + c]);
+                    }
+                }
+                window.sort_unstable();
+                out[di + c] = window[window.len() / 2];
+            }
+            out[di + 3] = buf.data[di + 3]; // preserve alpha
+        }
+    }
+    PixelBuffer::new(out, buf.width, buf.height, PixelFormat::Rgba8)
+}
+
+/// Apply a bilateral filter (edge-preserving smoothing).
+///
+/// Combines spatial proximity and intensity similarity weighting.
+/// `sigma_space` controls spatial extent, `sigma_color` controls how much
+/// intensity difference is tolerated before reducing the weight.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::filter;
+///
+/// let buf = PixelBuffer::new(vec![128; 8 * 8 * 4], 8, 8, PixelFormat::Rgba8).unwrap();
+/// let filtered = filter::bilateral(&buf, 2, 10.0, 30.0).unwrap();
+/// assert_eq!(filtered.data[0], 128);
+/// ```
+pub fn bilateral(
+    buf: &PixelBuffer,
+    radius: u32,
+    sigma_space: f32,
+    sigma_color: f32,
+) -> Result<PixelBuffer, RangaError> {
+    if buf.format != PixelFormat::Rgba8 {
+        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+    }
+    if radius == 0 {
+        return Ok(buf.clone());
+    }
+    let w = buf.width as usize;
+    let h = buf.height as usize;
+    let r = radius as i32;
+    let space_coeff = -0.5 / (sigma_space * sigma_space);
+    let color_coeff = -0.5 / (sigma_color * sigma_color);
+    let mut out = vec![0u8; buf.data.len()];
+
+    for y in 0..h {
+        for x in 0..w {
+            let ci = (y * w + x) * 4;
+            let cr = buf.data[ci] as f32;
+            let cg = buf.data[ci + 1] as f32;
+            let cb = buf.data[ci + 2] as f32;
+
+            let mut sum_r = 0.0f32;
+            let mut sum_g = 0.0f32;
+            let mut sum_b = 0.0f32;
+            let mut sum_w = 0.0f32;
+
+            for ky in -r..=r {
+                let sy = (y as i32 + ky).clamp(0, h as i32 - 1) as usize;
+                for kx in -r..=r {
+                    let sx = (x as i32 + kx).clamp(0, w as i32 - 1) as usize;
+                    let si = (sy * w + sx) * 4;
+                    let sr = buf.data[si] as f32;
+                    let sg = buf.data[si + 1] as f32;
+                    let sb = buf.data[si + 2] as f32;
+
+                    let dist_sq = (kx * kx + ky * ky) as f32;
+                    let color_diff_sq = (sr - cr).powi(2) + (sg - cg).powi(2) + (sb - cb).powi(2);
+                    let weight = (dist_sq * space_coeff + color_diff_sq * color_coeff).exp();
+
+                    sum_r += sr * weight;
+                    sum_g += sg * weight;
+                    sum_b += sb * weight;
+                    sum_w += weight;
+                }
+            }
+
+            let di = (y * w + x) * 4;
+            if sum_w > 0.0 {
+                out[di] = (sum_r / sum_w).clamp(0.0, 255.0) as u8;
+                out[di + 1] = (sum_g / sum_w).clamp(0.0, 255.0) as u8;
+                out[di + 2] = (sum_b / sum_w).clamp(0.0, 255.0) as u8;
+            } else {
+                out[di] = buf.data[ci];
+                out[di + 1] = buf.data[ci + 1];
+                out[di + 2] = buf.data[ci + 2];
+            }
+            out[di + 3] = buf.data[ci + 3];
+        }
+    }
+    PixelBuffer::new(out, buf.width, buf.height, PixelFormat::Rgba8)
+}
+
+/// Adjust vibrance — smart saturation that protects already-saturated and
+/// skin-tone colors from over-saturation.
+///
+/// `amount` ranges from -1.0 (desaturate) to 1.0+ (boost muted colors).
+/// Unlike `saturation()`, vibrance targets low-saturation pixels more
+/// aggressively and leaves saturated colors alone.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::filter;
+///
+/// let mut buf = PixelBuffer::new(vec![100, 100, 100, 255], 1, 1, PixelFormat::Rgba8).unwrap();
+/// filter::vibrance(&mut buf, 0.5).unwrap();
+/// // Gray pixel has low saturation → vibrance has minimal effect
+/// ```
+pub fn vibrance(buf: &mut PixelBuffer, amount: f32) -> Result<(), RangaError> {
+    if buf.format != PixelFormat::Rgba8 {
+        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+    }
+    for pixel in buf.data.chunks_exact_mut(4) {
+        let r = pixel[0] as f32;
+        let g = pixel[1] as f32;
+        let b = pixel[2] as f32;
+        let max = r.max(g).max(b);
+        let min = r.min(g).min(b);
+        let sat = if max > 0.0 { (max - min) / max } else { 0.0 };
+        // Less-saturated pixels get more boost
+        let factor = 1.0 + amount * (1.0 - sat);
+        let gray = 0.299 * r + 0.587 * g + 0.114 * b;
+        pixel[0] = (gray + factor * (r - gray)).clamp(0.0, 255.0) as u8;
+        pixel[1] = (gray + factor * (g - gray)).clamp(0.0, 255.0) as u8;
+        pixel[2] = (gray + factor * (b - gray)).clamp(0.0, 255.0) as u8;
+    }
+    Ok(())
+}
+
+/// Apply a channel mixer — multiply each output channel by a weighted sum
+/// of the input channels.
+///
+/// `matrix` is a 3x3 row-major matrix: `out[c] = sum(matrix[c][j] * in[j])`.
+/// Identity is `[[1,0,0],[0,1,0],[0,0,1]]`.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::filter;
+///
+/// let mut buf = PixelBuffer::new(vec![200, 100, 50, 255], 1, 1, PixelFormat::Rgba8).unwrap();
+/// // Swap red and blue channels
+/// filter::channel_mixer(&mut buf, [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]]).unwrap();
+/// assert_eq!(buf.data[0], 50);  // was blue
+/// assert_eq!(buf.data[2], 200); // was red
+/// ```
+pub fn channel_mixer(buf: &mut PixelBuffer, matrix: [[f32; 3]; 3]) -> Result<(), RangaError> {
+    if buf.format != PixelFormat::Rgba8 {
+        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+    }
+    for pixel in buf.data.chunks_exact_mut(4) {
+        let r = pixel[0] as f32;
+        let g = pixel[1] as f32;
+        let b = pixel[2] as f32;
+        pixel[0] = (matrix[0][0] * r + matrix[0][1] * g + matrix[0][2] * b).clamp(0.0, 255.0) as u8;
+        pixel[1] = (matrix[1][0] * r + matrix[1][1] * g + matrix[1][2] * b).clamp(0.0, 255.0) as u8;
+        pixel[2] = (matrix[2][0] * r + matrix[2][1] * g + matrix[2][2] * b).clamp(0.0, 255.0) as u8;
+    }
+    Ok(())
+}
+
+/// Apply binary threshold — pixels above `threshold` become white, below become black.
+///
+/// Operates on luminance (BT.601). Alpha is preserved.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::filter;
+///
+/// let mut buf = PixelBuffer::new(vec![100, 100, 100, 255, 200, 200, 200, 255], 2, 1, PixelFormat::Rgba8).unwrap();
+/// filter::threshold(&mut buf, 128).unwrap();
+/// assert_eq!(buf.data[0], 0);   // dark pixel → black
+/// assert_eq!(buf.data[4], 255); // bright pixel → white
+/// ```
+pub fn threshold(buf: &mut PixelBuffer, level: u8) -> Result<(), RangaError> {
+    if buf.format != PixelFormat::Rgba8 {
+        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+    }
+    for pixel in buf.data.chunks_exact_mut(4) {
+        let lum =
+            ((77u16 * pixel[0] as u16 + 150 * pixel[1] as u16 + 29 * pixel[2] as u16) >> 8) as u8;
+        let v = if lum >= level { 255 } else { 0 };
+        pixel[0] = v;
+        pixel[1] = v;
+        pixel[2] = v;
+    }
+    Ok(())
+}
+
+/// Flood fill from a seed point with color tolerance.
+///
+/// Replaces connected pixels within `tolerance` of the seed color with
+/// `fill_color`. Uses a scanline flood-fill algorithm. Replaces rasa's
+/// inline `flood_fill` implementation.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::filter;
+///
+/// let mut buf = PixelBuffer::new(vec![128; 4 * 4 * 4], 4, 4, PixelFormat::Rgba8).unwrap();
+/// filter::flood_fill(&mut buf, 0, 0, [255, 0, 0, 255], 10).unwrap();
+/// assert_eq!(buf.data[0], 255); // filled with red
+/// ```
+pub fn flood_fill(
+    buf: &mut PixelBuffer,
+    seed_x: u32,
+    seed_y: u32,
+    fill_color: [u8; 4],
+    tolerance: u8,
+) -> Result<(), RangaError> {
+    if buf.format != PixelFormat::Rgba8 {
+        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+    }
+    let w = buf.width as usize;
+    let h = buf.height as usize;
+    if seed_x >= buf.width || seed_y >= buf.height {
+        return Ok(());
+    }
+
+    let si = (seed_y as usize * w + seed_x as usize) * 4;
+    let seed_color = [
+        buf.data[si],
+        buf.data[si + 1],
+        buf.data[si + 2],
+        buf.data[si + 3],
+    ];
+    let tol = tolerance as i16;
+
+    // Already the fill color? Nothing to do
+    if seed_color == fill_color {
+        return Ok(());
+    }
+
+    let mut stack = vec![(seed_x as usize, seed_y as usize)];
+    let mut visited = vec![false; w * h];
+
+    while let Some((x, y)) = stack.pop() {
+        let idx = y * w + x;
+        if visited[idx] {
+            continue;
+        }
+        let pi = idx * 4;
+        let pixel_matches = (buf.data[pi] as i16 - seed_color[0] as i16).abs() <= tol
+            && (buf.data[pi + 1] as i16 - seed_color[1] as i16).abs() <= tol
+            && (buf.data[pi + 2] as i16 - seed_color[2] as i16).abs() <= tol
+            && (buf.data[pi + 3] as i16 - seed_color[3] as i16).abs() <= tol;
+        if !pixel_matches {
+            continue;
+        }
+        visited[idx] = true;
+        buf.data[pi..pi + 4].copy_from_slice(&fill_color);
+
+        if x > 0 {
+            stack.push((x - 1, y));
+        }
+        if x + 1 < w {
+            stack.push((x + 1, y));
+        }
+        if y > 0 {
+            stack.push((x, y - 1));
+        }
+        if y + 1 < h {
+            stack.push((x, y + 1));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1038,5 +1357,133 @@ mod tests {
         for pixel in buf.data.chunks_exact(4) {
             assert_eq!(pixel[3], 128);
         }
+    }
+
+    // --- New filter tests ---
+
+    #[test]
+    fn median_uniform_unchanged() {
+        let buf = PixelBuffer::new(vec![100; 8 * 8 * 4], 8, 8, PixelFormat::Rgba8).unwrap();
+        let filtered = median(&buf, 1).unwrap();
+        assert_eq!(filtered.data[0], 100);
+    }
+
+    #[test]
+    fn median_radius_zero_identity() {
+        let buf = test_buf();
+        let filtered = median(&buf, 0).unwrap();
+        assert_eq!(filtered.data, buf.data);
+    }
+
+    #[test]
+    fn bilateral_uniform_unchanged() {
+        let buf = PixelBuffer::new(vec![100; 8 * 8 * 4], 8, 8, PixelFormat::Rgba8).unwrap();
+        let filtered = bilateral(&buf, 2, 10.0, 30.0).unwrap();
+        assert_eq!(filtered.data[0], 100);
+    }
+
+    #[test]
+    fn vibrance_zero_is_identity() {
+        let mut buf = test_buf();
+        let original = buf.data.clone();
+        vibrance(&mut buf, 0.0).unwrap();
+        assert_eq!(buf.data, original);
+    }
+
+    #[test]
+    fn vibrance_boosts_muted() {
+        let mut buf = PixelBuffer::new(vec![150, 140, 130, 255], 1, 1, PixelFormat::Rgba8).unwrap();
+        let original_r = buf.data[0];
+        vibrance(&mut buf, 1.0).unwrap();
+        // Low-saturation pixel should get a noticeable boost
+        assert!(buf.data[0] != original_r || buf.data[2] != 130);
+    }
+
+    #[test]
+    fn channel_mixer_identity() {
+        let mut buf = PixelBuffer::new(vec![200, 100, 50, 255], 1, 1, PixelFormat::Rgba8).unwrap();
+        let original = buf.data.clone();
+        channel_mixer(
+            &mut buf,
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        )
+        .unwrap();
+        assert_eq!(buf.data, original);
+    }
+
+    #[test]
+    fn channel_mixer_swap_rb() {
+        let mut buf = PixelBuffer::new(vec![200, 100, 50, 255], 1, 1, PixelFormat::Rgba8).unwrap();
+        channel_mixer(
+            &mut buf,
+            [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]],
+        )
+        .unwrap();
+        assert_eq!(buf.data[0], 50);
+        assert_eq!(buf.data[2], 200);
+    }
+
+    #[test]
+    fn threshold_binary() {
+        let mut buf = PixelBuffer::new(
+            vec![50, 50, 50, 255, 200, 200, 200, 255],
+            2,
+            1,
+            PixelFormat::Rgba8,
+        )
+        .unwrap();
+        threshold(&mut buf, 128).unwrap();
+        assert_eq!(buf.data[0], 0);
+        assert_eq!(buf.data[4], 255);
+    }
+
+    #[test]
+    fn threshold_preserves_alpha() {
+        let mut buf = PixelBuffer::new(vec![200, 200, 200, 128], 1, 1, PixelFormat::Rgba8).unwrap();
+        threshold(&mut buf, 128).unwrap();
+        assert_eq!(buf.data[3], 128);
+    }
+
+    #[test]
+    fn flood_fill_uniform() {
+        let mut buf = PixelBuffer::new(vec![100; 4 * 4 * 4], 4, 4, PixelFormat::Rgba8).unwrap();
+        flood_fill(&mut buf, 0, 0, [255, 0, 0, 255], 10).unwrap();
+        // Entire buffer should be red (all pixels were within tolerance)
+        assert_eq!(buf.data[0], 255);
+        assert_eq!(buf.data[1], 0);
+        assert_eq!(buf.data[60], 255); // last pixel R
+    }
+
+    #[test]
+    fn flood_fill_bounded() {
+        // 4x2 buffer: row 0 = gray(100), row 1 = gray(200)
+        // Fill from (0,0) with tolerance 10 should only fill row 0
+        let mut data = vec![0u8; 4 * 2 * 4];
+        for i in 0..4 {
+            data[i * 4] = 100;
+            data[i * 4 + 1] = 100;
+            data[i * 4 + 2] = 100;
+            data[i * 4 + 3] = 255;
+        }
+        for i in 4..8 {
+            data[i * 4] = 200;
+            data[i * 4 + 1] = 200;
+            data[i * 4 + 2] = 200;
+            data[i * 4 + 3] = 255;
+        }
+        let mut buf = PixelBuffer::new(data, 4, 2, PixelFormat::Rgba8).unwrap();
+        flood_fill(&mut buf, 0, 0, [0, 255, 0, 255], 10).unwrap();
+        // Row 0 should be filled green
+        assert_eq!(buf.data[0], 0);
+        assert_eq!(buf.data[1], 255);
+        // Row 1 should be untouched (200 is > 10 tolerance from 100)
+        assert_eq!(buf.data[4 * 4], 200);
+    }
+
+    #[test]
+    fn flood_fill_out_of_bounds_seed() {
+        let mut buf = PixelBuffer::new(vec![128; 4], 1, 1, PixelFormat::Rgba8).unwrap();
+        flood_fill(&mut buf, 99, 99, [255, 0, 0, 255], 10).unwrap();
+        assert_eq!(buf.data[0], 128); // unchanged
     }
 }

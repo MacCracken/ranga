@@ -1,6 +1,6 @@
 [package]
 name = "ranga"
-version = "0.20.3"
+version = "0.20.4"
 edition = "2024"
 rust-version = "1.89"
 license = "AGPL-3.0-only"
@@ -47,6 +47,14 @@ harness = false
 
 [[bench]]
 name = "filter"
+harness = false
+
+[[bench]]
+name = "transform"
+harness = false
+
+[[bench]]
+name = "composite"
 harness = false
 
 [[bench]]

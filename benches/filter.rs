@@ -149,6 +149,60 @@ fn bench_noise_salt_pepper(c: &mut Criterion) {
     });
 }
 
+fn bench_median(c: &mut Criterion) {
+    // Smaller size for median — it's O(n * radius^2) per pixel
+    let buf = PixelBuffer::new(vec![128; 512 * 512 * 4], 512, 512, PixelFormat::Rgba8).unwrap();
+    c.bench_function("median_r1_512x512", |b| {
+        b.iter(|| filter::median(black_box(&buf), 1).unwrap())
+    });
+}
+
+fn bench_bilateral(c: &mut Criterion) {
+    let buf = PixelBuffer::new(vec![128; 256 * 256 * 4], 256, 256, PixelFormat::Rgba8).unwrap();
+    c.bench_function("bilateral_r2_256x256", |b| {
+        b.iter(|| filter::bilateral(black_box(&buf), 2, 10.0, 30.0).unwrap())
+    });
+}
+
+fn bench_vibrance(c: &mut Criterion) {
+    let mut buf = make_varied_buf();
+    c.bench_function("vibrance_1080p", |b| {
+        b.iter(|| filter::vibrance(black_box(&mut buf), 0.5).unwrap())
+    });
+}
+
+fn bench_channel_mixer(c: &mut Criterion) {
+    let mut buf = make_varied_buf();
+    c.bench_function("channel_mixer_1080p", |b| {
+        b.iter(|| {
+            filter::channel_mixer(
+                black_box(&mut buf),
+                [[0.8, 0.1, 0.1], [0.1, 0.8, 0.1], [0.1, 0.1, 0.8]],
+            )
+            .unwrap()
+        })
+    });
+}
+
+fn bench_threshold(c: &mut Criterion) {
+    let mut buf = make_varied_buf();
+    c.bench_function("threshold_1080p", |b| {
+        b.iter(|| filter::threshold(black_box(&mut buf), 128).unwrap())
+    });
+}
+
+fn bench_flood_fill(c: &mut Criterion) {
+    // Uniform buffer — flood fill covers entire image
+    let mut buf = make_buf();
+    c.bench_function("flood_fill_1080p_uniform", |b| {
+        b.iter(|| {
+            // Reset to uniform before each fill
+            buf.data.fill(128);
+            filter::flood_fill(black_box(&mut buf), 0, 0, [255, 0, 0, 255], 10).unwrap()
+        })
+    });
+}
+
 criterion_group!(
     benches,
     bench_brightness,
@@ -167,5 +221,11 @@ criterion_group!(
     bench_lut3d,
     bench_noise_gaussian,
     bench_noise_salt_pepper,
+    bench_median,
+    bench_bilateral,
+    bench_vibrance,
+    bench_channel_mixer,
+    bench_threshold,
+    bench_flood_fill,
 );
 criterion_main!(benches);

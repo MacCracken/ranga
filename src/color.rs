@@ -170,6 +170,18 @@ pub enum ColorSpace {
     Bt709,
 }
 
+impl std::fmt::Display for ColorSpace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Srgb => write!(f, "sRGB"),
+            Self::LinearRgb => write!(f, "Linear RGB"),
+            Self::DisplayP3 => write!(f, "Display P3"),
+            Self::Bt601 => write!(f, "BT.601"),
+            Self::Bt709 => write!(f, "BT.709"),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // sRGB ↔ Linear
 // ---------------------------------------------------------------------------

@@ -31,6 +31,7 @@
 
 pub mod blend;
 pub mod color;
+pub mod composite;
 pub mod convert;
 pub mod filter;
 #[cfg(feature = "gpu")]
@@ -40,6 +41,7 @@ pub mod histogram;
 pub mod hwaccel;
 pub mod icc;
 pub mod pixel;
+pub mod transform;
 
 mod error;
 pub use error::RangaError;

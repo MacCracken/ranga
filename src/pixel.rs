@@ -33,6 +33,19 @@ pub enum PixelFormat {
     RgbaF32,
 }
 
+impl std::fmt::Display for PixelFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rgba8 => write!(f, "RGBA8"),
+            Self::Argb8 => write!(f, "ARGB8"),
+            Self::Rgb8 => write!(f, "RGB8"),
+            Self::Yuv420p => write!(f, "YUV420p"),
+            Self::Nv12 => write!(f, "NV12"),
+            Self::RgbaF32 => write!(f, "RgbaF32"),
+        }
+    }
+}
+
 impl PixelFormat {
     /// Compute expected buffer size in bytes for this format at the given dimensions.
     ///
@@ -157,6 +170,124 @@ impl PixelBuffer {
     #[must_use]
     pub fn pixel_count(&self) -> usize {
         self.width as usize * self.height as usize
+    }
+
+    /// Iterate over rows as byte slices.
+    ///
+    /// Each row is `width * bytes_per_pixel` bytes. Only valid for
+    /// non-planar formats (Rgba8, Argb8, Rgb8, RgbaF32).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ranga::pixel::{PixelBuffer, PixelFormat};
+    ///
+    /// let buf = PixelBuffer::zeroed(4, 3, PixelFormat::Rgba8);
+    /// assert_eq!(buf.rows().count(), 3);
+    /// assert_eq!(buf.rows().next().unwrap().len(), 16); // 4 pixels * 4 bytes
+    /// ```
+    pub fn rows(&self) -> impl Iterator<Item = &[u8]> {
+        let stride = match self.format {
+            PixelFormat::Rgba8 | PixelFormat::Argb8 => self.width as usize * 4,
+            PixelFormat::Rgb8 => self.width as usize * 3,
+            PixelFormat::RgbaF32 => self.width as usize * 16,
+            _ => self.width as usize, // planar: Y-plane row
+        };
+        self.data.chunks_exact(stride)
+    }
+
+    /// Iterate over rows as mutable byte slices.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ranga::pixel::{PixelBuffer, PixelFormat};
+    ///
+    /// let mut buf = PixelBuffer::zeroed(4, 2, PixelFormat::Rgba8);
+    /// for row in buf.rows_mut() {
+    ///     row[0] = 255; // set first byte of each row
+    /// }
+    /// assert_eq!(buf.data[0], 255);
+    /// assert_eq!(buf.data[16], 255);
+    /// ```
+    pub fn rows_mut(&mut self) -> impl Iterator<Item = &mut [u8]> {
+        let stride = match self.format {
+            PixelFormat::Rgba8 | PixelFormat::Argb8 => self.width as usize * 4,
+            PixelFormat::Rgb8 => self.width as usize * 3,
+            PixelFormat::RgbaF32 => self.width as usize * 16,
+            _ => self.width as usize,
+        };
+        self.data.chunks_exact_mut(stride)
+    }
+
+    /// Get the RGBA value of a pixel at (x, y). Requires RGBA8 format.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ranga::pixel::{PixelBuffer, PixelFormat};
+    ///
+    /// let buf = PixelBuffer::new(vec![255, 128, 64, 200], 1, 1, PixelFormat::Rgba8).unwrap();
+    /// assert_eq!(buf.get_rgba(0, 0), Some([255, 128, 64, 200]));
+    /// assert_eq!(buf.get_rgba(99, 99), None); // out of bounds
+    /// ```
+    #[must_use]
+    pub fn get_rgba(&self, x: u32, y: u32) -> Option<[u8; 4]> {
+        if self.format != PixelFormat::Rgba8 || x >= self.width || y >= self.height {
+            return None;
+        }
+        let i = (y as usize * self.width as usize + x as usize) * 4;
+        Some([
+            self.data[i],
+            self.data[i + 1],
+            self.data[i + 2],
+            self.data[i + 3],
+        ])
+    }
+
+    /// Set the RGBA value of a pixel at (x, y). Requires RGBA8 format.
+    ///
+    /// Returns `false` if out of bounds or wrong format.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ranga::pixel::{PixelBuffer, PixelFormat};
+    ///
+    /// let mut buf = PixelBuffer::zeroed(2, 2, PixelFormat::Rgba8);
+    /// assert!(buf.set_rgba(0, 0, [255, 0, 0, 255]));
+    /// assert_eq!(buf.data[0], 255);
+    /// assert!(!buf.set_rgba(99, 99, [0; 4])); // out of bounds
+    /// ```
+    pub fn set_rgba(&mut self, x: u32, y: u32, pixel: [u8; 4]) -> bool {
+        if self.format != PixelFormat::Rgba8 || x >= self.width || y >= self.height {
+            return false;
+        }
+        let i = (y as usize * self.width as usize + x as usize) * 4;
+        self.data[i..i + 4].copy_from_slice(&pixel);
+        true
+    }
+
+    /// Create an owned `PixelBuffer` from a `PixelView` (copies data).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ranga::pixel::{PixelBuffer, PixelView, PixelFormat};
+    ///
+    /// let data = vec![128u8; 4 * 4 * 4];
+    /// let view = PixelView::new(&data, 4, 4, PixelFormat::Rgba8).unwrap();
+    /// let buf = PixelBuffer::from_view(&view);
+    /// assert_eq!(buf.data, data);
+    /// ```
+    #[must_use]
+    pub fn from_view(view: &PixelView<'_>) -> Self {
+        Self {
+            data: view.data().to_vec(),
+            width: view.width(),
+            height: view.height(),
+            format: view.format(),
+        }
     }
 
     /// Borrow this buffer as a read-only [`PixelView`].
