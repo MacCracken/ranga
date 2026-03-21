@@ -45,3 +45,8 @@ harness = false
 [[bench]]
 name = "filter"
 harness = false
+
+[[bench]]
+name = "gpu"
+harness = false
+required-features = ["gpu"]

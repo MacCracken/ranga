@@ -33,6 +33,8 @@ pub mod blend;
 pub mod color;
 pub mod convert;
 pub mod filter;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 pub mod histogram;
 #[cfg(feature = "hwaccel")]
 pub mod hwaccel;
