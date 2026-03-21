@@ -11,10 +11,8 @@ targets = [
 ]
 
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
-yanked = "warn"
-notice = "warn"
+# cargo-deny v2 uses "all"/"workspace"/"transitive"/"none" for these fields
+ignore = []
 
 [licenses]
 unlicensed = "deny"
