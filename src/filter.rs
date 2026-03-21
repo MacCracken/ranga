@@ -1,11 +1,17 @@
-//! CPU image filters — brightness, contrast, saturation, levels, curves.
+//! CPU image filters — brightness, contrast, saturation, levels, curves,
+//! blur, sharpen, hue shift, color balance, 3D LUT, vignette, and noise.
 //!
-//! All filters operate on RGBA8 pixel buffers in-place. Pass a mutable
-//! reference to a [`PixelBuffer`] and the filter modifies RGB channels
-//! while preserving alpha.
+//! All filters operate on RGBA8 pixel buffers. In-place filters take
+//! `&mut PixelBuffer`; spatial filters (blur, sharpen) return a new buffer.
+//!
+//! When the `parallel` feature is enabled, large-buffer operations use
+//! rayon for row-parallel processing.
 
 use crate::RangaError;
 use crate::pixel::{PixelBuffer, PixelFormat};
+
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 /// Adjust brightness of an RGBA8 buffer in-place.
 ///
@@ -250,50 +256,78 @@ fn blur_pass_horizontal(
     src: &[u8],
     dst: &mut [u8],
     w: usize,
-    h: usize,
+    _h: usize,
     kernel: &[f32],
     radius: i32,
 ) {
-    for y in 0..h {
+    let process_row = |y: usize, row: &mut [u8]| {
         for x in 0..w {
-            let mut r = 0.0f32;
-            let mut g = 0.0f32;
-            let mut b = 0.0f32;
+            let mut rv = 0.0f32;
+            let mut gv = 0.0f32;
+            let mut bv = 0.0f32;
             for (ki, &kv) in kernel.iter().enumerate() {
                 let sx = (x as i32 + ki as i32 - radius).clamp(0, w as i32 - 1) as usize;
                 let idx = (y * w + sx) * 4;
-                r += src[idx] as f32 * kv;
-                g += src[idx + 1] as f32 * kv;
-                b += src[idx + 2] as f32 * kv;
+                rv += src[idx] as f32 * kv;
+                gv += src[idx + 1] as f32 * kv;
+                bv += src[idx + 2] as f32 * kv;
             }
-            let oi = (y * w + x) * 4;
-            dst[oi] = r.clamp(0.0, 255.0) as u8;
-            dst[oi + 1] = g.clamp(0.0, 255.0) as u8;
-            dst[oi + 2] = b.clamp(0.0, 255.0) as u8;
-            dst[oi + 3] = src[oi + 3]; // preserve alpha
+            let oi = x * 4;
+            row[oi] = rv.clamp(0.0, 255.0) as u8;
+            row[oi + 1] = gv.clamp(0.0, 255.0) as u8;
+            row[oi + 2] = bv.clamp(0.0, 255.0) as u8;
+            row[oi + 3] = src[(y * w + x) * 4 + 3];
         }
+    };
+
+    let row_bytes = w * 4;
+    #[cfg(feature = "parallel")]
+    {
+        dst.par_chunks_exact_mut(row_bytes)
+            .enumerate()
+            .for_each(|(y, row)| process_row(y, row));
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        dst.chunks_exact_mut(row_bytes)
+            .enumerate()
+            .for_each(|(y, row)| process_row(y, row));
     }
 }
 
 fn blur_pass_vertical(src: &[u8], dst: &mut [u8], w: usize, h: usize, kernel: &[f32], radius: i32) {
-    for y in 0..h {
+    let process_row = |y: usize, row: &mut [u8]| {
         for x in 0..w {
-            let mut r = 0.0f32;
-            let mut g = 0.0f32;
-            let mut b = 0.0f32;
+            let mut rv = 0.0f32;
+            let mut gv = 0.0f32;
+            let mut bv = 0.0f32;
             for (ki, &kv) in kernel.iter().enumerate() {
                 let sy = (y as i32 + ki as i32 - radius).clamp(0, h as i32 - 1) as usize;
                 let idx = (sy * w + x) * 4;
-                r += src[idx] as f32 * kv;
-                g += src[idx + 1] as f32 * kv;
-                b += src[idx + 2] as f32 * kv;
+                rv += src[idx] as f32 * kv;
+                gv += src[idx + 1] as f32 * kv;
+                bv += src[idx + 2] as f32 * kv;
             }
-            let oi = (y * w + x) * 4;
-            dst[oi] = r.clamp(0.0, 255.0) as u8;
-            dst[oi + 1] = g.clamp(0.0, 255.0) as u8;
-            dst[oi + 2] = b.clamp(0.0, 255.0) as u8;
-            dst[oi + 3] = src[oi + 3];
+            let oi = x * 4;
+            row[oi] = rv.clamp(0.0, 255.0) as u8;
+            row[oi + 1] = gv.clamp(0.0, 255.0) as u8;
+            row[oi + 2] = bv.clamp(0.0, 255.0) as u8;
+            row[oi + 3] = src[(y * w + x) * 4 + 3];
         }
+    };
+
+    let row_bytes = w * 4;
+    #[cfg(feature = "parallel")]
+    {
+        dst.par_chunks_exact_mut(row_bytes)
+            .enumerate()
+            .for_each(|(y, row)| process_row(y, row));
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        dst.chunks_exact_mut(row_bytes)
+            .enumerate()
+            .for_each(|(y, row)| process_row(y, row));
     }
 }
 

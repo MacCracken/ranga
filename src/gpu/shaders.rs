@@ -220,6 +220,88 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+/// Horizontal Gaussian blur pass.
+///
+/// Performs a 1D horizontal convolution using a pre-computed kernel. Each thread
+/// processes one pixel, summing weighted samples across its row.
+///
+/// Bindings:
+/// - `@binding(0)`: input pixels (`array<u32>`, read-only)
+/// - `@binding(1)`: output pixels (`array<u32>`, read-write)
+/// - `@binding(2)`: kernel weights (`array<f32>`, read-only storage)
+/// - `@binding(3)`: uniform params (`width: u32`, `height: u32`, `radius: u32`, `_pad: u32`)
+pub const BLUR_HORIZONTAL: &str = r#"
+@group(0) @binding(0) var<storage, read> input: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output: array<u32>;
+@group(0) @binding(2) var<storage, read> kernel: array<f32>;
+
+struct Params {
+    width: u32,
+    height: u32,
+    radius: u32,
+    _pad: u32,
+}
+@group(0) @binding(3) var<uniform> params: Params;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = gid.x;
+    let y = gid.y;
+    if x >= params.width || y >= params.height { return; }
+
+    let r = i32(params.radius);
+    var acc = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    for (var i = -r; i <= r; i = i + 1) {
+        let sx = clamp(i32(x) + i, 0, i32(params.width) - 1);
+        let idx = u32(sx) + y * params.width;
+        let w = kernel[u32(i + r)];
+        acc = acc + unpack_rgba(input[idx]) * w;
+    }
+    output[x + y * params.width] = pack_rgba(acc);
+}
+"#;
+
+/// Vertical Gaussian blur pass.
+///
+/// Performs a 1D vertical convolution using a pre-computed kernel. Each thread
+/// processes one pixel, summing weighted samples down its column.
+///
+/// Bindings:
+/// - `@binding(0)`: input pixels (`array<u32>`, read-only)
+/// - `@binding(1)`: output pixels (`array<u32>`, read-write)
+/// - `@binding(2)`: kernel weights (`array<f32>`, read-only storage)
+/// - `@binding(3)`: uniform params (`width: u32`, `height: u32`, `radius: u32`, `_pad: u32`)
+pub const BLUR_VERTICAL: &str = r#"
+@group(0) @binding(0) var<storage, read> input: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output: array<u32>;
+@group(0) @binding(2) var<storage, read> kernel: array<f32>;
+
+struct Params {
+    width: u32,
+    height: u32,
+    radius: u32,
+    _pad: u32,
+}
+@group(0) @binding(3) var<uniform> params: Params;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = gid.x;
+    let y = gid.y;
+    if x >= params.width || y >= params.height { return; }
+
+    let r = i32(params.radius);
+    var acc = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    for (var i = -r; i <= r; i = i + 1) {
+        let sy = clamp(i32(y) + i, 0, i32(params.height) - 1);
+        let idx = x + u32(sy) * params.width;
+        let w = kernel[u32(i + r)];
+        acc = acc + unpack_rgba(input[idx]) * w;
+    }
+    output[x + y * params.width] = pack_rgba(acc);
+}
+"#;
+
 /// RGBA8 to YUV420p Y-plane extraction (BT.601).
 ///
 /// Extracts the Y (luma) plane from packed RGBA8 pixels. Processes 4 Y values
@@ -301,5 +383,17 @@ mod tests {
     fn invert_shader_preserves_alpha() {
         assert!(INVERT.contains("px.a"));
         assert!(INVERT.contains("1.0 - px.r"));
+    }
+
+    #[test]
+    fn blur_horizontal_shader_has_kernel_binding() {
+        assert!(BLUR_HORIZONTAL.contains("var<storage, read> kernel"));
+        assert!(BLUR_HORIZONTAL.contains("@workgroup_size(16, 16)"));
+    }
+
+    #[test]
+    fn blur_vertical_shader_has_kernel_binding() {
+        assert!(BLUR_VERTICAL.contains("var<storage, read> kernel"));
+        assert!(BLUR_VERTICAL.contains("@workgroup_size(16, 16)"));
     }
 }

@@ -17,4 +17,7 @@ mod shaders;
 
 pub use buffer::GpuBuffer;
 pub use context::{GpuContext, GpuError};
-pub use pipeline::{gpu_blend, gpu_brightness_contrast, gpu_grayscale, gpu_invert, gpu_saturation};
+pub use pipeline::{
+    gpu_blend, gpu_brightness_contrast, gpu_gaussian_blur, gpu_grayscale, gpu_invert,
+    gpu_saturation,
+};

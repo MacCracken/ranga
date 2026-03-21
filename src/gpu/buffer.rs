@@ -127,6 +127,83 @@ impl GpuBuffer {
         .map_err(|e| GpuError::BufferOp(e.to_string()))
     }
 
+    /// Start an asynchronous download of this GPU buffer.
+    ///
+    /// Returns immediately with a [`std::sync::mpsc::Receiver`] that will
+    /// eventually contain the downloaded [`PixelBuffer`]. The caller can
+    /// perform other work while the GPU readback is in progress, then call
+    /// [`Receiver::recv`](std::sync::mpsc::Receiver::recv) to block until
+    /// the result is ready.
+    ///
+    /// You must call [`GpuContext::device().poll()`](wgpu::Device::poll) at
+    /// some point to drive the GPU work to completion (or use a polling loop).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ranga::gpu::{GpuContext, GpuBuffer};
+    /// use ranga::pixel::{PixelBuffer, PixelFormat};
+    ///
+    /// let ctx = GpuContext::new().unwrap();
+    /// let buf = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
+    /// let gpu_buf = GpuBuffer::upload(&ctx, &buf);
+    /// let receiver = gpu_buf.download_async(&ctx);
+    /// // ... do other work ...
+    /// ctx.device().poll(wgpu::Maintain::Wait);
+    /// let result = receiver.recv().unwrap().unwrap();
+    /// assert_eq!(result.width, 64);
+    /// ```
+    pub fn download_async(
+        &self,
+        ctx: &GpuContext,
+    ) -> std::sync::mpsc::Receiver<Result<PixelBuffer, GpuError>> {
+        let staging = ctx.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("staging_readback_async"),
+            size: self.size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = ctx
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_buffer_to_buffer(&self.buffer, 0, &staging, 0, self.size);
+        ctx.queue().submit(Some(encoder.finish()));
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let width = self.width;
+        let height = self.height;
+        let size = self.size as usize;
+
+        let slice = staging.slice(..);
+        let (map_tx, map_rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = map_tx.send(result);
+        });
+
+        // Spawn a thread that waits for the map callback and sends the result.
+        // This avoids blocking the caller; they just recv() on the returned channel.
+        std::thread::spawn(move || {
+            let map_result = map_rx.recv();
+            let result = (|| -> Result<PixelBuffer, GpuError> {
+                map_result
+                    .map_err(|e| GpuError::BufferOp(e.to_string()))?
+                    .map_err(|e| GpuError::BufferOp(e.to_string()))?;
+                let data = {
+                    let view = staging.slice(..);
+                    let mapped = view.get_mapped_range();
+                    mapped[..size].to_vec()
+                };
+                drop(staging);
+                PixelBuffer::new(data, width, height, crate::pixel::PixelFormat::Rgba8)
+                    .map_err(|e| GpuError::BufferOp(e.to_string()))
+            })();
+            let _ = tx.send(result);
+        });
+
+        rx
+    }
+
     /// Access the underlying [`wgpu::Buffer`].
     #[must_use]
     pub fn wgpu_buffer(&self) -> &wgpu::Buffer {
