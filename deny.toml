@@ -11,11 +11,9 @@ targets = [
 ]
 
 [advisories]
-# cargo-deny v2 uses "all"/"workspace"/"transitive"/"none" for these fields
 ignore = []
 
 [licenses]
-unlicensed = "deny"
 allow = [
     "MIT",
     "Apache-2.0",
@@ -25,12 +23,6 @@ allow = [
     "Unicode-3.0",
     "AGPL-3.0-only",
 ]
-copyleft = "warn"
-
-[[licenses.clarify]]
-name = "ring"
-expression = "MIT AND ISC AND OpenSSL"
-license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 
 [bans]
 multiple-versions = "warn"
