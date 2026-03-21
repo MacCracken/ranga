@@ -2,16 +2,13 @@
 # https://embarkstudios.github.io/cargo-deny/
 
 [graph]
-targets = [
-    "x86_64-unknown-linux-gnu",
-    "aarch64-unknown-linux-gnu",
-    "x86_64-apple-darwin",
-    "aarch64-apple-darwin",
-    "x86_64-pc-windows-msvc",
-]
+targets = []
+all-features = true
 
 [advisories]
-ignore = []
+# paste v1.0.15 has an informational announcement (not a vulnerability).
+# No safe upgrade available — wgpu 24 depends on it transitively via metal.
+ignore = ["RUSTSEC-2024-0436"]
 
 [licenses]
 allow = [
@@ -19,14 +16,18 @@ allow = [
     "Apache-2.0",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    "CC0-1.0",
     "ISC",
     "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
     "AGPL-3.0-only",
 ]
 
 [bans]
 multiple-versions = "warn"
-wildcards = "allow"
+wildcards = "deny"
+highlight = "all"
 
 [sources]
 unknown-registry = "deny"

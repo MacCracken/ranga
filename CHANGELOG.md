@@ -2,18 +2,91 @@
 
 ## [0.20.3] — 2026-03-20
 
-First release. Core image processing primitives extracted from rasa and aethersafta.
+First release. Core image processing primitives for the AGNOS creative suite,
+replacing inline implementations across rasa, tazama, and aethersafta.
 
-### Added
+### Color Science
 
-- **Color module** — `LinRgba`, `Srgba`, `Hsl` types with sRGB↔linear gamma conversion, HSL conversion
-- **Pixel buffer** — `PixelBuffer` type with format validation, 6 pixel formats (RGBA8, ARGB8, RGB8, YUV420p, NV12, RgbaF32)
-- **Blend modes** — 12 Porter-Duff blend modes (Normal, Multiply, Screen, Overlay, Darken, Lighten, ColorDodge, ColorBurn, SoftLight, HardLight, Difference, Exclusion)
-- **Color conversion** — RGBA↔YUV420p (BT.601 fixed-point), ARGB→NV12
-- **Filters** — brightness, contrast, saturation, levels, curves, grayscale, invert (all in-place on RGBA8)
-- **Histogram** — luminance histogram, per-channel RGB histograms, chi-squared distance
-- **CI/CD** — 10-job GitHub Actions pipeline (lint, security, supply chain, test matrix, MSRV, coverage, benchmarks, docs, semver)
-- **Release workflow** — Tag-triggered build matrix with crates.io publish and GitHub Releases
-- **Supply chain** — `deny.toml` with license allowlist, `supply-chain/` cargo-vet config
-- **Testing** — 32 unit tests, 15 doc-tests, 15 integration tests, 3 fuzz targets, 3 examples
-- **Documentation** — SECURITY.md, CONTRIBUTING.md, CODE_OF_CONDUCT.md, threat model, ADRs, codecov config
+- `LinRgba`, `Srgba`, `Hsl` types with bidirectional sRGB↔linear gamma conversion
+- `CieXyz`, `CieLab` types with full sRGB↔XYZ↔Lab conversion chain (D65)
+- `Cmyk` type with naive CMYK↔sRGB conversion
+- Display P3 ↔ sRGB linear conversion (3x3 matrix)
+- Color temperature (Kelvin → RGB multipliers, Tanner Helland approximation)
+- Delta-E color distance: CIE76, CIE94, CIEDE2000 (Sharma 2005)
+- `ColorSpace` enum: Srgb, LinearRgb, DisplayP3, Bt601, Bt709
+
+### Pixel Buffer
+
+- `PixelBuffer` with format validation, 6 formats (RGBA8, ARGB8, RGB8, YUV420p, NV12, RgbaF32)
+- `PixelView` / `PixelViewMut` — zero-copy borrowed views for downstream integration
+- `BufferPool` — reusable allocation pool for video frame pipelines
+
+### Blend Modes
+
+- 12 Porter-Duff blend modes: Normal, Multiply, Screen, Overlay, Darken, Lighten, ColorDodge, ColorBurn, SoftLight, HardLight, Difference, Exclusion
+- SIMD acceleration: SSE2 (2px/iter), AVX2 (4px/iter, runtime detected), NEON (8px/iter)
+- `blend_pixel` (single pixel) and `blend_row_normal` (row-level, SIMD-accelerated)
+
+### Color Conversion
+
+- RGBA↔YUV420p BT.601 (fixed-point)
+- RGBA↔YUV420p BT.709 (fixed-point, HD video standard)
+- ARGB→NV12, NV12→RGBA
+- RGB8↔RGBA8, ARGB8↔RGBA8, RgbaF32↔RGBA8
+- Odd-dimension safe (chroma subsampling clamped for non-even sizes)
+
+### Filters (17 total)
+
+- In-place: brightness, contrast, saturation, levels, curves, grayscale, invert
+- Spatial: Gaussian blur (separable), box blur (separable), unsharp mask
+- Color: hue shift (HSL), color balance (shadows/midtones/highlights)
+- Effects: vignette, noise (Gaussian + salt-and-pepper with deterministic PRNG)
+- Grading: 3D LUT application (.cube file parser with trilinear interpolation)
+- Parallel blur via rayon (`parallel` feature)
+
+### Histogram
+
+- Luminance histogram (BT.601, configurable bins)
+- Per-channel RGB histograms (256 bins, normalized)
+- Chi-squared distance metric
+
+### ICC Profiles
+
+- Matrix-based ICC v2/v4 profile parser (pure Rust, no C deps)
+- TRC support: gamma curves and lookup tables
+- `IccProfile::apply()` for RGB→XYZ transform via parsed matrix + TRC
+
+### GPU Compute (`gpu` feature)
+
+- `GpuContext` — wgpu device/queue management (Vulkan + Metal)
+- Pipeline caching — compiled shaders stored for reuse across calls
+- WGSL compute shaders: blend (all 12 modes), invert, grayscale, brightness/contrast, saturation, Gaussian blur (horizontal + vertical)
+- `GpuBuffer` — upload/download with async readback support
+- GPU/CPU equivalence tests verify correctness within rounding tolerance
+
+### Hardware Detection (`hwaccel` feature)
+
+- `probe()` — GPU/Vulkan detection via ai-hwaccel
+- `should_use_gpu(w, h)` — automatic CPU/GPU crossover recommendation
+
+### Infrastructure
+
+- CI/CD: 10-job GitHub Actions pipeline (lint, security, supply chain, test matrix, MSRV 1.89, coverage, benchmarks, docs, semver)
+- Release workflow: tag-triggered 5-target build matrix, crates.io publish, GitHub Releases
+- Supply chain: cargo-deny license allowlist, cargo-vet config
+- 238 tests: 116 unit, 15 integration, 15 proptest, 92 doc-tests
+- 37 criterion benchmarks across 6 suites (blend, convert, color science, filters, GPU)
+- 3 fuzz targets (blend, convert, filter)
+- 3 runnable examples
+- 94.6% code coverage (75% CI gate)
+- `#[non_exhaustive]` on all public enums
+- All `unsafe` blocks documented with `// SAFETY:` comments
+- SECURITY.md, CONTRIBUTING.md, CODE_OF_CONDUCT.md, threat model, 2 ADRs, migration guide
+
+### Feature Flags
+
+- `simd` (default) — SSE2/AVX2/NEON blend acceleration
+- `gpu` — wgpu compute shaders
+- `hwaccel` — GPU detection via ai-hwaccel
+- `parallel` — rayon row-parallel blur
+- `full` — all features
