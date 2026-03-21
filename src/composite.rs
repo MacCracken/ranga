@@ -276,6 +276,107 @@ pub fn gradient_linear(
     Ok(())
 }
 
+/// Fill a buffer with a linear gradient at an arbitrary angle.
+///
+/// `angle_deg` is in degrees: 0 = left-to-right, 90 = top-to-bottom,
+/// 180 = right-to-left. The gradient spans the full extent of the image
+/// for the given angle.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::composite;
+///
+/// let mut buf = PixelBuffer::zeroed(100, 100, PixelFormat::Rgba8);
+/// composite::gradient_linear_angled(&mut buf, [255, 0, 0, 255], [0, 0, 255, 255], 45.0).unwrap();
+/// ```
+pub fn gradient_linear_angled(
+    buf: &mut PixelBuffer,
+    start: [u8; 4],
+    end: [u8; 4],
+    angle_deg: f32,
+) -> Result<(), RangaError> {
+    validate_rgba8(buf)?;
+    let w = buf.width as f32;
+    let h = buf.height as f32;
+    if w < 1.0 || h < 1.0 {
+        return Ok(());
+    }
+
+    let angle_rad = angle_deg.to_radians();
+    let dx = angle_rad.cos();
+    let dy = angle_rad.sin();
+
+    // Compute the projection range for the gradient direction.
+    let corners = [(0.0f32, 0.0f32), (w - 1.0, 0.0), (0.0, h - 1.0), (w - 1.0, h - 1.0)];
+    let mut min_proj = f32::MAX;
+    let mut max_proj = f32::MIN;
+    for (cx, cy) in corners {
+        let p = cx * dx + cy * dy;
+        min_proj = min_proj.min(p);
+        max_proj = max_proj.max(p);
+    }
+    let range = max_proj - min_proj;
+    if range < 1e-6 {
+        return Ok(());
+    }
+
+    for y in 0..buf.height as usize {
+        for x in 0..buf.width as usize {
+            let proj = x as f32 * dx + y as f32 * dy;
+            let t = ((proj - min_proj) / range).clamp(0.0, 1.0);
+            let i = (y * buf.width as usize + x) * 4;
+            for c in 0..4 {
+                buf.data[i + c] =
+                    (start[c] as f32 + t * (end[c] as f32 - start[c] as f32) + 0.5) as u8;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Fill a buffer with a radial gradient from center outward.
+///
+/// `center` is `(cx, cy)` in pixel coordinates. `radius` is the distance
+/// at which the gradient reaches `end` color. Pixels beyond `radius` get
+/// `end` color.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::composite;
+///
+/// let mut buf = PixelBuffer::zeroed(100, 100, PixelFormat::Rgba8);
+/// composite::gradient_radial(&mut buf, (50.0, 50.0), 40.0, [255, 0, 0, 255], [0, 0, 255, 255]).unwrap();
+/// assert!(buf.data[(50 * 100 + 50) * 4] > 200); // center = red
+/// ```
+pub fn gradient_radial(
+    buf: &mut PixelBuffer,
+    center: (f32, f32),
+    radius: f32,
+    start: [u8; 4],
+    end: [u8; 4],
+) -> Result<(), RangaError> {
+    validate_rgba8(buf)?;
+    let r = radius.max(1e-6);
+    for y in 0..buf.height as usize {
+        for x in 0..buf.width as usize {
+            let dx = x as f32 - center.0;
+            let dy = y as f32 - center.1;
+            let dist = (dx * dx + dy * dy).sqrt();
+            let t = (dist / r).clamp(0.0, 1.0);
+            let i = (y * buf.width as usize + x) * 4;
+            for c in 0..4 {
+                buf.data[i + c] =
+                    (start[c] as f32 + t * (end[c] as f32 - start[c] as f32) + 0.5) as u8;
+            }
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Positioned composite (core aethersafta operation)
 // ---------------------------------------------------------------------------
@@ -601,6 +702,35 @@ mod tests {
         let src = PixelBuffer::new([255, 0, 0, 255].repeat(4), 2, 2, PixelFormat::Rgba8).unwrap();
         composite_at(&src, &mut dst, 0, 0, 0.0).unwrap();
         assert_eq!(dst.data[0], 0); // unchanged
+    }
+
+    #[test]
+    fn gradient_angled_vertical() {
+        let mut buf = PixelBuffer::zeroed(10, 10, PixelFormat::Rgba8);
+        gradient_linear_angled(&mut buf, [255, 0, 0, 255], [0, 0, 255, 255], 90.0).unwrap();
+        // Top row should be mostly red.
+        assert!(buf.data[0] > 200);
+        // Bottom row should be mostly blue.
+        assert!(buf.data[(9 * 10) * 4 + 2] > 200);
+    }
+
+    #[test]
+    fn gradient_radial_center() {
+        let mut buf = PixelBuffer::zeroed(21, 21, PixelFormat::Rgba8);
+        gradient_radial(&mut buf, (10.0, 10.0), 10.0, [255, 0, 0, 255], [0, 0, 255, 255]).unwrap();
+        // Center pixel should be start color (red).
+        let ci = (10 * 21 + 10) * 4;
+        assert!(buf.data[ci] > 250, "center R={}", buf.data[ci]);
+        assert!(buf.data[ci + 2] < 5, "center B={}", buf.data[ci + 2]);
+    }
+
+    #[test]
+    fn gradient_radial_edge() {
+        let mut buf = PixelBuffer::zeroed(21, 21, PixelFormat::Rgba8);
+        gradient_radial(&mut buf, (10.0, 10.0), 10.0, [255, 0, 0, 255], [0, 0, 255, 255]).unwrap();
+        // Pixel at (20, 10) is 10px from center = at radius boundary.
+        let ei = (10 * 21 + 20) * 4;
+        assert!(buf.data[ei + 2] > 200, "edge B={}", buf.data[ei + 2]);
     }
 
     #[test]

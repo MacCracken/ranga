@@ -337,6 +337,215 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+/// 3D LUT application shader with trilinear interpolation.
+///
+/// Applies a 3D color lookup table to each pixel. The LUT is stored as a
+/// flattened array of f32 RGBA values (`size^3 * 4` entries). R/G/B map to
+/// the LUT axes.
+///
+/// Bindings:
+/// - `@binding(0)`: pixels (`array<u32>`, read-write)
+/// - `@binding(1)`: LUT data (`array<f32>`, read-only storage)
+/// - `@binding(2)`: uniform params (`count: u32`, `lut_size: u32`, `_pad1: u32`, `_pad2: u32`)
+pub const LUT3D: &str = r#"
+@group(0) @binding(0) var<storage, read_write> pixels: array<u32>;
+@group(0) @binding(1) var<storage, read> lut: array<f32>;
+
+struct Params {
+    count: u32,
+    lut_size: u32,
+    _pad1: u32,
+    _pad2: u32,
+}
+@group(0) @binding(2) var<uniform> params: Params;
+
+fn lut_sample(r: u32, g: u32, b: u32) -> vec4<f32> {
+    let s = params.lut_size;
+    let idx = (r + g * s + b * s * s) * 4u;
+    return vec4<f32>(lut[idx], lut[idx + 1u], lut[idx + 2u], lut[idx + 3u]);
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if idx >= params.count { return; }
+    let px = unpack_rgba(pixels[idx]);
+    let s = f32(params.lut_size - 1u);
+
+    let rf = px.r * s;
+    let gf = px.g * s;
+    let bf = px.b * s;
+
+    let r0 = u32(floor(rf));
+    let g0 = u32(floor(gf));
+    let b0 = u32(floor(bf));
+    let r1 = min(r0 + 1u, params.lut_size - 1u);
+    let g1 = min(g0 + 1u, params.lut_size - 1u);
+    let b1 = min(b0 + 1u, params.lut_size - 1u);
+
+    let fr = rf - floor(rf);
+    let fg = gf - floor(gf);
+    let fb = bf - floor(bf);
+
+    // Trilinear interpolation.
+    let c000 = lut_sample(r0, g0, b0);
+    let c100 = lut_sample(r1, g0, b0);
+    let c010 = lut_sample(r0, g1, b0);
+    let c110 = lut_sample(r1, g1, b0);
+    let c001 = lut_sample(r0, g0, b1);
+    let c101 = lut_sample(r1, g0, b1);
+    let c011 = lut_sample(r0, g1, b1);
+    let c111 = lut_sample(r1, g1, b1);
+
+    let c00 = mix(c000, c100, fr);
+    let c10 = mix(c010, c110, fr);
+    let c01 = mix(c001, c101, fr);
+    let c11 = mix(c011, c111, fr);
+    let c0 = mix(c00, c10, fg);
+    let c1 = mix(c01, c11, fg);
+    let result = mix(c0, c1, fb);
+
+    pixels[idx] = pack_rgba(vec4<f32>(
+        clamp(result.r, 0.0, 1.0),
+        clamp(result.g, 0.0, 1.0),
+        clamp(result.b, 0.0, 1.0),
+        px.a
+    ));
+}
+"#;
+
+/// Hue shift shader.
+///
+/// Converts RGB → HSL, adds the shift to hue, converts back to RGB.
+/// Preserves alpha.
+///
+/// Bindings:
+/// - `@binding(0)`: pixels (`array<u32>`, read-write)
+/// - `@binding(1)`: uniform params (`count: u32`, `shift: f32`, `_pad1: u32`, `_pad2: u32`)
+pub const HUE_SHIFT: &str = r#"
+@group(0) @binding(0) var<storage, read_write> pixels: array<u32>;
+
+struct Params {
+    count: u32,
+    shift: f32,
+    _pad1: u32,
+    _pad2: u32,
+}
+@group(0) @binding(1) var<uniform> params: Params;
+
+fn rgb_to_hsl(c: vec3<f32>) -> vec3<f32> {
+    let mx = max(max(c.r, c.g), c.b);
+    let mn = min(min(c.r, c.g), c.b);
+    let d = mx - mn;
+    let l = (mx + mn) * 0.5;
+    if d < 0.00001 { return vec3<f32>(0.0, 0.0, l); }
+    var s: f32;
+    if l > 0.5 { s = d / (2.0 - mx - mn); }
+    else { s = d / (mx + mn); }
+    var h: f32;
+    if abs(mx - c.r) < 0.00001 {
+        h = (c.g - c.b) / d;
+        if c.g < c.b { h = h + 6.0; }
+    } else if abs(mx - c.g) < 0.00001 {
+        h = (c.b - c.r) / d + 2.0;
+    } else {
+        h = (c.r - c.g) / d + 4.0;
+    }
+    return vec3<f32>(h / 6.0, s, l);
+}
+
+fn hue2rgb(p: f32, q: f32, t_in: f32) -> f32 {
+    var t = t_in;
+    if t < 0.0 { t = t + 1.0; }
+    if t > 1.0 { t = t - 1.0; }
+    if t < 1.0 / 6.0 { return p + (q - p) * 6.0 * t; }
+    if t < 0.5 { return q; }
+    if t < 2.0 / 3.0 { return p + (q - p) * (2.0 / 3.0 - t) * 6.0; }
+    return p;
+}
+
+fn hsl_to_rgb(hsl: vec3<f32>) -> vec3<f32> {
+    if hsl.y < 0.00001 { return vec3<f32>(hsl.z, hsl.z, hsl.z); }
+    var q: f32;
+    if hsl.z < 0.5 { q = hsl.z * (1.0 + hsl.y); }
+    else { q = hsl.z + hsl.y - hsl.z * hsl.y; }
+    let p = 2.0 * hsl.z - q;
+    return vec3<f32>(
+        hue2rgb(p, q, hsl.x + 1.0 / 3.0),
+        hue2rgb(p, q, hsl.x),
+        hue2rgb(p, q, hsl.x - 1.0 / 3.0)
+    );
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if idx >= params.count { return; }
+    let px = unpack_rgba(pixels[idx]);
+    var hsl = rgb_to_hsl(vec3<f32>(px.r, px.g, px.b));
+    hsl.x = fract(hsl.x + params.shift / 360.0);
+    let rgb = hsl_to_rgb(hsl);
+    pixels[idx] = pack_rgba(vec4<f32>(
+        clamp(rgb.r, 0.0, 1.0),
+        clamp(rgb.g, 0.0, 1.0),
+        clamp(rgb.b, 0.0, 1.0),
+        px.a
+    ));
+}
+"#;
+
+/// Color balance shader (shadows/midtones/highlights adjustment).
+///
+/// Uses luminance-based weighting: shadows affect dark pixels, midtones
+/// affect mid-range, and highlights affect bright pixels.
+///
+/// Bindings:
+/// - `@binding(0)`: pixels (`array<u32>`, read-write)
+/// - `@binding(1)`: uniform params
+pub const COLOR_BALANCE: &str = r#"
+@group(0) @binding(0) var<storage, read_write> pixels: array<u32>;
+
+struct Params {
+    count: u32,
+    shadow_r: f32,
+    shadow_g: f32,
+    shadow_b: f32,
+    mid_r: f32,
+    mid_g: f32,
+    mid_b: f32,
+    high_r: f32,
+    high_g: f32,
+    high_b: f32,
+    _pad1: u32,
+    _pad2: u32,
+}
+@group(0) @binding(1) var<uniform> params: Params;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if idx >= params.count { return; }
+    let px = unpack_rgba(pixels[idx]);
+    let lum = 0.2126 * px.r + 0.7152 * px.g + 0.0722 * px.b;
+
+    // Weight functions.
+    let shadow_w = clamp(1.0 - lum * 4.0, 0.0, 1.0);
+    let high_w = clamp(lum * 4.0 - 3.0, 0.0, 1.0);
+    let mid_w = 1.0 - shadow_w - high_w;
+
+    let adj_r = shadow_w * params.shadow_r + mid_w * params.mid_r + high_w * params.high_r;
+    let adj_g = shadow_w * params.shadow_g + mid_w * params.mid_g + high_w * params.high_g;
+    let adj_b = shadow_w * params.shadow_b + mid_w * params.mid_b + high_w * params.high_b;
+
+    pixels[idx] = pack_rgba(vec4<f32>(
+        clamp(px.r + adj_r, 0.0, 1.0),
+        clamp(px.g + adj_g, 0.0, 1.0),
+        clamp(px.b + adj_b, 0.0, 1.0),
+        px.a
+    ));
+}
+"#;
+
 /// Build a complete shader by prepending the pack/unpack helpers.
 ///
 /// All shaders require the `unpack_rgba` and `pack_rgba` functions. This
@@ -395,5 +604,27 @@ mod tests {
     fn blur_vertical_shader_has_kernel_binding() {
         assert!(BLUR_VERTICAL.contains("var<storage, read> kernel"));
         assert!(BLUR_VERTICAL.contains("@workgroup_size(16, 16)"));
+    }
+
+    #[test]
+    fn lut3d_shader_has_trilinear() {
+        assert!(LUT3D.contains("lut_sample"));
+        assert!(LUT3D.contains("mix"));
+        assert!(LUT3D.contains("lut_size"));
+    }
+
+    #[test]
+    fn hue_shift_shader_has_hsl() {
+        assert!(HUE_SHIFT.contains("rgb_to_hsl"));
+        assert!(HUE_SHIFT.contains("hsl_to_rgb"));
+        assert!(HUE_SHIFT.contains("params.shift"));
+    }
+
+    #[test]
+    fn color_balance_shader_has_weights() {
+        assert!(COLOR_BALANCE.contains("shadow_w"));
+        assert!(COLOR_BALANCE.contains("mid_w"));
+        assert!(COLOR_BALANCE.contains("high_w"));
+        assert!(COLOR_BALANCE.contains("shadow_r"));
     }
 }

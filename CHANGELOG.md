@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.21.3] — 2026-03-21
+
+### Added
+
+- **Oklab/Oklch color space** — `Oklab` and `Oklch` types with bidirectional conversion to/from linear sRGB (Björn Ottosson standard matrices)
+- **BT.2020 color space** — `rgba_to_yuv420p_bt2020()` and `yuv420p_to_rgba_bt2020()` for UHD/HDR video wide-gamut conversion
+- **Bicubic resize** — `ScaleFilter::Bicubic` variant using Catmull-Rom kernel for high-quality image scaling
+- **Perspective transform** — `Perspective` struct with `from_quad()` 4-corner mapping, `perspective_transform()` function
+- **Gradient radial fill** — `gradient_radial()` for center-outward radial gradients
+- **Gradient angled fill** — `gradient_linear_angled()` for linear gradients at arbitrary angles
+- **Histogram equalization** — `histogram::equalize()` for automatic contrast enhancement via CDF mapping
+- **Auto-levels** — `histogram::auto_levels()` for linear min/max luminance stretching
+- **Auto white balance** — `filter::auto_white_balance()` using gray-world algorithm
+- **Embedded sRGB ICC profile** — `icc::srgb_v2_profile()` generates a minimal sRGB v2 ICC profile for embedding
+- **ICC LUT-based profiles** — `IccLutProfile` struct with `from_bytes()` parser and `apply()` for mft1/mft2 tag types
+- **GPU 3D LUT shader** — `LUT3D` WGSL compute shader with trilinear interpolation
+- **GPU hue shift shader** — `HUE_SHIFT` WGSL compute shader (RGB→HSL→shift→RGB)
+- **GPU color balance shader** — `COLOR_BALANCE` WGSL compute shader with shadow/midtone/highlight weighting
+- **SIMD brightness filter** — SSE2 (x86_64) and NEON (aarch64) accelerated `brightness()` with saturating add/sub
+- **SIMD grayscale filter** — SSE2 and NEON accelerated `grayscale()` using BT.601 coefficients
+- **SIMD Y-plane conversion** — SSE2 and NEON accelerated luminance computation for BT.601/BT.709/BT.2020
+- **Cache-aware blur tiling** — Vertical blur pass processes 64-pixel-wide strips for L2 cache locality
+- **Photoshop reference test suite** — 12 blend mode golden-value tests verified against Photoshop output
+
+### Changed
+
+- `ColorSpace` enum now includes `Bt2020` variant
+- Roadmap updated with completion status for all 0.21.3 items
+
 ## [0.20.5] — 2026-03-21
 
 ### Added

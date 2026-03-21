@@ -1,8 +1,9 @@
 //! Color spaces and conversions.
 //!
 //! Provides types and conversions between sRGB, linear RGB, HSL, CIE XYZ,
-//! CIE L\*a\*b\*, Display P3, CMYK, and YUV color spaces with proper gamma
-//! handling. Includes Delta-E color distance metrics and color temperature.
+//! CIE L\*a\*b\*, Oklab, Oklch, Display P3, CMYK, and YUV color spaces with
+//! proper gamma handling. Includes Delta-E color distance metrics and color
+//! temperature.
 
 use serde::{Deserialize, Serialize};
 
@@ -150,6 +151,63 @@ pub struct Cmyk {
     pub k: f32,
 }
 
+/// A color in the Oklab perceptual color space.
+///
+/// Oklab (Björn Ottosson, 2020) is a perceptual color space designed for
+/// uniform lightness and hue linearity. `l` is lightness (0.0–1.0),
+/// `a` is green (−) to red (+), and `b` is blue (−) to yellow (+),
+/// both roughly in the −0.5 to 0.5 range.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::color::{Oklab, LinRgba};
+///
+/// let white = LinRgba { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+/// let lab: Oklab = white.into();
+/// assert!((lab.l - 1.0).abs() < 0.01);
+/// assert!(lab.a.abs() < 0.01);
+/// assert!(lab.b.abs() < 0.01);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Oklab {
+    /// Lightness (0.0–1.0).
+    pub l: f32,
+    /// Green (−) to red (+) axis (roughly −0.5 to 0.5).
+    pub a: f32,
+    /// Blue (−) to yellow (+) axis (roughly −0.5 to 0.5).
+    pub b: f32,
+}
+
+/// A color in the Oklch perceptual color space (polar form of Oklab).
+///
+/// Oklch represents colors as lightness, chroma (saturation), and hue angle.
+/// It is the cylindrical form of [`Oklab`] and is convenient for hue-based
+/// manipulations.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::color::{Oklch, Oklab};
+///
+/// let lab = Oklab { l: 0.5, a: 0.1, b: -0.1 };
+/// let lch: Oklch = lab.into();
+/// assert!((lch.l - 0.5).abs() < 1e-5);
+/// assert!(lch.c > 0.0);
+/// assert!(lch.h >= 0.0 && lch.h < 360.0);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Oklch {
+    /// Lightness (0.0–1.0).
+    pub l: f32,
+    /// Chroma (0.0+). Zero means achromatic.
+    pub c: f32,
+    /// Hue angle in degrees (0.0–360.0).
+    pub h: f32,
+}
+
 /// Color space identifiers.
 ///
 /// # Examples
@@ -168,6 +226,8 @@ pub enum ColorSpace {
     DisplayP3,
     Bt601,
     Bt709,
+    /// ITU-R BT.2020 wide-gamut color space (HDR/UHD video).
+    Bt2020,
 }
 
 impl std::fmt::Display for ColorSpace {
@@ -178,6 +238,7 @@ impl std::fmt::Display for ColorSpace {
             Self::DisplayP3 => write!(f, "Display P3"),
             Self::Bt601 => write!(f, "BT.601"),
             Self::Bt709 => write!(f, "BT.709"),
+            Self::Bt2020 => write!(f, "BT.2020"),
         }
     }
 }
@@ -570,6 +631,152 @@ pub fn srgb_to_cmyk(c: &Srgba) -> Cmyk {
         m: (1.0 - g - k) * inv_k,
         y: (1.0 - b - k) * inv_k,
         k,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Linear RGB ↔ Oklab (Björn Ottosson, 2020)
+// ---------------------------------------------------------------------------
+
+/// Convert linear sRGB to Oklab.
+///
+/// Uses the standard Ottosson two-matrix approach: linear RGB → LMS via M1,
+/// cube-root each channel, then LMS' → Oklab via M2.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::color::{Oklab, LinRgba};
+///
+/// let red = LinRgba { r: 1.0, g: 0.0, b: 0.0, a: 1.0 };
+/// let lab: Oklab = red.into();
+/// assert!(lab.l > 0.0 && lab.l < 1.0);
+/// ```
+impl From<LinRgba> for Oklab {
+    fn from(c: LinRgba) -> Self {
+        // M1: linear sRGB → LMS
+        let l = 0.4122214708_f32 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b;
+        let m = 0.2119034982_f32 * c.r + 0.6806995451 * c.g + 0.1073969566 * c.b;
+        let s = 0.0883024619_f32 * c.r + 0.2817188376 * c.g + 0.6299787005 * c.b;
+
+        // Cube root
+        let l_ = l.cbrt();
+        let m_ = m.cbrt();
+        let s_ = s.cbrt();
+
+        // M2: cube-rooted LMS → Oklab
+        Oklab {
+            l: 0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+            a: 1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+            b: 0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_,
+        }
+    }
+}
+
+/// Convert Oklab back to linear sRGB.
+///
+/// Inverts the M2 and M1 matrices, cubing the intermediate LMS channels.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::color::{Oklab, LinRgba};
+///
+/// let lab = Oklab { l: 0.5, a: 0.0, b: 0.0 };
+/// let rgb: LinRgba = lab.into();
+/// assert!(rgb.r >= 0.0);
+/// ```
+impl From<Oklab> for LinRgba {
+    fn from(c: Oklab) -> Self {
+        // Inverse M2: Oklab → cube-rooted LMS
+        let l_ = c.l + 0.3963377774 * c.a + 0.2158037573 * c.b;
+        let m_ = c.l - 0.1055613458 * c.a - 0.0638541728 * c.b;
+        let s_ = c.l - 0.0894841775 * c.a - 1.2914855480 * c.b;
+
+        // Cube to recover LMS
+        let l = l_ * l_ * l_;
+        let m = m_ * m_ * m_;
+        let s = s_ * s_ * s_;
+
+        // Inverse M1: LMS → linear sRGB
+        LinRgba {
+            r:  4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+            g: -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+            b: -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s,
+            a: 1.0,
+        }
+    }
+}
+
+/// Convert Oklab to its polar form Oklch.
+///
+/// Chroma is the Euclidean length of (a, b) and hue is the angle in degrees.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::color::{Oklab, Oklch};
+///
+/// let gray = Oklab { l: 0.5, a: 0.0, b: 0.0 };
+/// let lch: Oklch = gray.into();
+/// assert!(lch.c < 1e-5); // achromatic
+/// ```
+impl From<Oklab> for Oklch {
+    fn from(c: Oklab) -> Self {
+        let chroma = (c.a * c.a + c.b * c.b).sqrt();
+        let hue = if chroma < 1e-8 {
+            0.0
+        } else {
+            c.b.atan2(c.a).to_degrees().rem_euclid(360.0)
+        };
+        Oklch {
+            l: c.l,
+            c: chroma,
+            h: hue,
+        }
+    }
+}
+
+/// Convert Oklch (polar) back to Oklab (rectangular).
+///
+/// # Examples
+///
+/// ```
+/// use ranga::color::{Oklab, Oklch};
+///
+/// let lch = Oklch { l: 0.7, c: 0.15, h: 180.0 };
+/// let lab: Oklab = lch.into();
+/// assert!((lab.a - (-0.15)).abs() < 1e-5);
+/// assert!(lab.b.abs() < 1e-5);
+/// ```
+impl From<Oklch> for Oklab {
+    fn from(c: Oklch) -> Self {
+        let h_rad = c.h.to_radians();
+        Oklab {
+            l: c.l,
+            a: c.c * h_rad.cos(),
+            b: c.c * h_rad.sin(),
+        }
+    }
+}
+
+/// Convenience: sRGB byte → Oklab in one step.
+///
+/// Converts through [`LinRgba`] as the intermediate space.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::color::{Oklab, Srgba};
+///
+/// let red = Srgba { r: 255, g: 0, b: 0, a: 255 };
+/// let lab: Oklab = red.into();
+/// assert!(lab.l > 0.0);
+/// ```
+impl From<Srgba> for Oklab {
+    fn from(c: Srgba) -> Self {
+        let lin: LinRgba = c.into();
+        lin.into()
     }
 }
 
@@ -1063,5 +1270,93 @@ mod tests {
         };
         let de = delta_e_ciede2000(&a, &b);
         assert!((de - 2.0425).abs() < 0.01, "got {de}");
+    }
+
+    #[test]
+    fn oklab_white() {
+        let white: Oklab = Srgba {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        }
+        .into();
+        assert!((white.l - 1.0).abs() < 0.01, "L={}", white.l);
+        assert!(white.a.abs() < 0.01, "a={}", white.a);
+        assert!(white.b.abs() < 0.01, "b={}", white.b);
+    }
+
+    #[test]
+    fn oklab_black() {
+        let black: Oklab = Srgba {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        }
+        .into();
+        assert!(black.l.abs() < 0.01, "L={}", black.l);
+        assert!(black.a.abs() < 0.01, "a={}", black.a);
+        assert!(black.b.abs() < 0.01, "b={}", black.b);
+    }
+
+    #[test]
+    fn oklab_roundtrip() {
+        for (r, g, b) in [(255, 0, 0), (0, 255, 0), (0, 0, 255), (128, 64, 200)] {
+            let orig = Srgba { r, g, b, a: 255 };
+            let lin: LinRgba = orig.into();
+            let lab: Oklab = lin.into();
+            let back_lin: LinRgba = lab.into();
+            let back: Srgba = back_lin.into();
+            assert!(
+                (orig.r as i16 - back.r as i16).unsigned_abs() <= 1,
+                "r: orig={} back={}",
+                orig.r,
+                back.r
+            );
+            assert!(
+                (orig.g as i16 - back.g as i16).unsigned_abs() <= 1,
+                "g: orig={} back={}",
+                orig.g,
+                back.g
+            );
+            assert!(
+                (orig.b as i16 - back.b as i16).unsigned_abs() <= 1,
+                "b: orig={} back={}",
+                orig.b,
+                back.b
+            );
+        }
+    }
+
+    #[test]
+    fn oklch_roundtrip() {
+        let orig = Oklab {
+            l: 0.6,
+            a: 0.15,
+            b: -0.08,
+        };
+        let lch: Oklch = orig.into();
+        let back: Oklab = lch.into();
+        assert!((orig.l - back.l).abs() < 1e-5, "l");
+        assert!((orig.a - back.a).abs() < 1e-5, "a");
+        assert!((orig.b - back.b).abs() < 1e-5, "b");
+    }
+
+    #[test]
+    fn oklch_red_hue() {
+        let red: Oklab = Srgba {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        }
+        .into();
+        let lch: Oklch = red.into();
+        assert!(
+            lch.h >= 20.0 && lch.h <= 30.0,
+            "red hue={}, expected 20-30 degrees",
+            lch.h
+        );
     }
 }

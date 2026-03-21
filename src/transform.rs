@@ -153,11 +153,34 @@ pub enum ScaleFilter {
     Nearest,
     /// Bilinear interpolation (smooth, good default).
     Bilinear,
+    /// Bicubic interpolation (highest quality, slower).
+    Bicubic,
 }
 
 // ---------------------------------------------------------------------------
 // Pixel buffer operations
 // ---------------------------------------------------------------------------
+
+/// Catmull-Rom cubic kernel weight (a = -0.5).
+#[inline]
+fn cubic_weight(t: f64) -> f64 {
+    let t = t.abs();
+    if t <= 1.0 {
+        (1.5 * t - 2.5) * t * t + 1.0
+    } else if t <= 2.0 {
+        ((-0.5 * t + 2.5) * t - 4.0) * t + 2.0
+    } else {
+        0.0
+    }
+}
+
+/// Sample a pixel from an RGBA8 buffer with bounds clamping.
+#[inline]
+fn sample_clamped(data: &[u8], x: isize, y: isize, w: usize, h: usize, c: usize) -> f64 {
+    let cx = x.clamp(0, w as isize - 1) as usize;
+    let cy = y.clamp(0, h as isize - 1) as usize;
+    data[(cy * w + cx) * 4 + c] as f64
+}
 
 fn validate_rgba8(buf: &PixelBuffer) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
@@ -280,6 +303,40 @@ pub fn resize(
                         let top = c00 + fx * (c10 - c00);
                         let bot = c01 + fx * (c11 - c01);
                         let val = top + fy * (bot - top);
+                        out[di + c] = val.clamp(0.0, 255.0) as u8;
+                    }
+                }
+            }
+        }
+        ScaleFilter::Bicubic => {
+            let x_ratio = if dw > 1 {
+                (sw as f64 - 1.0) / (dw as f64 - 1.0)
+            } else {
+                0.0
+            };
+            let y_ratio = if dh > 1 {
+                (sh as f64 - 1.0) / (dh as f64 - 1.0)
+            } else {
+                0.0
+            };
+            for dy in 0..dh {
+                let sy = dy as f64 * y_ratio;
+                let iy = sy.floor() as isize;
+                let fy = sy - sy.floor();
+                for dx in 0..dw {
+                    let sx = dx as f64 * x_ratio;
+                    let ix = sx.floor() as isize;
+                    let fx = sx - sx.floor();
+                    let di = (dy * dw + dx) * 4;
+                    for c in 0..4 {
+                        let mut val = 0.0;
+                        for j in -1isize..=2 {
+                            let wy = cubic_weight(fy - j as f64);
+                            for i in -1isize..=2 {
+                                let wx = cubic_weight(fx - i as f64);
+                                val += wx * wy * sample_clamped(&buf.data, ix + i, iy + j, sw, sh, c);
+                            }
+                        }
                         out[di + c] = val.clamp(0.0, 255.0) as u8;
                     }
                 }
@@ -409,6 +466,243 @@ pub fn affine_transform(
                         out[di + c] = (top + fy * (bot - top)).clamp(0.0, 255.0) as u8;
                     }
                 }
+                ScaleFilter::Bicubic => {
+                    let ix = sx.floor() as isize;
+                    let iy = sy.floor() as isize;
+                    let fx = sx - sx.floor();
+                    let fy = sy - sy.floor();
+                    for c in 0..4 {
+                        let mut val = 0.0;
+                        for j in -1isize..=2 {
+                            let wy = cubic_weight(fy - j as f64);
+                            for i in -1isize..=2 {
+                                let wx = cubic_weight(fx - i as f64);
+                                val += wx * wy * sample_clamped(&buf.data, ix + i, iy + j, sw, sh, c);
+                            }
+                        }
+                        out[di + c] = val.clamp(0.0, 255.0) as u8;
+                    }
+                }
+            }
+        }
+    }
+    PixelBuffer::new(out, out_w, out_h, PixelFormat::Rgba8)
+}
+
+// ---------------------------------------------------------------------------
+// Perspective (projective) transform
+// ---------------------------------------------------------------------------
+
+/// 3x3 projective transform matrix for perspective (4-corner) mapping.
+///
+/// Unlike [`Affine`], a perspective transform can map rectangles to arbitrary
+/// quadrilaterals, enabling effects like keystoning and vanishing points.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::transform::Perspective;
+///
+/// let p = Perspective::identity();
+/// let (x, y) = p.apply(5.0, 10.0);
+/// assert!((x - 5.0).abs() < 1e-9);
+/// assert!((y - 10.0).abs() < 1e-9);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Perspective {
+    /// Row-major 3x3 matrix.
+    pub m: [[f64; 3]; 3],
+}
+
+impl Perspective {
+    /// Identity perspective transform.
+    #[must_use]
+    pub fn identity() -> Self {
+        Self {
+            m: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        }
+    }
+
+    /// Apply the perspective transform to a point.
+    ///
+    /// Returns the projected (x, y) after dividing by the homogeneous w
+    /// coordinate. Returns `None` if w ≈ 0.
+    #[must_use]
+    pub fn apply(&self, x: f64, y: f64) -> (f64, f64) {
+        let w = self.m[2][0] * x + self.m[2][1] * y + self.m[2][2];
+        if w.abs() < 1e-12 {
+            return (f64::NAN, f64::NAN);
+        }
+        let px = self.m[0][0] * x + self.m[0][1] * y + self.m[0][2];
+        let py = self.m[1][0] * x + self.m[1][1] * y + self.m[1][2];
+        (px / w, py / w)
+    }
+
+    /// Compute the inverse perspective transform.
+    #[must_use]
+    pub fn inverse(&self) -> Option<Self> {
+        let m = &self.m;
+        // Cofactor matrix (transposed = adjugate)
+        let inv = [
+            [
+                m[1][1] * m[2][2] - m[1][2] * m[2][1],
+                m[0][2] * m[2][1] - m[0][1] * m[2][2],
+                m[0][1] * m[1][2] - m[0][2] * m[1][1],
+            ],
+            [
+                m[1][2] * m[2][0] - m[1][0] * m[2][2],
+                m[0][0] * m[2][2] - m[0][2] * m[2][0],
+                m[0][2] * m[1][0] - m[0][0] * m[1][2],
+            ],
+            [
+                m[1][0] * m[2][1] - m[1][1] * m[2][0],
+                m[0][1] * m[2][0] - m[0][0] * m[2][1],
+                m[0][0] * m[1][1] - m[0][1] * m[1][0],
+            ],
+        ];
+        let det = m[0][0] * inv[0][0] + m[0][1] * inv[1][0] + m[0][2] * inv[2][0];
+        if det.abs() < 1e-12 {
+            return None;
+        }
+        let s = 1.0 / det;
+        Some(Self {
+            m: [
+                [inv[0][0] * s, inv[0][1] * s, inv[0][2] * s],
+                [inv[1][0] * s, inv[1][1] * s, inv[1][2] * s],
+                [inv[2][0] * s, inv[2][1] * s, inv[2][2] * s],
+            ],
+        })
+    }
+
+    /// Compute a perspective transform from four source corners to four
+    /// destination corners (direct linear transform).
+    ///
+    /// Corners are specified as `[(x0,y0), (x1,y1), (x2,y2), (x3,y3)]`
+    /// in order: top-left, top-right, bottom-right, bottom-left.
+    #[must_use]
+    pub fn from_quad(src: [(f64, f64); 4], dst: [(f64, f64); 4]) -> Option<Self> {
+        // Solve: for each corner i, dst_i = H * src_i (homogeneous).
+        // This gives 8 equations for 8 unknowns (h33 = 1).
+        // Build 8x8 system Ah = b.
+        let mut a = [[0.0f64; 8]; 8];
+        let mut b = [0.0f64; 8];
+        for i in 0..4 {
+            let (sx, sy) = src[i];
+            let (dx, dy) = dst[i];
+            let row = i * 2;
+            a[row] = [sx, sy, 1.0, 0.0, 0.0, 0.0, -dx * sx, -dx * sy];
+            b[row] = dx;
+            a[row + 1] = [0.0, 0.0, 0.0, sx, sy, 1.0, -dy * sx, -dy * sy];
+            b[row + 1] = dy;
+        }
+        // Gaussian elimination.
+        let h = solve_8x8(a, b)?;
+        Some(Self {
+            m: [
+                [h[0], h[1], h[2]],
+                [h[3], h[4], h[5]],
+                [h[6], h[7], 1.0],
+            ],
+        })
+    }
+}
+
+/// Solve an 8x8 linear system via Gaussian elimination with partial pivoting.
+fn solve_8x8(mut a: [[f64; 8]; 8], mut b: [f64; 8]) -> Option<[f64; 8]> {
+    for col in 0..8 {
+        // Partial pivot.
+        let mut max_row = col;
+        let mut max_val = a[col][col].abs();
+        for row in (col + 1)..8 {
+            if a[row][col].abs() > max_val {
+                max_val = a[row][col].abs();
+                max_row = row;
+            }
+        }
+        if max_val < 1e-12 {
+            return None;
+        }
+        if max_row != col {
+            a.swap(col, max_row);
+            b.swap(col, max_row);
+        }
+        let pivot = a[col][col];
+        for row in (col + 1)..8 {
+            let factor = a[row][col] / pivot;
+            for k in col..8 {
+                a[row][k] -= factor * a[col][k];
+            }
+            b[row] -= factor * b[col];
+        }
+    }
+    // Back substitution.
+    let mut x = [0.0f64; 8];
+    for col in (0..8).rev() {
+        let mut sum = b[col];
+        for k in (col + 1)..8 {
+            sum -= a[col][k] * x[k];
+        }
+        x[col] = sum / a[col][col];
+    }
+    Some(x)
+}
+
+/// Apply a perspective transform to an RGBA8 buffer with bilinear interpolation.
+///
+/// The output has dimensions `out_w x out_h`. Pixels outside the source are
+/// transparent black. Uses inverse mapping.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::transform::{self, Perspective};
+///
+/// let buf = PixelBuffer::zeroed(100, 100, PixelFormat::Rgba8);
+/// let p = Perspective::identity();
+/// let result = transform::perspective_transform(&buf, &p, 100, 100).unwrap();
+/// assert_eq!(result.width, 100);
+/// ```
+pub fn perspective_transform(
+    buf: &PixelBuffer,
+    transform: &Perspective,
+    out_w: u32,
+    out_h: u32,
+) -> Result<PixelBuffer, RangaError> {
+    validate_rgba8(buf)?;
+    let inv = transform
+        .inverse()
+        .ok_or_else(|| RangaError::Other("singular perspective transform".into()))?;
+    let sw = buf.width as usize;
+    let sh = buf.height as usize;
+    let dw = out_w as usize;
+    let dh = out_h as usize;
+    let mut out = vec![0u8; dw * dh * 4];
+
+    for dy in 0..dh {
+        for dx in 0..dw {
+            let (sx, sy) = inv.apply(dx as f64 + 0.5, dy as f64 + 0.5);
+            let di = (dy * dw + dx) * 4;
+
+            if sx < 0.0 || sy < 0.0 || sx >= sw as f64 || sy >= sh as f64 {
+                continue;
+            }
+
+            // Bilinear interpolation.
+            let x0 = sx.floor() as usize;
+            let y0 = sy.floor() as usize;
+            let x1 = (x0 + 1).min(sw - 1);
+            let y1 = (y0 + 1).min(sh - 1);
+            let fx = sx - x0 as f64;
+            let fy = sy - y0 as f64;
+            for c in 0..4 {
+                let c00 = buf.data[(y0 * sw + x0) * 4 + c] as f64;
+                let c10 = buf.data[(y0 * sw + x1) * 4 + c] as f64;
+                let c01 = buf.data[(y1 * sw + x0) * 4 + c] as f64;
+                let c11 = buf.data[(y1 * sw + x1) * 4 + c] as f64;
+                let top = c00 + fx * (c10 - c00);
+                let bot = c01 + fx * (c11 - c01);
+                out[di + c] = (top + fy * (bot - top)).clamp(0.0, 255.0) as u8;
             }
         }
     }
@@ -514,5 +808,61 @@ mod tests {
         let f1 = flip_vertical(&buf).unwrap();
         let f2 = flip_vertical(&f1).unwrap();
         assert_eq!(f2.data, data);
+    }
+
+    #[test]
+    fn resize_bicubic() {
+        let buf = PixelBuffer::zeroed(100, 100, PixelFormat::Rgba8);
+        let r = resize(&buf, 50, 50, ScaleFilter::Bicubic).unwrap();
+        assert_eq!(r.width, 50);
+        assert_eq!(r.height, 50);
+    }
+
+    #[test]
+    fn resize_bicubic_upscale() {
+        let buf = PixelBuffer::new(vec![128; 4 * 4 * 4], 4, 4, PixelFormat::Rgba8).unwrap();
+        let r = resize(&buf, 16, 16, ScaleFilter::Bicubic).unwrap();
+        assert_eq!(r.width, 16);
+        // Uniform input should produce uniform output.
+        assert_eq!(r.data[0], 128);
+    }
+
+    #[test]
+    fn perspective_identity() {
+        let p = Perspective::identity();
+        let (x, y) = p.apply(5.0, 10.0);
+        assert!((x - 5.0).abs() < 1e-9);
+        assert!((y - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn perspective_inverse_roundtrip() {
+        let p = Perspective {
+            m: [[2.0, 0.1, 5.0], [0.05, 1.5, 10.0], [0.001, 0.002, 1.0]],
+        };
+        let inv = p.inverse().unwrap();
+        let (x, y) = p.apply(7.0, 13.0);
+        let (bx, by) = inv.apply(x, y);
+        assert!((bx - 7.0).abs() < 1e-6);
+        assert!((by - 13.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn perspective_from_quad_identity() {
+        let corners = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)];
+        let p = Perspective::from_quad(corners, corners).unwrap();
+        let (x, y) = p.apply(50.0, 50.0);
+        assert!((x - 50.0).abs() < 1e-6);
+        assert!((y - 50.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn perspective_transform_identity() {
+        let buf = PixelBuffer::new(vec![200, 100, 50, 255].repeat(4), 2, 2, PixelFormat::Rgba8).unwrap();
+        let p = Perspective::identity();
+        let result = perspective_transform(&buf, &p, 2, 2).unwrap();
+        assert_eq!(result.width, 2);
+        // Center pixel should be close to original value.
+        assert!(result.data[0] > 150);
     }
 }

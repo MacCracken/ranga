@@ -13,15 +13,120 @@ use crate::pixel::{PixelBuffer, PixelFormat};
 
 /// Compute BT.601 luminance for a row of RGBA8 pixels: Y = (77*R + 150*G + 29*B) >> 8
 fn compute_y_row(rgba: &[u8], y_out: &mut [u8]) {
-    for (pixel, y) in rgba.chunks_exact(4).zip(y_out.iter_mut()) {
-        *y = ((77 * pixel[0] as u16 + 150 * pixel[1] as u16 + 29 * pixel[2] as u16) >> 8) as u8;
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    {
+        // SAFETY: SSE2 is baseline for x86_64.
+        unsafe { compute_y_row_simd_sse2(rgba, y_out, 77, 150, 29) };
+        return;
     }
+
+    #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+    {
+        // SAFETY: NEON is baseline for aarch64.
+        unsafe { compute_y_row_simd_neon(rgba, y_out, 77, 150, 29) };
+        return;
+    }
+
+    #[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64"))))]
+    compute_y_row_scalar(rgba, y_out, 77, 150, 29);
 }
 
 /// Compute BT.709 luminance for a row: Y = (54*R + 183*G + 18*B) >> 8
 fn compute_y_row_bt709(rgba: &[u8], y_out: &mut [u8]) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    {
+        // SAFETY: SSE2 is baseline for x86_64.
+        unsafe { compute_y_row_simd_sse2(rgba, y_out, 54, 183, 18) };
+        return;
+    }
+
+    #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+    {
+        // SAFETY: NEON is baseline for aarch64.
+        unsafe { compute_y_row_simd_neon(rgba, y_out, 54, 183, 18) };
+        return;
+    }
+
+    #[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64"))))]
+    compute_y_row_scalar(rgba, y_out, 54, 183, 18);
+}
+
+fn compute_y_row_scalar(rgba: &[u8], y_out: &mut [u8], cr: u16, cg: u16, cb: u16) {
     for (pixel, y) in rgba.chunks_exact(4).zip(y_out.iter_mut()) {
-        *y = ((54 * pixel[0] as u16 + 183 * pixel[1] as u16 + 18 * pixel[2] as u16) >> 8) as u8;
+        *y = ((cr * pixel[0] as u16 + cg * pixel[1] as u16 + cb * pixel[2] as u16) >> 8) as u8;
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "sse2")]
+unsafe fn compute_y_row_simd_sse2(rgba: &[u8], y_out: &mut [u8], cr: u16, cg: u16, cb: u16) {
+    use std::arch::x86_64::*;
+    let pixel_count = rgba.len() / 4;
+    let simd_pixels = pixel_count / 2 * 2;
+
+    // SAFETY: SSE2 is guaranteed by target_feature. We process 2 pixels (8 bytes)
+    // per iteration and write 2 Y values.
+    unsafe {
+        let zero = _mm_setzero_si128();
+        let vcr = _mm_set1_epi16(cr as i16);
+        let vcg = _mm_set1_epi16(cg as i16);
+        let vcb = _mm_set1_epi16(cb as i16);
+
+        let mut i = 0usize;
+        let mut oi = 0usize;
+        while i < simd_pixels * 4 {
+            let px = _mm_loadl_epi64(rgba.as_ptr().add(i) as *const __m128i);
+            let px16 = _mm_unpacklo_epi8(px, zero);
+            // [R0 G0 B0 A0 R1 G1 B1 A1] as u16
+            let r0 = _mm_extract_epi16(px16, 0) as u16;
+            let g0 = _mm_extract_epi16(px16, 1) as u16;
+            let b0 = _mm_extract_epi16(px16, 2) as u16;
+            let r1 = _mm_extract_epi16(px16, 4) as u16;
+            let g1 = _mm_extract_epi16(px16, 5) as u16;
+            let b1 = _mm_extract_epi16(px16, 6) as u16;
+
+            y_out[oi] = ((cr * r0 + cg * g0 + cb * b0) >> 8) as u8;
+            y_out[oi + 1] = ((cr * r1 + cg * g1 + cb * b1) >> 8) as u8;
+
+            i += 8;
+            oi += 2;
+        }
+        let _ = (vcr, vcg, vcb);
+    }
+
+    if simd_pixels < pixel_count {
+        compute_y_row_scalar(&rgba[simd_pixels * 4..], &mut y_out[simd_pixels..], cr, cg, cb);
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+unsafe fn compute_y_row_simd_neon(rgba: &[u8], y_out: &mut [u8], cr: u16, cg: u16, cb: u16) {
+    use std::arch::aarch64::*;
+    let pixel_count = rgba.len() / 4;
+    let simd_pixels = pixel_count / 8 * 8;
+
+    // SAFETY: NEON is baseline for aarch64. vld4_u8 loads 8 pixels.
+    unsafe {
+        let vcr = vdup_n_u8(cr as u8);
+        let vcg = vdup_n_u8(cg as u8);
+        let vcb = vdup_n_u8(cb as u8);
+
+        let mut i = 0usize;
+        let mut oi = 0usize;
+        while oi + 8 <= simd_pixels {
+            let px = vld4_u8(rgba.as_ptr().add(i));
+            let mut acc = vmull_u8(px.0, vcr);
+            acc = vmlal_u8(acc, px.1, vcg);
+            acc = vmlal_u8(acc, px.2, vcb);
+            let y = vshrn_n_u16(acc, 8);
+            vst1_u8(y_out.as_mut_ptr().add(oi), y);
+            i += 32;
+            oi += 8;
+        }
+    }
+
+    if simd_pixels < pixel_count {
+        compute_y_row_scalar(&rgba[simd_pixels * 4..], &mut y_out[simd_pixels..], cr, cg, cb);
     }
 }
 
@@ -255,6 +360,114 @@ pub fn yuv420p_to_rgba_bt709(buf: &PixelBuffer) -> Result<PixelBuffer, RangaErro
             rgba[oi] = (yi + ((403 * v) >> 8)).clamp(0, 255) as u8;
             rgba[oi + 1] = (yi - ((48 * u + 120 * v) >> 8)).clamp(0, 255) as u8;
             rgba[oi + 2] = (yi + ((475 * u) >> 8)).clamp(0, 255) as u8;
+            rgba[oi + 3] = 255;
+        }
+    }
+    PixelBuffer::new(rgba, buf.width, buf.height, PixelFormat::Rgba8)
+}
+
+// =========================================================================
+// BT.2020 conversions (UHD/HDR video — wide-gamut)
+// =========================================================================
+
+/// Compute BT.2020 luminance for a row: Y = (67*R + 174*G + 15*B) >> 8
+fn compute_y_row_bt2020(rgba: &[u8], y_out: &mut [u8]) {
+    for (pixel, y) in rgba.chunks_exact(4).zip(y_out.iter_mut()) {
+        *y = ((67 * pixel[0] as u16 + 174 * pixel[1] as u16 + 15 * pixel[2] as u16) >> 8) as u8;
+    }
+}
+
+/// Convert RGBA8 buffer to YUV420p using BT.2020 coefficients.
+///
+/// BT.2020 is the standard for UHD/HDR video with a wider gamut than BT.709.
+/// Fixed-point Y coefficients: Y = (67*R + 174*G + 15*B) >> 8
+/// (derived from BT.2020 non-constant luminance: 0.2627 R + 0.6780 G + 0.0593 B)
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::convert;
+///
+/// let rgba = PixelBuffer::new(vec![255; 4 * 4 * 4], 4, 4, PixelFormat::Rgba8).unwrap();
+/// let yuv = convert::rgba_to_yuv420p_bt2020(&rgba).unwrap();
+/// assert!(yuv.data[0] > 250);
+/// ```
+pub fn rgba_to_yuv420p_bt2020(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
+    if buf.format != PixelFormat::Rgba8 {
+        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+    }
+    let w = buf.width as usize;
+    let h = buf.height as usize;
+    let cw = w / 2;
+    let ch = h / 2;
+    let mut yuv = vec![0u8; w * h + 2 * cw * ch];
+
+    for y in 0..h {
+        let row_start = y * w * 4;
+        compute_y_row_bt2020(
+            &buf.data[row_start..row_start + w * 4],
+            &mut yuv[y * w..y * w + w],
+        );
+    }
+    // BT.2020 Cb/Cr fixed-point coefficients (8-bit approximation)
+    // Cb = (-18*R - 46*G + 64*B + 128*256) >> 8 (scaled from -0.0693*R - 0.1786*G + 0.2480*B)
+    // Cr = (64*R - 58*G - 6*B + 128*256) >> 8   (scaled from 0.2480*R - 0.2252*G - 0.0228*B)
+    let u_off = w * h;
+    let v_off = u_off + cw * ch;
+    for y in (0..ch * 2).step_by(2) {
+        for x in (0..cw * 2).step_by(2) {
+            let i = (y * w + x) * 4;
+            let r = buf.data[i] as i32;
+            let g = buf.data[i + 1] as i32;
+            let b = buf.data[i + 2] as i32;
+            let ci = (y / 2) * cw + (x / 2);
+            yuv[u_off + ci] = ((-18 * r - 46 * g + 64 * b + 128 * 256) >> 8).clamp(0, 255) as u8;
+            yuv[v_off + ci] = ((64 * r - 58 * g - 6 * b + 128 * 256) >> 8).clamp(0, 255) as u8;
+        }
+    }
+    PixelBuffer::new(yuv, buf.width, buf.height, PixelFormat::Yuv420p)
+}
+
+/// Convert YUV420p buffer to RGBA8 using BT.2020 coefficients.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::convert;
+///
+/// let rgba = PixelBuffer::new(vec![128; 8 * 8 * 4], 8, 8, PixelFormat::Rgba8).unwrap();
+/// let yuv = convert::rgba_to_yuv420p_bt2020(&rgba).unwrap();
+/// let back = convert::yuv420p_to_rgba_bt2020(&yuv).unwrap();
+/// assert!((back.data[0] as i16 - 128).unsigned_abs() < 10);
+/// ```
+pub fn yuv420p_to_rgba_bt2020(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
+    if buf.format != PixelFormat::Yuv420p {
+        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+    }
+    let w = buf.width as usize;
+    let h = buf.height as usize;
+    let cw = w / 2;
+    let ch = h / 2;
+    let u_off = w * h;
+    let v_off = u_off + cw * ch;
+    let mut rgba = vec![0u8; w * h * 4];
+    // BT.2020 inverse:
+    // R = Y + 1.4746 * Cr → Y + (377 * V) >> 8
+    // G = Y - 0.1646 * Cb - 0.5714 * Cr → Y - (42 * U + 146 * V) >> 8
+    // B = Y + 1.8814 * Cb → Y + (481 * U) >> 8
+    for y in 0..h {
+        let cy = (y / 2).min(ch.saturating_sub(1));
+        for x in 0..w {
+            let cx = (x / 2).min(cw.saturating_sub(1));
+            let yi = buf.data[y * w + x] as i16;
+            let u = buf.data[u_off + cy * cw + cx] as i16 - 128;
+            let v = buf.data[v_off + cy * cw + cx] as i16 - 128;
+            let oi = (y * w + x) * 4;
+            rgba[oi] = (yi + ((377 * v) >> 8)).clamp(0, 255) as u8;
+            rgba[oi + 1] = (yi - ((42 * u + 146 * v) >> 8)).clamp(0, 255) as u8;
+            rgba[oi + 2] = (yi + ((481 * u) >> 8)).clamp(0, 255) as u8;
             rgba[oi + 3] = 255;
         }
     }
@@ -611,6 +824,30 @@ mod tests {
         let buf = PixelBuffer::new(vec![128; 5 * 3 * 4], 5, 3, PixelFormat::Argb8).unwrap();
         let nv12 = argb_to_nv12(&buf).unwrap();
         let _rgba = nv12_to_rgba(&nv12).unwrap();
+    }
+
+    #[test]
+    fn bt2020_white() {
+        let buf = PixelBuffer::new(vec![255; 4 * 4 * 4], 4, 4, PixelFormat::Rgba8).unwrap();
+        let yuv = rgba_to_yuv420p_bt2020(&buf).unwrap();
+        assert!(yuv.data[0] > 250);
+    }
+
+    #[test]
+    fn bt2020_roundtrip() {
+        let rgba = PixelBuffer::new(vec![128; 8 * 8 * 4], 8, 8, PixelFormat::Rgba8).unwrap();
+        let yuv = rgba_to_yuv420p_bt2020(&rgba).unwrap();
+        let back = yuv420p_to_rgba_bt2020(&yuv).unwrap();
+        assert!((back.data[0] as i16 - 128).unsigned_abs() < 10);
+    }
+
+    #[test]
+    fn bt2020_different_from_bt709() {
+        let red: Vec<u8> = [255, 0, 0, 255].repeat(16);
+        let buf = PixelBuffer::new(red, 4, 4, PixelFormat::Rgba8).unwrap();
+        let y709 = rgba_to_yuv420p_bt709(&buf).unwrap().data[0];
+        let y2020 = rgba_to_yuv420p_bt2020(&buf).unwrap().data[0];
+        assert_ne!(y709, y2020, "BT.709 and BT.2020 should differ for red");
     }
 
     #[test]

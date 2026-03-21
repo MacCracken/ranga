@@ -117,6 +117,127 @@ pub fn chi_squared(a: &[f64], b: &[f64]) -> f64 {
         * 0.5
 }
 
+/// Equalize the luminance histogram of an RGBA8 buffer in-place.
+///
+/// Applies standard histogram equalization using a cumulative distribution
+/// function to redistribute pixel intensities. Preserves hue and saturation
+/// by scaling RGB proportionally based on the luminance mapping.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::histogram;
+///
+/// let mut buf = PixelBuffer::new(vec![50, 50, 50, 255].repeat(64), 8, 8, PixelFormat::Rgba8).unwrap();
+/// histogram::equalize(&mut buf).unwrap();
+/// ```
+pub fn equalize(buf: &mut PixelBuffer) -> Result<(), RangaError> {
+    if buf.format != PixelFormat::Rgba8 {
+        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+    }
+    // Build 256-bin luminance histogram.
+    let mut hist = [0u64; 256];
+    for pixel in buf.data.chunks_exact(4) {
+        let lum = ((77u16 * pixel[0] as u16 + 150 * pixel[1] as u16 + 29 * pixel[2] as u16) >> 8) as usize;
+        hist[lum.min(255)] += 1;
+    }
+
+    // Build CDF.
+    let total = buf.pixel_count() as f64;
+    if total == 0.0 {
+        return Ok(());
+    }
+    let mut cdf = [0f64; 256];
+    cdf[0] = hist[0] as f64 / total;
+    for i in 1..256 {
+        cdf[i] = cdf[i - 1] + hist[i] as f64 / total;
+    }
+
+    // Find CDF min for standard equalization formula.
+    let cdf_min = cdf.iter().copied().find(|&v| v > 0.0).unwrap_or(0.0);
+    let denom = 1.0 - cdf_min;
+    if denom < 1e-10 {
+        return Ok(());
+    }
+
+    // Build lookup table: old luminance → new luminance.
+    let mut lut = [0u8; 256];
+    for (i, entry) in lut.iter_mut().enumerate() {
+        *entry = (((cdf[i] - cdf_min) / denom) * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
+    }
+
+    // Apply: scale RGB proportionally.
+    for pixel in buf.data.chunks_exact_mut(4) {
+        let old_lum = ((77u16 * pixel[0] as u16 + 150 * pixel[1] as u16 + 29 * pixel[2] as u16) >> 8) as usize;
+        let old_lum = old_lum.min(255);
+        let new_lum = lut[old_lum] as f32;
+        if old_lum == 0 {
+            let v = new_lum as u8;
+            pixel[0] = v;
+            pixel[1] = v;
+            pixel[2] = v;
+        } else {
+            let scale = new_lum / old_lum as f32;
+            pixel[0] = (pixel[0] as f32 * scale).clamp(0.0, 255.0) as u8;
+            pixel[1] = (pixel[1] as f32 * scale).clamp(0.0, 255.0) as u8;
+            pixel[2] = (pixel[2] as f32 * scale).clamp(0.0, 255.0) as u8;
+        }
+    }
+    Ok(())
+}
+
+/// Auto-levels: stretch the histogram to use the full 0–255 range.
+///
+/// Finds the actual min/max luminance and linearly maps them to 0–255.
+/// This is simpler than full equalization but often sufficient for images
+/// with poor contrast.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::histogram;
+///
+/// let mut buf = PixelBuffer::new(vec![100, 100, 100, 255, 150, 150, 150, 255], 2, 1, PixelFormat::Rgba8).unwrap();
+/// histogram::auto_levels(&mut buf).unwrap();
+/// // The darker pixel should be pulled toward 0, the brighter toward 255
+/// assert!(buf.data[0] < 100);
+/// assert!(buf.data[4] > 150);
+/// ```
+pub fn auto_levels(buf: &mut PixelBuffer) -> Result<(), RangaError> {
+    if buf.format != PixelFormat::Rgba8 {
+        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+    }
+    if buf.data.is_empty() {
+        return Ok(());
+    }
+
+    // Find min/max luminance.
+    let mut min_lum = 255u8;
+    let mut max_lum = 0u8;
+    for pixel in buf.data.chunks_exact(4) {
+        let lum = ((77u16 * pixel[0] as u16 + 150 * pixel[1] as u16 + 29 * pixel[2] as u16) >> 8) as u8;
+        min_lum = min_lum.min(lum);
+        max_lum = max_lum.max(lum);
+    }
+
+    let range = max_lum as f32 - min_lum as f32;
+    if range < 1.0 {
+        return Ok(());
+    }
+
+    let scale = 255.0 / range;
+    let offset = min_lum as f32;
+
+    for pixel in buf.data.chunks_exact_mut(4) {
+        pixel[0] = ((pixel[0] as f32 - offset) * scale).clamp(0.0, 255.0) as u8;
+        pixel[1] = ((pixel[1] as f32 - offset) * scale).clamp(0.0, 255.0) as u8;
+        pixel[2] = ((pixel[2] as f32 - offset) * scale).clamp(0.0, 255.0) as u8;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,5 +272,47 @@ mod tests {
         assert_eq!(r.len(), 256);
         assert_eq!(g.len(), 256);
         assert_eq!(b.len(), 256);
+    }
+
+    #[test]
+    fn equalize_uniform_unchanged() {
+        // Uniform image: all same value. Equalization should keep it uniform.
+        let mut buf =
+            PixelBuffer::new(vec![128; 8 * 8 * 4], 8, 8, PixelFormat::Rgba8).unwrap();
+        equalize(&mut buf).unwrap();
+        // All pixels should be the same value (mapped to 255 since single-value CDF).
+        let v = buf.data[0];
+        for pixel in buf.data.chunks_exact(4) {
+            assert_eq!(pixel[0], v);
+        }
+    }
+
+    #[test]
+    fn auto_levels_stretches() {
+        // Image with compressed range (100–150) should expand.
+        let mut buf = PixelBuffer::new(
+            vec![100, 100, 100, 255, 150, 150, 150, 255],
+            2,
+            1,
+            PixelFormat::Rgba8,
+        )
+        .unwrap();
+        auto_levels(&mut buf).unwrap();
+        assert!(buf.data[0] < 10, "min should map near 0, got {}", buf.data[0]);
+        assert!(buf.data[4] > 245, "max should map near 255, got {}", buf.data[4]);
+    }
+
+    #[test]
+    fn auto_levels_already_full_range() {
+        let mut buf = PixelBuffer::new(
+            vec![0, 0, 0, 255, 255, 255, 255, 255],
+            2,
+            1,
+            PixelFormat::Rgba8,
+        )
+        .unwrap();
+        let original = buf.data.clone();
+        auto_levels(&mut buf).unwrap();
+        assert_eq!(buf.data, original);
     }
 }

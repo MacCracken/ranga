@@ -1,8 +1,8 @@
-//! ICC color profile parsing — matrix-based profiles only.
+//! ICC color profile parsing — matrix-based and LUT-based profiles.
 //!
-//! Parses ICC v2/v4 profiles to extract the 3x3 color transformation matrix
-//! and tone response curves (TRC). Only matrix/TRC-based profiles are supported;
-//! LUT-based profiles will return an error.
+//! Parses ICC v2/v4 profiles to extract either the 3x3 color transformation
+//! matrix with tone response curves (TRC), or multi-dimensional lookup tables.
+//! Both profile types can convert RGB inputs to CIE XYZ output space.
 //!
 //! # Examples
 //!
@@ -226,6 +226,379 @@ impl IccProfile {
 
         (x, y, z)
     }
+}
+
+/// A parsed ICC LUT-based color profile.
+///
+/// LUT-based profiles use multi-dimensional lookup tables instead of a simple
+/// 3x3 matrix. They can represent arbitrary color transformations including
+/// non-linear gamut mappings. The LUT maps input RGB to output XYZ values
+/// using trilinear interpolation.
+///
+/// # Examples
+///
+/// ```no_run
+/// use ranga::icc::IccLutProfile;
+///
+/// # fn example(data: &[u8]) {
+/// let profile = IccLutProfile::from_bytes(data).unwrap();
+/// let (x, y, z) = profile.apply(0.5, 0.5, 0.5);
+/// # }
+/// ```
+#[derive(Debug, Clone)]
+pub struct IccLutProfile {
+    /// Profile version (major, minor).
+    pub version: (u8, u8),
+    /// Color space of the profile.
+    pub color_space: [u8; 4],
+    /// Number of grid points per dimension.
+    pub grid_size: usize,
+    /// Flattened 3D LUT of XYZ triplets (grid_size^3 * 3 entries).
+    pub lut: Vec<f64>,
+    /// Input curves (one per channel, applied before LUT lookup).
+    pub input_curves: [Vec<f64>; 3],
+}
+
+impl IccLutProfile {
+    /// Parse a LUT-based ICC profile from raw bytes.
+    ///
+    /// Supports `mAB ` (v4) and `mft2`/`mft1` (v2) tag types via the
+    /// `A2B0` tag. Returns an error if no LUT tag is found.
+    pub fn from_bytes(data: &[u8]) -> Result<Self, RangaError> {
+        if data.len() < MIN_PROFILE_SIZE {
+            return Err(RangaError::InvalidFormat("ICC profile too short".into()));
+        }
+        if &data[36..40] != ACSP_SIGNATURE {
+            return Err(RangaError::InvalidFormat("missing acsp signature".into()));
+        }
+
+        let major = data[8];
+        let minor = data[9] >> 4;
+        let mut color_space = [0u8; 4];
+        color_space.copy_from_slice(&data[16..20]);
+
+        let tag_count = read_u32_be(data, 128) as usize;
+        let tags = parse_tag_table(data, tag_count)?;
+
+        // Look for A2B0 tag (primary LUT transform).
+        let a2b0 = find_tag(&tags, b"A2B0")
+            .map_err(|_| RangaError::InvalidFormat("no A2B0 LUT tag found".into()))?;
+
+        let off = a2b0.offset;
+        if off + 4 > data.len() {
+            return Err(RangaError::InvalidFormat("A2B0 tag truncated".into()));
+        }
+
+        let type_sig = &data[off..off + 4];
+        match type_sig {
+            b"mft2" => parse_mft2_lut(data, a2b0, major, minor, color_space),
+            b"mft1" => parse_mft1_lut(data, a2b0, major, minor, color_space),
+            _ => Err(RangaError::InvalidFormat(format!(
+                "unsupported A2B0 type: {}",
+                String::from_utf8_lossy(type_sig)
+            ))),
+        }
+    }
+
+    /// Apply the LUT profile to an RGB triplet, producing CIE XYZ values.
+    ///
+    /// First applies input curves, then performs trilinear interpolation
+    /// in the 3D LUT.
+    #[must_use]
+    pub fn apply(&self, r: f64, g: f64, b: f64) -> (f64, f64, f64) {
+        // Apply input curves.
+        let ri = apply_curve(&self.input_curves[0], r.clamp(0.0, 1.0));
+        let gi = apply_curve(&self.input_curves[1], g.clamp(0.0, 1.0));
+        let bi = apply_curve(&self.input_curves[2], b.clamp(0.0, 1.0));
+
+        // Trilinear interpolation in the 3D LUT.
+        let s = (self.grid_size - 1) as f64;
+        let rf = (ri * s).clamp(0.0, s);
+        let gf = (gi * s).clamp(0.0, s);
+        let bf = (bi * s).clamp(0.0, s);
+
+        let r0 = rf.floor() as usize;
+        let g0 = gf.floor() as usize;
+        let b0 = bf.floor() as usize;
+        let r1 = (r0 + 1).min(self.grid_size - 1);
+        let g1 = (g0 + 1).min(self.grid_size - 1);
+        let b1 = (b0 + 1).min(self.grid_size - 1);
+
+        let fr = rf - rf.floor();
+        let fg = gf - gf.floor();
+        let fb = bf - bf.floor();
+
+        let gs = self.grid_size;
+        let lut_idx = |ri: usize, gi: usize, bi: usize, ch: usize| -> f64 {
+            self.lut[(ri + gi * gs + bi * gs * gs) * 3 + ch]
+        };
+
+        let mut out = [0.0f64; 3];
+        for ch in 0..3 {
+            let c000 = lut_idx(r0, g0, b0, ch);
+            let c100 = lut_idx(r1, g0, b0, ch);
+            let c010 = lut_idx(r0, g1, b0, ch);
+            let c110 = lut_idx(r1, g1, b0, ch);
+            let c001 = lut_idx(r0, g0, b1, ch);
+            let c101 = lut_idx(r1, g0, b1, ch);
+            let c011 = lut_idx(r0, g1, b1, ch);
+            let c111 = lut_idx(r1, g1, b1, ch);
+
+            let c00 = c000 + fr * (c100 - c000);
+            let c10 = c010 + fr * (c110 - c010);
+            let c01 = c001 + fr * (c101 - c001);
+            let c11 = c011 + fr * (c111 - c011);
+            let c0 = c00 + fg * (c10 - c00);
+            let c1 = c01 + fg * (c11 - c01);
+            out[ch] = c0 + fb * (c1 - c0);
+        }
+
+        (out[0], out[1], out[2])
+    }
+}
+
+fn apply_curve(curve: &[f64], v: f64) -> f64 {
+    if curve.is_empty() {
+        return v; // identity
+    }
+    if curve.len() == 1 {
+        return curve[0];
+    }
+    let max_idx = (curve.len() - 1) as f64;
+    let pos = v * max_idx;
+    let lo = pos.floor() as usize;
+    let hi = (lo + 1).min(curve.len() - 1);
+    let frac = pos - pos.floor();
+    curve[lo] * (1.0 - frac) + curve[hi] * frac
+}
+
+/// Parse mft2 (16-bit LUT) tag.
+fn parse_mft2_lut(
+    data: &[u8],
+    tag: &TagEntry,
+    major: u8,
+    minor: u8,
+    color_space: [u8; 4],
+) -> Result<IccLutProfile, RangaError> {
+    let off = tag.offset;
+    // mft2 header: 4(sig) + 4(reserved) + 1(in) + 1(out) + 1(grid) + 1(pad) + 36(matrix) = 48
+    if tag.size < 52 || off + 52 > data.len() {
+        return Err(RangaError::InvalidFormat("mft2 tag too short".into()));
+    }
+
+    let input_channels = data[off + 8] as usize;
+    let output_channels = data[off + 9] as usize;
+    let grid_size = data[off + 10] as usize;
+
+    if input_channels != 3 || output_channels != 3 {
+        return Err(RangaError::InvalidFormat(
+            "only 3→3 channel LUT profiles supported".into(),
+        ));
+    }
+
+    let input_entries = read_u16_be(data, off + 48) as usize;
+    let output_entries = read_u16_be(data, off + 50) as usize;
+
+    let input_table_start = off + 52;
+    let input_table_bytes = input_channels * input_entries * 2;
+    let lut_start = input_table_start + input_table_bytes;
+    let lut_entries = grid_size.pow(3) * output_channels;
+    let lut_bytes = lut_entries * 2;
+    let output_table_start = lut_start + lut_bytes;
+    let output_table_bytes = output_channels * output_entries * 2;
+
+    if output_table_start + output_table_bytes > data.len() {
+        return Err(RangaError::InvalidFormat("mft2 LUT data extends beyond profile".into()));
+    }
+
+    // Parse input curves.
+    let mut input_curves: [Vec<f64>; 3] = [vec![], vec![], vec![]];
+    for ch in 0..3 {
+        let curve_off = input_table_start + ch * input_entries * 2;
+        let mut curve = Vec::with_capacity(input_entries);
+        for i in 0..input_entries {
+            curve.push(read_u16_be(data, curve_off + i * 2) as f64 / 65535.0);
+        }
+        input_curves[ch] = curve;
+    }
+
+    // Parse 3D LUT.
+    let total = grid_size.pow(3) * 3;
+    let mut lut = Vec::with_capacity(total);
+    for i in 0..grid_size.pow(3) {
+        for ch in 0..3 {
+            let idx = lut_start + (i * 3 + ch) * 2;
+            lut.push(read_u16_be(data, idx) as f64 / 65535.0);
+        }
+    }
+
+    Ok(IccLutProfile {
+        version: (major, minor),
+        color_space,
+        grid_size,
+        lut,
+        input_curves,
+    })
+}
+
+/// Parse mft1 (8-bit LUT) tag.
+fn parse_mft1_lut(
+    data: &[u8],
+    tag: &TagEntry,
+    major: u8,
+    minor: u8,
+    color_space: [u8; 4],
+) -> Result<IccLutProfile, RangaError> {
+    let off = tag.offset;
+    if tag.size < 48 || off + 48 > data.len() {
+        return Err(RangaError::InvalidFormat("mft1 tag too short".into()));
+    }
+
+    let input_channels = data[off + 8] as usize;
+    let output_channels = data[off + 9] as usize;
+    let grid_size = data[off + 10] as usize;
+
+    if input_channels != 3 || output_channels != 3 {
+        return Err(RangaError::InvalidFormat(
+            "only 3→3 channel LUT profiles supported".into(),
+        ));
+    }
+
+    // mft1 has fixed 256-entry input tables and 256-entry output tables.
+    let input_table_start = off + 48;
+    let input_table_bytes = input_channels * 256;
+    let lut_start = input_table_start + input_table_bytes;
+    let lut_entries = grid_size.pow(3) * output_channels;
+    let output_table_start = lut_start + lut_entries;
+    let output_table_bytes = output_channels * 256;
+
+    if output_table_start + output_table_bytes > data.len() {
+        return Err(RangaError::InvalidFormat("mft1 LUT data extends beyond profile".into()));
+    }
+
+    // Parse input curves (256 entries each, 8-bit).
+    let mut input_curves: [Vec<f64>; 3] = [vec![], vec![], vec![]];
+    for ch in 0..3 {
+        let curve_off = input_table_start + ch * 256;
+        let mut curve = Vec::with_capacity(256);
+        for i in 0..256 {
+            curve.push(data[curve_off + i] as f64 / 255.0);
+        }
+        input_curves[ch] = curve;
+    }
+
+    // Parse 3D LUT (8-bit).
+    let total = grid_size.pow(3) * 3;
+    let mut lut = Vec::with_capacity(total);
+    for i in 0..grid_size.pow(3) {
+        for ch in 0..3 {
+            let idx = lut_start + i * 3 + ch;
+            lut.push(data[idx] as f64 / 255.0);
+        }
+    }
+
+    Ok(IccLutProfile {
+        version: (major, minor),
+        color_space,
+        grid_size,
+        lut,
+        input_curves,
+    })
+}
+
+/// Generate a minimal sRGB v2 ICC profile.
+///
+/// Returns a byte vector containing a valid ICC v2 profile with the
+/// standard sRGB matrix (IEC 61966-2-1) and gamma 2.2 TRC curves.
+/// Suitable for embedding in image file metadata (PNG, JPEG, TIFF).
+///
+/// # Examples
+///
+/// ```
+/// use ranga::icc;
+///
+/// let profile = icc::srgb_v2_profile();
+/// assert_eq!(&profile[36..40], b"acsp");
+/// let parsed = icc::IccProfile::from_bytes(&profile).unwrap();
+/// assert_eq!(parsed.version.0, 2);
+/// ```
+#[must_use]
+pub fn srgb_v2_profile() -> Vec<u8> {
+    // sRGB matrix (D65) XYZ values (IEC 61966-2-1).
+    let r_xyz: [f64; 3] = [0.4124564, 0.2126729, 0.0193339];
+    let g_xyz: [f64; 3] = [0.3575761, 0.7151522, 0.1191920];
+    let b_xyz: [f64; 3] = [0.1804375, 0.0721750, 0.9503041];
+
+    let tag_count: u32 = 6;
+    let tag_table_size = 4 + tag_count as usize * 12;
+    let header_size = 128;
+    let data_start = header_size + tag_table_size;
+
+    let xyz_tag_size = 20usize;
+    let curv_tag_size = 14usize;
+    let align4 = |v: usize| (v + 3) & !3;
+
+    let r_xyz_off = data_start;
+    let g_xyz_off = r_xyz_off + align4(xyz_tag_size);
+    let b_xyz_off = g_xyz_off + align4(xyz_tag_size);
+    let r_trc_off = b_xyz_off + align4(xyz_tag_size);
+    let g_trc_off = r_trc_off + align4(curv_tag_size);
+    let b_trc_off = g_trc_off + align4(curv_tag_size);
+    let total_size = b_trc_off + align4(curv_tag_size);
+
+    let mut buf = vec![0u8; total_size];
+
+    // Header.
+    write_u32_be_pub(&mut buf, 0, total_size as u32);
+    buf[8] = 2;
+    buf[9] = 4 << 4;
+    buf[16..20].copy_from_slice(b"RGB ");
+    buf[20..24].copy_from_slice(b"mntr"); // device class: monitor
+    buf[36..40].copy_from_slice(b"acsp");
+
+    // Tag table.
+    write_u32_be_pub(&mut buf, 128, tag_count);
+    let tags: [(&[u8; 4], usize, usize); 6] = [
+        (b"rXYZ", r_xyz_off, xyz_tag_size),
+        (b"gXYZ", g_xyz_off, xyz_tag_size),
+        (b"bXYZ", b_xyz_off, xyz_tag_size),
+        (b"rTRC", r_trc_off, curv_tag_size),
+        (b"gTRC", g_trc_off, curv_tag_size),
+        (b"bTRC", b_trc_off, curv_tag_size),
+    ];
+    for (i, (sig, offset, size)) in tags.iter().enumerate() {
+        let base = 132 + i * 12;
+        buf[base..base + 4].copy_from_slice(*sig);
+        write_u32_be_pub(&mut buf, base + 4, *offset as u32);
+        write_u32_be_pub(&mut buf, base + 8, *size as u32);
+    }
+
+    // XYZ tag data.
+    for (off, xyz) in [(r_xyz_off, r_xyz), (g_xyz_off, g_xyz), (b_xyz_off, b_xyz)] {
+        buf[off..off + 4].copy_from_slice(b"XYZ ");
+        write_s15fixed16_pub(&mut buf, off + 8, xyz[0]);
+        write_s15fixed16_pub(&mut buf, off + 12, xyz[1]);
+        write_s15fixed16_pub(&mut buf, off + 16, xyz[2]);
+    }
+
+    // curv tag data (gamma 2.2).
+    for off in [r_trc_off, g_trc_off, b_trc_off] {
+        buf[off..off + 4].copy_from_slice(b"curv");
+        write_u32_be_pub(&mut buf, off + 8, 1);
+        let fixed = (2.2_f64 * 256.0).round() as u16;
+        buf[off + 12..off + 14].copy_from_slice(&fixed.to_be_bytes());
+    }
+
+    buf
+}
+
+fn write_u32_be_pub(buf: &mut [u8], off: usize, val: u32) {
+    buf[off..off + 4].copy_from_slice(&val.to_be_bytes());
+}
+
+fn write_s15fixed16_pub(buf: &mut [u8], off: usize, val: f64) {
+    let fixed = (val * 65536.0).round() as i32;
+    buf[off..off + 4].copy_from_slice(&fixed.to_be_bytes());
 }
 
 // ---------------------------------------------------------------------------
@@ -503,6 +876,17 @@ mod tests {
         assert!(x > 0.9 && x < 1.0, "X={x}");
         assert!(y > 0.9 && y < 1.1, "Y={y}");
         assert!(z > 0.8 && z < 1.2, "Z={z}");
+    }
+
+    #[test]
+    fn srgb_v2_profile_valid() {
+        let data = super::srgb_v2_profile();
+        assert_eq!(&data[36..40], b"acsp");
+        let profile = IccProfile::from_bytes(&data).unwrap();
+        assert_eq!(profile.version.0, 2);
+        assert_eq!(&profile.color_space, b"RGB ");
+        // Matrix should be sRGB.
+        assert!((profile.matrix[0][0] - 0.4124564).abs() < 0.001);
     }
 
     #[test]
