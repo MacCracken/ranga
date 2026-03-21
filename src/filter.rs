@@ -1759,13 +1759,8 @@ mod tests {
     #[test]
     fn auto_white_balance_neutralizes() {
         // Image with a red color cast.
-        let mut buf = PixelBuffer::new(
-            [200, 100, 100, 255].repeat(16),
-            4,
-            4,
-            PixelFormat::Rgba8,
-        )
-        .unwrap();
+        let mut buf =
+            PixelBuffer::new([200, 100, 100, 255].repeat(16), 4, 4, PixelFormat::Rgba8).unwrap();
         auto_white_balance(&mut buf).unwrap();
         // After correction, R/G/B of each pixel should be closer together.
         let r = buf.data[0] as i16;
