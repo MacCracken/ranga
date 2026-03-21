@@ -347,6 +347,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 /// - `@binding(0)`: pixels (`array<u32>`, read-write)
 /// - `@binding(1)`: LUT data (`array<f32>`, read-only storage)
 /// - `@binding(2)`: uniform params (`count: u32`, `lut_size: u32`, `_pad1: u32`, `_pad2: u32`)
+#[allow(dead_code)]
 pub const LUT3D: &str = r#"
 @group(0) @binding(0) var<storage, read_write> pixels: array<u32>;
 @group(0) @binding(1) var<storage, read> lut: array<f32>;
@@ -422,6 +423,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 /// Bindings:
 /// - `@binding(0)`: pixels (`array<u32>`, read-write)
 /// - `@binding(1)`: uniform params (`count: u32`, `shift: f32`, `_pad1: u32`, `_pad2: u32`)
+#[allow(dead_code)]
 pub const HUE_SHIFT: &str = r#"
 @group(0) @binding(0) var<storage, read_write> pixels: array<u32>;
 
@@ -502,6 +504,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 /// Bindings:
 /// - `@binding(0)`: pixels (`array<u32>`, read-write)
 /// - `@binding(1)`: uniform params
+#[allow(dead_code)]
 pub const COLOR_BALANCE: &str = r#"
 @group(0) @binding(0) var<storage, read_write> pixels: array<u32>;
 
