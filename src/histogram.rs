@@ -139,7 +139,8 @@ pub fn equalize(buf: &mut PixelBuffer) -> Result<(), RangaError> {
     // Build 256-bin luminance histogram.
     let mut hist = [0u64; 256];
     for pixel in buf.data.chunks_exact(4) {
-        let lum = ((77u16 * pixel[0] as u16 + 150 * pixel[1] as u16 + 29 * pixel[2] as u16) >> 8) as usize;
+        let lum = ((77u16 * pixel[0] as u16 + 150 * pixel[1] as u16 + 29 * pixel[2] as u16) >> 8)
+            as usize;
         hist[lum.min(255)] += 1;
     }
 
@@ -169,7 +170,8 @@ pub fn equalize(buf: &mut PixelBuffer) -> Result<(), RangaError> {
 
     // Apply: scale RGB proportionally.
     for pixel in buf.data.chunks_exact_mut(4) {
-        let old_lum = ((77u16 * pixel[0] as u16 + 150 * pixel[1] as u16 + 29 * pixel[2] as u16) >> 8) as usize;
+        let old_lum = ((77u16 * pixel[0] as u16 + 150 * pixel[1] as u16 + 29 * pixel[2] as u16)
+            >> 8) as usize;
         let old_lum = old_lum.min(255);
         let new_lum = lut[old_lum] as f32;
         if old_lum == 0 {
@@ -217,7 +219,8 @@ pub fn auto_levels(buf: &mut PixelBuffer) -> Result<(), RangaError> {
     let mut min_lum = 255u8;
     let mut max_lum = 0u8;
     for pixel in buf.data.chunks_exact(4) {
-        let lum = ((77u16 * pixel[0] as u16 + 150 * pixel[1] as u16 + 29 * pixel[2] as u16) >> 8) as u8;
+        let lum =
+            ((77u16 * pixel[0] as u16 + 150 * pixel[1] as u16 + 29 * pixel[2] as u16) >> 8) as u8;
         min_lum = min_lum.min(lum);
         max_lum = max_lum.max(lum);
     }
@@ -277,8 +280,7 @@ mod tests {
     #[test]
     fn equalize_uniform_unchanged() {
         // Uniform image: all same value. Equalization should keep it uniform.
-        let mut buf =
-            PixelBuffer::new(vec![128; 8 * 8 * 4], 8, 8, PixelFormat::Rgba8).unwrap();
+        let mut buf = PixelBuffer::new(vec![128; 8 * 8 * 4], 8, 8, PixelFormat::Rgba8).unwrap();
         equalize(&mut buf).unwrap();
         // All pixels should be the same value (mapped to 255 since single-value CDF).
         let v = buf.data[0];
@@ -298,8 +300,16 @@ mod tests {
         )
         .unwrap();
         auto_levels(&mut buf).unwrap();
-        assert!(buf.data[0] < 10, "min should map near 0, got {}", buf.data[0]);
-        assert!(buf.data[4] > 245, "max should map near 255, got {}", buf.data[4]);
+        assert!(
+            buf.data[0] < 10,
+            "min should map near 0, got {}",
+            buf.data[0]
+        );
+        assert!(
+            buf.data[4] > 245,
+            "max should map near 255, got {}",
+            buf.data[4]
+        );
     }
 
     #[test]

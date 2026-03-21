@@ -41,53 +41,109 @@ const DST: [u8; 4] = [50, 50, 200, 255];
 #[test]
 fn photoshop_normal() {
     // Normal at full opacity: src replaces dst.
-    assert_blend(SRC, DST, BlendMode::Normal, 255, [200, 50, 50, 255], "Normal");
+    assert_blend(
+        SRC,
+        DST,
+        BlendMode::Normal,
+        255,
+        [200, 50, 50, 255],
+        "Normal",
+    );
 }
 
 #[test]
 fn photoshop_multiply() {
     // Multiply: (S * D) / 255 per channel.
     // R: 200*50/255 ≈ 39, G: 50*50/255 ≈ 10, B: 50*200/255 ≈ 39
-    assert_blend(SRC, DST, BlendMode::Multiply, 255, [39, 10, 39, 255], "Multiply");
+    assert_blend(
+        SRC,
+        DST,
+        BlendMode::Multiply,
+        255,
+        [39, 10, 39, 255],
+        "Multiply",
+    );
 }
 
 #[test]
 fn photoshop_screen() {
     // Screen: 1 - (1-S)(1-D) → S + D - S*D/255
     // R: 200+50-39=211, G: 50+50-10=90, B: 50+200-39=211
-    assert_blend(SRC, DST, BlendMode::Screen, 255, [211, 90, 211, 255], "Screen");
+    assert_blend(
+        SRC,
+        DST,
+        BlendMode::Screen,
+        255,
+        [211, 90, 211, 255],
+        "Screen",
+    );
 }
 
 #[test]
 fn photoshop_overlay() {
     // Overlay: if D<128 → 2*S*D/255, else → 1-2*(1-S)*(1-D)/255
     // R: D=50<128 → 2*200*50/255≈78, G: 2*50*50/255≈20, B: D=200>128 → 255-2*205*55/255≈167
-    assert_blend(SRC, DST, BlendMode::Overlay, 255, [78, 20, 167, 255], "Overlay");
+    assert_blend(
+        SRC,
+        DST,
+        BlendMode::Overlay,
+        255,
+        [78, 20, 167, 255],
+        "Overlay",
+    );
 }
 
 #[test]
 fn photoshop_darken() {
     // Darken: min(S, D) per channel.
-    assert_blend(SRC, DST, BlendMode::Darken, 255, [50, 50, 50, 255], "Darken");
+    assert_blend(
+        SRC,
+        DST,
+        BlendMode::Darken,
+        255,
+        [50, 50, 50, 255],
+        "Darken",
+    );
 }
 
 #[test]
 fn photoshop_lighten() {
     // Lighten: max(S, D) per channel.
-    assert_blend(SRC, DST, BlendMode::Lighten, 255, [200, 50, 200, 255], "Lighten");
+    assert_blend(
+        SRC,
+        DST,
+        BlendMode::Lighten,
+        255,
+        [200, 50, 200, 255],
+        "Lighten",
+    );
 }
 
 #[test]
 fn photoshop_difference() {
     // Difference: |S - D| per channel.
-    assert_blend(SRC, DST, BlendMode::Difference, 255, [150, 0, 150, 255], "Difference");
+    assert_blend(
+        SRC,
+        DST,
+        BlendMode::Difference,
+        255,
+        [150, 0, 150, 255],
+        "Difference",
+    );
 }
 
 #[test]
 fn photoshop_exclusion() {
     // Exclusion: S + D - 2*S*D/255
     // R: 200+50-78=172, G: 50+50-20=80, B: 50+200-78=172
-    assert_blend(SRC, DST, BlendMode::Exclusion, 255, [172, 80, 172, 255], "Exclusion");
+    assert_blend(
+        SRC,
+        DST,
+        BlendMode::Exclusion,
+        255,
+        [172, 80, 172, 255],
+        "Exclusion",
+    );
 }
 
 // ---------------------------------------------------------------------------

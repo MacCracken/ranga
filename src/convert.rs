@@ -95,7 +95,13 @@ unsafe fn compute_y_row_simd_sse2(rgba: &[u8], y_out: &mut [u8], cr: u16, cg: u1
     }
 
     if simd_pixels < pixel_count {
-        compute_y_row_scalar(&rgba[simd_pixels * 4..], &mut y_out[simd_pixels..], cr, cg, cb);
+        compute_y_row_scalar(
+            &rgba[simd_pixels * 4..],
+            &mut y_out[simd_pixels..],
+            cr,
+            cg,
+            cb,
+        );
     }
 }
 
@@ -126,7 +132,13 @@ unsafe fn compute_y_row_simd_neon(rgba: &[u8], y_out: &mut [u8], cr: u16, cg: u1
     }
 
     if simd_pixels < pixel_count {
-        compute_y_row_scalar(&rgba[simd_pixels * 4..], &mut y_out[simd_pixels..], cr, cg, cb);
+        compute_y_row_scalar(
+            &rgba[simd_pixels * 4..],
+            &mut y_out[simd_pixels..],
+            cr,
+            cg,
+            cb,
+        );
     }
 }
 

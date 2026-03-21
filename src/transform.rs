@@ -334,7 +334,8 @@ pub fn resize(
                             let wy = cubic_weight(fy - j as f64);
                             for i in -1isize..=2 {
                                 let wx = cubic_weight(fx - i as f64);
-                                val += wx * wy * sample_clamped(&buf.data, ix + i, iy + j, sw, sh, c);
+                                val +=
+                                    wx * wy * sample_clamped(&buf.data, ix + i, iy + j, sw, sh, c);
                             }
                         }
                         out[di + c] = val.clamp(0.0, 255.0) as u8;
@@ -477,7 +478,8 @@ pub fn affine_transform(
                             let wy = cubic_weight(fy - j as f64);
                             for i in -1isize..=2 {
                                 let wx = cubic_weight(fx - i as f64);
-                                val += wx * wy * sample_clamped(&buf.data, ix + i, iy + j, sw, sh, c);
+                                val +=
+                                    wx * wy * sample_clamped(&buf.data, ix + i, iy + j, sw, sh, c);
                             }
                         }
                         out[di + c] = val.clamp(0.0, 255.0) as u8;
@@ -598,11 +600,7 @@ impl Perspective {
         // Gaussian elimination.
         let h = solve_8x8(a, b)?;
         Some(Self {
-            m: [
-                [h[0], h[1], h[2]],
-                [h[3], h[4], h[5]],
-                [h[6], h[7], 1.0],
-            ],
+            m: [[h[0], h[1], h[2]], [h[3], h[4], h[5]], [h[6], h[7], 1.0]],
         })
     }
 }
@@ -858,7 +856,8 @@ mod tests {
 
     #[test]
     fn perspective_transform_identity() {
-        let buf = PixelBuffer::new(vec![200, 100, 50, 255].repeat(4), 2, 2, PixelFormat::Rgba8).unwrap();
+        let buf =
+            PixelBuffer::new(vec![200, 100, 50, 255].repeat(4), 2, 2, PixelFormat::Rgba8).unwrap();
         let p = Perspective::identity();
         let result = perspective_transform(&buf, &p, 2, 2).unwrap();
         assert_eq!(result.width, 2);

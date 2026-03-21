@@ -309,7 +309,12 @@ pub fn gradient_linear_angled(
     let dy = angle_rad.sin();
 
     // Compute the projection range for the gradient direction.
-    let corners = [(0.0f32, 0.0f32), (w - 1.0, 0.0), (0.0, h - 1.0), (w - 1.0, h - 1.0)];
+    let corners = [
+        (0.0f32, 0.0f32),
+        (w - 1.0, 0.0),
+        (0.0, h - 1.0),
+        (w - 1.0, h - 1.0),
+    ];
     let mut min_proj = f32::MAX;
     let mut max_proj = f32::MIN;
     for (cx, cy) in corners {
@@ -717,7 +722,14 @@ mod tests {
     #[test]
     fn gradient_radial_center() {
         let mut buf = PixelBuffer::zeroed(21, 21, PixelFormat::Rgba8);
-        gradient_radial(&mut buf, (10.0, 10.0), 10.0, [255, 0, 0, 255], [0, 0, 255, 255]).unwrap();
+        gradient_radial(
+            &mut buf,
+            (10.0, 10.0),
+            10.0,
+            [255, 0, 0, 255],
+            [0, 0, 255, 255],
+        )
+        .unwrap();
         // Center pixel should be start color (red).
         let ci = (10 * 21 + 10) * 4;
         assert!(buf.data[ci] > 250, "center R={}", buf.data[ci]);
@@ -727,7 +739,14 @@ mod tests {
     #[test]
     fn gradient_radial_edge() {
         let mut buf = PixelBuffer::zeroed(21, 21, PixelFormat::Rgba8);
-        gradient_radial(&mut buf, (10.0, 10.0), 10.0, [255, 0, 0, 255], [0, 0, 255, 255]).unwrap();
+        gradient_radial(
+            &mut buf,
+            (10.0, 10.0),
+            10.0,
+            [255, 0, 0, 255],
+            [0, 0, 255, 255],
+        )
+        .unwrap();
         // Pixel at (20, 10) is 10px from center = at radius boundary.
         let ei = (10 * 21 + 20) * 4;
         assert!(buf.data[ei + 2] > 200, "edge B={}", buf.data[ei + 2]);

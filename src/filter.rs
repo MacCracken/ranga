@@ -83,7 +83,8 @@ unsafe fn brightness_sse2(data: &mut [u8], shift: i16) {
                 let alpha = _mm_and_si128(px, alpha_mask);
                 let added = _mm_adds_epu8(px, add_val);
                 // Restore alpha.
-                let rgb_mask = _mm_set_epi8(0, -1, -1, -1, 0, -1, -1, -1, 0, -1, -1, -1, 0, -1, -1, -1);
+                let rgb_mask =
+                    _mm_set_epi8(0, -1, -1, -1, 0, -1, -1, -1, 0, -1, -1, -1, 0, -1, -1, -1);
                 let result = _mm_or_si128(_mm_and_si128(added, rgb_mask), alpha);
                 _mm_storeu_si128(data.as_mut_ptr().add(i) as *mut __m128i, result);
                 i += 16;
@@ -96,7 +97,8 @@ unsafe fn brightness_sse2(data: &mut [u8], shift: i16) {
                 let alpha_mask = _mm_set_epi8(-1, 0, 0, 0, -1, 0, 0, 0, -1, 0, 0, 0, -1, 0, 0, 0);
                 let alpha = _mm_and_si128(px, alpha_mask);
                 let subbed = _mm_subs_epu8(px, sub_val);
-                let rgb_mask = _mm_set_epi8(0, -1, -1, -1, 0, -1, -1, -1, 0, -1, -1, -1, 0, -1, -1, -1);
+                let rgb_mask =
+                    _mm_set_epi8(0, -1, -1, -1, 0, -1, -1, -1, 0, -1, -1, -1, 0, -1, -1, -1);
                 let result = _mm_or_si128(_mm_and_si128(subbed, rgb_mask), alpha);
                 _mm_storeu_si128(data.as_mut_ptr().add(i) as *mut __m128i, result);
                 i += 16;

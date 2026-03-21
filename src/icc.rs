@@ -408,7 +408,9 @@ fn parse_mft2_lut(
     let output_table_bytes = output_channels * output_entries * 2;
 
     if output_table_start + output_table_bytes > data.len() {
-        return Err(RangaError::InvalidFormat("mft2 LUT data extends beyond profile".into()));
+        return Err(RangaError::InvalidFormat(
+            "mft2 LUT data extends beyond profile".into(),
+        ));
     }
 
     // Parse input curves.
@@ -473,7 +475,9 @@ fn parse_mft1_lut(
     let output_table_bytes = output_channels * 256;
 
     if output_table_start + output_table_bytes > data.len() {
-        return Err(RangaError::InvalidFormat("mft1 LUT data extends beyond profile".into()));
+        return Err(RangaError::InvalidFormat(
+            "mft1 LUT data extends beyond profile".into(),
+        ));
     }
 
     // Parse input curves (256 entries each, 8-bit).
