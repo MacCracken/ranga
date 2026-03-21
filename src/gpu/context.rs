@@ -63,7 +63,7 @@ impl PipelineCache {
 /// GPU compute context — manages wgpu device and queue.
 ///
 /// Create once and reuse for multiple operations to amortize initialization cost.
-/// Includes a [`PipelineCache`] that stores compiled compute pipelines so
+/// Includes a pipeline cache that stores compiled compute pipelines so
 /// repeated calls to the same shader avoid redundant compilation.
 ///
 /// # Examples

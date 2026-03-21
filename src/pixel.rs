@@ -17,6 +17,7 @@ use crate::RangaError;
 /// assert_eq!(size, 1920 * 1080 * 4);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum PixelFormat {
     /// 4 bytes per pixel: R, G, B, A
     Rgba8,

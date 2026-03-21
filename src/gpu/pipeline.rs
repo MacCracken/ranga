@@ -71,6 +71,8 @@ pub fn gpu_blend(
 
     // Params: count, mode, opacity, padding — matches shader Params struct
     let params = [pixel_count, mode_id, opacity.to_bits(), 0u32];
+    // SAFETY: params is a contiguous array of u32, reinterpreted as bytes.
+    // Alignment is satisfied (u8 has alignment 1) and the size is exact.
     let params_bytes: &[u8] = unsafe {
         std::slice::from_raw_parts(params.as_ptr().cast::<u8>(), std::mem::size_of_val(&params))
     };
@@ -116,6 +118,8 @@ pub fn gpu_invert(ctx: &GpuContext, buf: &mut PixelBuffer) -> Result<(), RangaEr
     let pixel_count = buf.pixel_count() as u32;
     let gpu_buf = GpuBuffer::upload(ctx, buf);
     let params = [pixel_count];
+    // SAFETY: params is a contiguous array of u32, reinterpreted as bytes.
+    // Alignment is satisfied (u8 has alignment 1) and the size is exact.
     let params_bytes: &[u8] = unsafe {
         std::slice::from_raw_parts(params.as_ptr().cast::<u8>(), std::mem::size_of_val(&params))
     };
@@ -158,6 +162,8 @@ pub fn gpu_grayscale(ctx: &GpuContext, buf: &mut PixelBuffer) -> Result<(), Rang
     let pixel_count = buf.pixel_count() as u32;
     let gpu_buf = GpuBuffer::upload(ctx, buf);
     let params = [pixel_count];
+    // SAFETY: params is a contiguous array of u32, reinterpreted as bytes.
+    // Alignment is satisfied (u8 has alignment 1) and the size is exact.
     let params_bytes: &[u8] = unsafe {
         std::slice::from_raw_parts(params.as_ptr().cast::<u8>(), std::mem::size_of_val(&params))
     };
@@ -205,6 +211,8 @@ pub fn gpu_brightness_contrast(
     let pixel_count = buf.pixel_count() as u32;
     let gpu_buf = GpuBuffer::upload(ctx, buf);
     let params = [pixel_count, brightness.to_bits(), contrast.to_bits(), 0u32];
+    // SAFETY: params is a contiguous array of u32, reinterpreted as bytes.
+    // Alignment is satisfied (u8 has alignment 1) and the size is exact.
     let params_bytes: &[u8] = unsafe {
         std::slice::from_raw_parts(params.as_ptr().cast::<u8>(), std::mem::size_of_val(&params))
     };
@@ -251,6 +259,8 @@ pub fn gpu_saturation(
     let pixel_count = buf.pixel_count() as u32;
     let gpu_buf = GpuBuffer::upload(ctx, buf);
     let params = [pixel_count, factor.to_bits(), 0u32, 0u32];
+    // SAFETY: params is a contiguous array of u32, reinterpreted as bytes.
+    // Alignment is satisfied (u8 has alignment 1) and the size is exact.
     let params_bytes: &[u8] = unsafe {
         std::slice::from_raw_parts(params.as_ptr().cast::<u8>(), std::mem::size_of_val(&params))
     };
@@ -319,6 +329,8 @@ fn dispatch_1buf_shader(
 
     // SAFETY: The pipeline pointer remains valid because GpuContext owns the cache
     // and we hold a shared reference to GpuContext for the duration of this function.
+    // SAFETY: pipeline_ptr is valid for the lifetime of ctx.cache (RefCell<PipelineCache>).
+    // The borrow is dropped before this point, so no aliasing conflict.
     let pipeline = unsafe { &*pipeline_ptr };
 
     let mut encoder = ctx
@@ -388,6 +400,8 @@ fn dispatch_3buf_shader(
 
     // SAFETY: The pipeline pointer remains valid because GpuContext owns the cache
     // and we hold a shared reference to GpuContext for the duration of this function.
+    // SAFETY: pipeline_ptr is valid for the lifetime of ctx.cache (RefCell<PipelineCache>).
+    // The borrow is dropped before this point, so no aliasing conflict.
     let pipeline = unsafe { &*pipeline_ptr };
 
     let mut encoder = ctx
@@ -457,7 +471,7 @@ pub fn gpu_gaussian_blur(
     let output_buf = PixelBuffer::zeroed(w, h, PixelFormat::Rgba8);
     let output_gpu = GpuBuffer::upload(ctx, &output_buf);
 
-    // Upload kernel as storage buffer of f32s
+    // SAFETY: kernel is a contiguous Vec<f32>, reinterpreted as bytes for GPU upload.
     let kernel_bytes: &[u8] = unsafe {
         std::slice::from_raw_parts(
             kernel.as_ptr().cast::<u8>(),
@@ -476,6 +490,8 @@ pub fn gpu_gaussian_blur(
 
     // Params: width, height, radius, _pad
     let params = [w, h, radius, 0u32];
+    // SAFETY: params is a contiguous array of u32, reinterpreted as bytes.
+    // Alignment is satisfied (u8 has alignment 1) and the size is exact.
     let params_bytes: &[u8] = unsafe {
         std::slice::from_raw_parts(params.as_ptr().cast::<u8>(), std::mem::size_of_val(&params))
     };

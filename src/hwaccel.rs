@@ -1,4 +1,4 @@
-//! Hardware acceleration detection via [`ai-hwaccel`].
+//! Hardware acceleration detection via `ai-hwaccel`.
 //!
 //! Provides GPU capability queries to decide whether to use wgpu compute
 //! pipelines or fall back to CPU. Requires the `hwaccel` feature.

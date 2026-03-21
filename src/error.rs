@@ -9,6 +9,7 @@
 /// assert!(err.to_string().contains("buffer too small"));
 /// ```
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum RangaError {
     /// The pixel format is invalid or unsupported for this operation.
     #[error("invalid pixel format: {0}")]

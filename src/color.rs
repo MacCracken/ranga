@@ -161,6 +161,7 @@ pub struct Cmyk {
 /// assert_eq!(cs, ColorSpace::Srgb);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum ColorSpace {
     Srgb,
     LinearRgb,

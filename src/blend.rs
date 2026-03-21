@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 /// assert_ne!(mode, BlendMode::Screen);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum BlendMode {
     Normal,
     Multiply,
