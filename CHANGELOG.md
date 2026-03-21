@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.20.5] — 2026-03-21
+
+### Added
+
+- **ARGB8 blend** — `blend_pixel_argb()` and `blend_row_normal_argb()` for ARGB channel layout (aethersafta native format)
+- **ARGB8 positioned composite** — `composite_at_argb()` for ARGB8 layer compositing without RGBA conversion
+
+### Changed
+
+- Version bump for aethersafta ecosystem migration
+
 ## [0.20.4] — 2026-03-21
 
 ### Added

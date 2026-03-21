@@ -437,6 +437,70 @@ pub fn blend_row_normal(src: &[u8], dst: &mut [u8], opacity: u8) {
     blend_row_normal_scalar(src, dst, opacity);
 }
 
+// ---------------------------------------------------------------------------
+// ARGB8 blend (alpha-first layout used by aethersafta)
+// ---------------------------------------------------------------------------
+
+/// Blend a single ARGB8 pixel: `[A, R, G, B]` layout.
+///
+/// Same Porter-Duff compositing as [`blend_pixel`] but for ARGB8 channel
+/// order (used by aethersafta). Alpha is at index 0.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::blend::{BlendMode, blend_pixel_argb};
+///
+/// let result = blend_pixel_argb([255, 255, 0, 0], [255, 0, 0, 255], BlendMode::Normal, 255);
+/// assert!(result[1] > 200); // red channel dominant
+/// ```
+#[inline]
+#[must_use]
+pub fn blend_pixel_argb(src: [u8; 4], dst: [u8; 4], mode: BlendMode, opacity: u8) -> [u8; 4] {
+    // Convert ARGB → RGBA, blend, convert back
+    let rgba_src = [src[1], src[2], src[3], src[0]];
+    let rgba_dst = [dst[1], dst[2], dst[3], dst[0]];
+    let result = blend_pixel(rgba_src, rgba_dst, mode, opacity);
+    [result[3], result[0], result[1], result[2]]
+}
+
+/// Blend an entire source row over a destination row (ARGB8, Normal mode).
+///
+/// ARGB layout: `[A, R, G, B]` per pixel. Used by aethersafta's compositor.
+/// The opacity parameter is a fixed-point Q8 value (0–255).
+///
+/// # Examples
+///
+/// ```
+/// use ranga::blend::blend_row_normal_argb;
+///
+/// let src = vec![200, 128, 64, 32, 200, 64, 128, 96]; // 2 ARGB pixels
+/// let mut dst = vec![255, 0, 0, 255, 255, 0, 0, 255];
+/// blend_row_normal_argb(&src, &mut dst, 255);
+/// assert_eq!(dst.len(), 8);
+/// ```
+pub fn blend_row_normal_argb(src: &[u8], dst: &mut [u8], opacity: u8) {
+    debug_assert_eq!(src.len(), dst.len());
+    debug_assert_eq!(src.len() % 4, 0);
+
+    let opacity_fp = opacity as u16;
+    for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+        let sa = (s[0] as u16 * opacity_fp) >> 8;
+        if sa == 0 {
+            continue;
+        }
+        if sa >= 255 {
+            d.copy_from_slice(s);
+            continue;
+        }
+        let inv_sa = 255u16 - sa;
+        d[0] = ((sa + d[0] as u16 * inv_sa / 255).min(255)) as u8; // A
+        d[1] = ((s[1] as u16 * sa + d[1] as u16 * inv_sa) >> 8) as u8; // R
+        d[2] = ((s[2] as u16 * sa + d[2] as u16 * inv_sa) >> 8) as u8; // G
+        d[3] = ((s[3] as u16 * sa + d[3] as u16 * inv_sa) >> 8) as u8; // B
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -358,6 +358,85 @@ pub fn composite_at(
     Ok(())
 }
 
+/// Composite `src` onto `dst` at position `(x, y)` — ARGB8 variant.
+///
+/// Same as [`composite_at`] but for ARGB8 pixel layout (`[A, R, G, B]`)
+/// used by aethersafta. Both buffers must be Argb8 format.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::composite;
+///
+/// let mut dst = PixelBuffer::zeroed(10, 10, PixelFormat::Argb8);
+/// let src = PixelBuffer::new(vec![200, 255, 0, 0].repeat(4), 2, 2, PixelFormat::Argb8).unwrap();
+/// composite::composite_at_argb(&src, &mut dst, 1, 1, 1.0).unwrap();
+/// ```
+pub fn composite_at_argb(
+    src: &PixelBuffer,
+    dst: &mut PixelBuffer,
+    x: i32,
+    y: i32,
+    opacity: f32,
+) -> Result<(), RangaError> {
+    if src.format != PixelFormat::Argb8 {
+        return Err(RangaError::InvalidFormat(format!("{:?}", src.format)));
+    }
+    if dst.format != PixelFormat::Argb8 {
+        return Err(RangaError::InvalidFormat(format!("{:?}", dst.format)));
+    }
+
+    let dw = dst.width as i32;
+    let dh = dst.height as i32;
+    let sw = src.width as i32;
+    let sh = src.height as i32;
+
+    let x0 = x.max(0);
+    let y0 = y.max(0);
+    let x1 = (x + sw).min(dw);
+    let y1 = (y + sh).min(dh);
+    if x0 >= x1 || y0 >= y1 {
+        return Ok(());
+    }
+
+    let op = (opacity.clamp(0.0, 1.0) * 255.0) as u16;
+    if op == 0 {
+        return Ok(());
+    }
+
+    let dst_stride = dst.width as usize;
+    let src_stride = src.width as usize;
+
+    for dy in y0..y1 {
+        let sy = (dy - y) as usize;
+        for dx in x0..x1 {
+            let sx = (dx - x) as usize;
+            let si = (sy * src_stride + sx) * 4;
+            let di = (dy as usize * dst_stride + dx as usize) * 4;
+
+            // ARGB layout: [A, R, G, B]
+            let sa = (src.data[si] as u16 * op) >> 8;
+            if sa == 0 {
+                continue;
+            }
+            if sa >= 255 {
+                dst.data[di..di + 4].copy_from_slice(&src.data[si..si + 4]);
+                continue;
+            }
+            let inv_sa = 255u16 - sa;
+            dst.data[di] = ((sa + dst.data[di] as u16 * inv_sa / 255).min(255)) as u8;
+            dst.data[di + 1] =
+                ((src.data[si + 1] as u16 * sa + dst.data[di + 1] as u16 * inv_sa) >> 8) as u8;
+            dst.data[di + 2] =
+                ((src.data[si + 2] as u16 * sa + dst.data[di + 2] as u16 * inv_sa) >> 8) as u8;
+            dst.data[di + 3] =
+                ((src.data[si + 3] as u16 * sa + dst.data[di + 3] as u16 * inv_sa) >> 8) as u8;
+        }
+    }
+    Ok(())
+}
+
 /// Fill a checkerboard pattern (transparency visualization).
 ///
 /// Alternating light/dark squares of `block_size` pixels. Standard pattern
