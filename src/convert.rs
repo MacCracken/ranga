@@ -17,14 +17,12 @@ fn compute_y_row(rgba: &[u8], y_out: &mut [u8]) {
     {
         // SAFETY: SSE2 is baseline for x86_64.
         unsafe { compute_y_row_simd_sse2(rgba, y_out, 77, 150, 29) };
-        return;
     }
 
     #[cfg(all(feature = "simd", target_arch = "aarch64"))]
     {
         // SAFETY: NEON is baseline for aarch64.
         unsafe { compute_y_row_simd_neon(rgba, y_out, 77, 150, 29) };
-        return;
     }
 
     #[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64"))))]
@@ -37,14 +35,12 @@ fn compute_y_row_bt709(rgba: &[u8], y_out: &mut [u8]) {
     {
         // SAFETY: SSE2 is baseline for x86_64.
         unsafe { compute_y_row_simd_sse2(rgba, y_out, 54, 183, 18) };
-        return;
     }
 
     #[cfg(all(feature = "simd", target_arch = "aarch64"))]
     {
         // SAFETY: NEON is baseline for aarch64.
         unsafe { compute_y_row_simd_neon(rgba, y_out, 54, 183, 18) };
-        return;
     }
 
     #[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64"))))]

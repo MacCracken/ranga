@@ -652,6 +652,7 @@ pub fn srgb_to_cmyk(c: &Srgba) -> Cmyk {
 /// let lab: Oklab = red.into();
 /// assert!(lab.l > 0.0 && lab.l < 1.0);
 /// ```
+#[allow(clippy::excessive_precision)]
 impl From<LinRgba> for Oklab {
     fn from(c: LinRgba) -> Self {
         // M1: linear sRGB → LMS
@@ -686,6 +687,7 @@ impl From<LinRgba> for Oklab {
 /// let rgb: LinRgba = lab.into();
 /// assert!(rgb.r >= 0.0);
 /// ```
+#[allow(clippy::excessive_precision)]
 impl From<Oklab> for LinRgba {
     fn from(c: Oklab) -> Self {
         // Inverse M2: Oklab → cube-rooted LMS

@@ -606,6 +606,7 @@ impl Perspective {
 }
 
 /// Solve an 8x8 linear system via Gaussian elimination with partial pivoting.
+#[allow(clippy::needless_range_loop)]
 fn solve_8x8(mut a: [[f64; 8]; 8], mut b: [f64; 8]) -> Option<[f64; 8]> {
     for col in 0..8 {
         // Partial pivot.
@@ -857,7 +858,7 @@ mod tests {
     #[test]
     fn perspective_transform_identity() {
         let buf =
-            PixelBuffer::new(vec![200, 100, 50, 255].repeat(4), 2, 2, PixelFormat::Rgba8).unwrap();
+            PixelBuffer::new([200, 100, 50, 255].repeat(4), 2, 2, PixelFormat::Rgba8).unwrap();
         let p = Perspective::identity();
         let result = perspective_transform(&buf, &p, 2, 2).unwrap();
         assert_eq!(result.width, 2);

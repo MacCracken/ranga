@@ -334,6 +334,7 @@ impl IccLutProfile {
         };
 
         let mut out = [0.0f64; 3];
+        #[allow(clippy::needless_range_loop)]
         for ch in 0..3 {
             let c000 = lut_idx(r0, g0, b0, ch);
             let c100 = lut_idx(r1, g0, b0, ch);
@@ -415,6 +416,7 @@ fn parse_mft2_lut(
 
     // Parse input curves.
     let mut input_curves: [Vec<f64>; 3] = [vec![], vec![], vec![]];
+    #[allow(clippy::needless_range_loop)]
     for ch in 0..3 {
         let curve_off = input_table_start + ch * input_entries * 2;
         let mut curve = Vec::with_capacity(input_entries);
@@ -482,6 +484,7 @@ fn parse_mft1_lut(
 
     // Parse input curves (256 entries each, 8-bit).
     let mut input_curves: [Vec<f64>; 3] = [vec![], vec![], vec![]];
+    #[allow(clippy::needless_range_loop)]
     for ch in 0..3 {
         let curve_off = input_table_start + ch * 256;
         let mut curve = Vec::with_capacity(256);

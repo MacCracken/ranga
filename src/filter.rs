@@ -37,14 +37,14 @@ pub fn brightness(buf: &mut PixelBuffer, offset: f32) -> Result<(), RangaError> 
     {
         // SAFETY: SSE2 is baseline for x86_64, always available.
         unsafe { brightness_sse2(&mut buf.data, shift) };
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(all(feature = "simd", target_arch = "aarch64"))]
     {
         // SAFETY: NEON is baseline for aarch64.
         unsafe { brightness_neon(&mut buf.data, shift) };
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64"))))]
@@ -302,14 +302,14 @@ pub fn grayscale(buf: &mut PixelBuffer) -> Result<(), RangaError> {
     {
         // SAFETY: SSE2 is baseline for x86_64.
         unsafe { grayscale_sse2(&mut buf.data) };
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(all(feature = "simd", target_arch = "aarch64"))]
     {
         // SAFETY: NEON is baseline for aarch64.
         unsafe { grayscale_neon(&mut buf.data) };
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64"))))]
@@ -1760,7 +1760,7 @@ mod tests {
     fn auto_white_balance_neutralizes() {
         // Image with a red color cast.
         let mut buf = PixelBuffer::new(
-            vec![200, 100, 100, 255].repeat(16),
+            [200, 100, 100, 255].repeat(16),
             4,
             4,
             PixelFormat::Rgba8,
