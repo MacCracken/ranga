@@ -1398,9 +1398,21 @@ pub fn auto_white_balance(buf: &mut PixelBuffer) -> Result<(), RangaError> {
     let avg_gray = (avg_r + avg_g + avg_b) / 3.0;
 
     // Avoid division by near-zero and clamp scale to prevent extreme distortion.
-    let scale_r = if avg_r > 5.0 { (avg_gray / avg_r).clamp(0.5, 3.0) } else { 1.0 };
-    let scale_g = if avg_g > 5.0 { (avg_gray / avg_g).clamp(0.5, 3.0) } else { 1.0 };
-    let scale_b = if avg_b > 5.0 { (avg_gray / avg_b).clamp(0.5, 3.0) } else { 1.0 };
+    let scale_r = if avg_r > 5.0 {
+        (avg_gray / avg_r).clamp(0.5, 3.0)
+    } else {
+        1.0
+    };
+    let scale_g = if avg_g > 5.0 {
+        (avg_gray / avg_g).clamp(0.5, 3.0)
+    } else {
+        1.0
+    };
+    let scale_b = if avg_b > 5.0 {
+        (avg_gray / avg_b).clamp(0.5, 3.0)
+    } else {
+        1.0
+    };
 
     for pixel in buf.data.chunks_exact_mut(4) {
         pixel[0] = (pixel[0] as f32 * scale_r).clamp(0.0, 255.0) as u8;

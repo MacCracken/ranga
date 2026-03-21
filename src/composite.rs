@@ -275,9 +275,8 @@ pub fn gradient_linear(
             let t = x as f32 / (w - 1.0).max(1.0);
             let i = (y * buf.width as usize + x) * 4;
             for c in 0..4 {
-                buf.data[i + c] =
-                    (start[c] as f32 + t * (end[c] as f32 - start[c] as f32) + 0.5)
-                        .clamp(0.0, 255.0) as u8;
+                buf.data[i + c] = (start[c] as f32 + t * (end[c] as f32 - start[c] as f32) + 0.5)
+                    .clamp(0.0, 255.0) as u8;
             }
         }
     }
@@ -341,9 +340,8 @@ pub fn gradient_linear_angled(
             let t = ((proj - min_proj) / range).clamp(0.0, 1.0);
             let i = (y * buf.width as usize + x) * 4;
             for c in 0..4 {
-                buf.data[i + c] =
-                    (start[c] as f32 + t * (end[c] as f32 - start[c] as f32) + 0.5)
-                        .clamp(0.0, 255.0) as u8;
+                buf.data[i + c] = (start[c] as f32 + t * (end[c] as f32 - start[c] as f32) + 0.5)
+                    .clamp(0.0, 255.0) as u8;
             }
         }
     }
@@ -383,9 +381,8 @@ pub fn gradient_radial(
             let t = (dist / r).clamp(0.0, 1.0);
             let i = (y * buf.width as usize + x) * 4;
             for c in 0..4 {
-                buf.data[i + c] =
-                    (start[c] as f32 + t * (end[c] as f32 - start[c] as f32) + 0.5)
-                        .clamp(0.0, 255.0) as u8;
+                buf.data[i + c] = (start[c] as f32 + t * (end[c] as f32 - start[c] as f32) + 0.5)
+                    .clamp(0.0, 255.0) as u8;
             }
         }
     }
