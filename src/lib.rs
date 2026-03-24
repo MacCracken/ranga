@@ -6,18 +6,27 @@
 //!
 //! ## Modules
 //!
-//! - [`color`] — Color spaces, conversions, ICC profiles
-//! - [`pixel`] — Pixel buffer type with format-aware operations
-//! - [`blend`] — 12 Porter-Duff blend modes with SIMD acceleration
-//! - [`convert`] — Pixel format conversion (RGB↔YUV, ARGB↔NV12, etc.)
-//! - [`filter`] — CPU image filters (brightness, contrast, saturation, levels, curves)
-//! - [`histogram`] — Luminance and color histogram computation
+//! - [`color`] — Color spaces (sRGB, linear, HSL, CIE XYZ/Lab, Oklab/Oklch, CMYK, P3), Delta-E, color temperature
+//! - [`pixel`] — Pixel buffer with 6 formats, zero-copy views, buffer pool
+//! - [`blend`] — 12 Porter-Duff blend modes with SSE2/AVX2/NEON SIMD
+//! - [`convert`] — Pixel format conversion (BT.601/709/2020, ARGB↔NV12, RGB8↔RGBA8, RgbaF32)
+//! - [`filter`] — 24+ CPU filters (blur, sharpen, hue shift, 3D LUT, noise, median, bilateral)
+//! - [`composite`] — Layer compositing, masks, transitions (dissolve/fade/wipe), gradients
+//! - [`histogram`] — Luminance/RGB histograms, equalization, auto-levels
+//! - [`transform`] — Crop, resize (nearest/bilinear/bicubic), affine, perspective, flip
+//! - [`icc`] — ICC v2/v4 profile parsing, tone curves, embedded sRGB profile
+//! - [`gpu`] — GPU compute: blend, filters, noise, transitions, crop/resize/flip, batched dispatch (`GpuChain`)
+//! - [`hwaccel`] — GPU detection with VRAM/utilization-aware offload decisions
+//! - [`spectral`] — Physically-based color science via prakash (SPD, CIE CMFs, illuminants, CRI)
 //!
 //! ## Feature Flags
 //!
 //! - `simd` (default) — SSE2/AVX2/NEON SIMD acceleration for blend and convert
-//! - `gpu` — wgpu-based GPU compute pipelines for filters and compositing
-//! - `hwaccel` — hardware accelerator detection via ai-hwaccel
+//! - `gpu` — wgpu compute pipelines with `GpuChain` batched dispatch
+//! - `hwaccel` — hardware accelerator detection via ai-hwaccel 0.23.3
+//! - `parallel` — rayon row-parallel blur
+//! - `spectral` — physically-based color science via prakash
+//! - `full` — all features
 //!
 //! ## Example
 //!

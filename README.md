@@ -10,21 +10,24 @@ Ranga provides shared image processing primitives for the [AGNOS](https://github
 
 | Area | Capabilities |
 |------|-------------|
-| **Color spaces** | sRGB, linear RGB, HSL, CIE XYZ, CIE L\*a\*b\*, Display P3, CMYK |
+| **Color spaces** | sRGB, linear RGB, HSL, CIE XYZ, CIE L\*a\*b\*, Oklab, Oklch, Display P3, BT.2020, CMYK |
 | **Pixel buffers** | `PixelBuffer` with 6 formats, zero-copy `PixelView`, `BufferPool` |
 | **Blend modes** | 12 Porter-Duff modes with SSE2/AVX2/NEON SIMD (2x throughput) |
-| **Conversion** | BT.601, BT.709, NV12, RGB8↔RGBA8, ARGB8↔RGBA8, RgbaF32↔RGBA8 |
-| **Filters** | 17 filters: blur, sharpen, hue shift, color balance, 3D LUT, vignette, noise |
-| **Color science** | Delta-E (CIE76/94/2000), color temperature, ICC profile parsing |
-| **Histograms** | Luminance, per-channel RGB, chi-squared distance |
-| **GPU compute** | wgpu shaders for blend, filters, blur with pipeline caching |
-| **Hardware** | GPU detection via ai-hwaccel, automatic CPU/GPU crossover |
+| **Conversion** | BT.601, BT.709, BT.2020, NV12, RGB8↔RGBA8, ARGB8↔RGBA8, RgbaF32↔RGBA8 |
+| **Filters** | 24+ filters: blur, sharpen, hue shift, color balance, 3D LUT, vignette, noise, median, bilateral, vibrance |
+| **Compositing** | Layer masks, dissolve/fade/wipe transitions, gradients, positioned composite (RGBA8 + ARGB8) |
+| **Transforms** | Crop, resize (nearest/bilinear/bicubic), affine, perspective, flip |
+| **Color science** | Delta-E (CIE76/94/2000), color temperature, ICC v2/v4 profiles, Oklab/Oklch |
+| **Spectral** | SPD, CIE 1931 CMFs, standard illuminants, CRI, inverse CCT (via prakash) |
+| **Histograms** | Luminance, per-channel RGB, chi-squared, equalization, auto-levels |
+| **GPU compute** | wgpu shaders for blend, filters, noise, transitions, crop/resize/flip, `GpuChain` batched dispatch |
+| **Hardware** | GPU detection via ai-hwaccel 0.23.3, VRAM/utilization-aware offload |
 
 ## Quick Start
 
 ```toml
 [dependencies]
-ranga = "0.20"
+ranga = "0.24"
 ```
 
 ```rust
@@ -87,9 +90,10 @@ let view = PixelView::new(&existing_bytes, 1920, 1080, PixelFormat::Rgba8)?;
 | Flag | Default | Description |
 |------|---------|-------------|
 | `simd` | Yes | SSE2/AVX2/NEON acceleration for blend operations |
-| `gpu` | No | wgpu compute shaders (Vulkan/Metal) |
-| `hwaccel` | No | GPU detection via ai-hwaccel |
+| `gpu` | No | wgpu compute shaders with `GpuChain` batched dispatch |
+| `hwaccel` | No | GPU detection via ai-hwaccel 0.23.3 |
 | `parallel` | No | Rayon row-parallel blur |
+| `spectral` | No | Physically-based color science via prakash (SPD, CIE CMFs, illuminants) |
 | `full` | No | All features |
 
 ## Performance
@@ -121,7 +125,7 @@ Run benchmarks: `cargo bench` or `cargo bench --all-features`
 ### Feature Guides
 - [Color Science](docs/guides/features/color-science.md) — color spaces, Delta-E, ICC, temperature
 - [Blend Modes](docs/guides/features/blend-modes.md) — 12 modes, SIMD, GPU, positioned composite
-- [Filters](docs/guides/features/filters.md) — 23 filters with usage patterns and performance tips
+- [Filters](docs/guides/features/filters.md) — 24+ filters with usage patterns and performance tips
 - [Transforms](docs/guides/features/transforms.md) — crop, resize, affine, flip
 - [Compositing](docs/guides/features/compositing.md) — layer masks, transitions, fill operations
 - [GPU Compute](docs/guides/features/gpu-compute.md) — wgpu shaders, pipeline caching, async readback
