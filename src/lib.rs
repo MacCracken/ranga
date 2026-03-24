@@ -15,9 +15,9 @@
 //! - [`histogram`] — Luminance/RGB histograms, equalization, auto-levels
 //! - [`transform`] — Crop, resize (nearest/bilinear/bicubic), affine, perspective, flip
 //! - [`icc`] — ICC v2/v4 profile parsing, tone curves, embedded sRGB profile
-//! - [`gpu`] — GPU compute: blend, filters, noise, transitions, crop/resize/flip, batched dispatch (`GpuChain`)
-//! - [`hwaccel`] — GPU detection with VRAM/utilization-aware offload decisions
-//! - [`spectral`] — Physically-based color science via prakash (SPD, CIE CMFs, illuminants, CRI)
+//! - `gpu` — GPU compute: blend, filters, noise, transitions, crop/resize/flip, batched dispatch (`GpuChain`)
+//! - `hwaccel` — GPU detection with VRAM/utilization-aware offload decisions
+//! - `spectral` — Physically-based color science via prakash (SPD, CIE CMFs, illuminants, CRI)
 //!
 //! ## Feature Flags
 //!
