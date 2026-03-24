@@ -1,6 +1,6 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use ranga::pixel::{PixelBuffer, PixelFormat};
-use ranga::transform::{self, Affine, ScaleFilter};
+use ranga::transform::{self, Affine, Perspective, ScaleFilter};
 
 fn make_buf() -> PixelBuffer {
     PixelBuffer::new(vec![128; 1920 * 1080 * 4], 1920, 1080, PixelFormat::Rgba8).unwrap()
@@ -52,6 +52,21 @@ fn bench_affine_rotate(c: &mut Criterion) {
     });
 }
 
+fn bench_resize_bicubic(c: &mut Criterion) {
+    let buf = make_buf();
+    c.bench_function("resize_bicubic_1080p_to_720p", |b| {
+        b.iter(|| transform::resize(black_box(&buf), 1280, 720, ScaleFilter::Bicubic).unwrap())
+    });
+}
+
+fn bench_perspective_transform(c: &mut Criterion) {
+    let buf = PixelBuffer::new(vec![128; 512 * 512 * 4], 512, 512, PixelFormat::Rgba8).unwrap();
+    let p = Perspective::identity();
+    c.bench_function("perspective_identity_512x512", |b| {
+        b.iter(|| transform::perspective_transform(black_box(&buf), &p, 512, 512).unwrap())
+    });
+}
+
 criterion_group!(
     benches,
     bench_crop,
@@ -60,5 +75,7 @@ criterion_group!(
     bench_flip_horizontal,
     bench_flip_vertical,
     bench_affine_rotate,
+    bench_resize_bicubic,
+    bench_perspective_transform,
 );
 criterion_main!(benches);

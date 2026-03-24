@@ -67,6 +67,51 @@ fn bench_rgbaf32_to_rgba8(c: &mut Criterion) {
     });
 }
 
+fn bench_rgba_to_yuv_bt2020(c: &mut Criterion) {
+    let buf = PixelBuffer::new(vec![128; 1920 * 1080 * 4], 1920, 1080, PixelFormat::Rgba8).unwrap();
+    c.bench_function("rgba_to_yuv420p_bt2020_1080p", |b| {
+        b.iter(|| convert::rgba_to_yuv420p_bt2020(black_box(&buf)).unwrap())
+    });
+}
+
+fn bench_yuv_to_rgba_bt2020(c: &mut Criterion) {
+    let rgba =
+        PixelBuffer::new(vec![128; 1920 * 1080 * 4], 1920, 1080, PixelFormat::Rgba8).unwrap();
+    let yuv = convert::rgba_to_yuv420p_bt2020(&rgba).unwrap();
+    c.bench_function("yuv420p_to_rgba_bt2020_1080p", |b| {
+        b.iter(|| convert::yuv420p_to_rgba_bt2020(black_box(&yuv)).unwrap())
+    });
+}
+
+fn bench_argb_to_nv12(c: &mut Criterion) {
+    let argb_data: Vec<u8> = [255u8, 128, 128, 128].repeat(1920 * 1080);
+    let argb = PixelBuffer::new(argb_data, 1920, 1080, PixelFormat::Argb8).unwrap();
+    c.bench_function("argb_to_nv12_1080p", |b| {
+        b.iter(|| convert::argb_to_nv12(black_box(&argb)).unwrap())
+    });
+}
+
+fn bench_rgba8_to_argb8(c: &mut Criterion) {
+    let buf = PixelBuffer::new(vec![128; 1920 * 1080 * 4], 1920, 1080, PixelFormat::Rgba8).unwrap();
+    c.bench_function("rgba8_to_argb8_1080p", |b| {
+        b.iter(|| convert::rgba8_to_argb8(black_box(&buf)).unwrap())
+    });
+}
+
+fn bench_rgba8_to_rgb8(c: &mut Criterion) {
+    let buf = PixelBuffer::new(vec![128; 1920 * 1080 * 4], 1920, 1080, PixelFormat::Rgba8).unwrap();
+    c.bench_function("rgba8_to_rgb8_1080p", |b| {
+        b.iter(|| convert::rgba8_to_rgb8(black_box(&buf)).unwrap())
+    });
+}
+
+fn bench_rgba8_to_rgbaf32(c: &mut Criterion) {
+    let buf = PixelBuffer::new(vec![128; 1920 * 1080 * 4], 1920, 1080, PixelFormat::Rgba8).unwrap();
+    c.bench_function("rgba8_to_rgbaf32_1080p", |b| {
+        b.iter(|| convert::rgba8_to_rgbaf32(black_box(&buf)).unwrap())
+    });
+}
+
 criterion_group!(
     benches,
     bench_rgba_to_yuv_bt601,
@@ -77,5 +122,11 @@ criterion_group!(
     bench_rgb8_to_rgba8,
     bench_argb8_to_rgba8,
     bench_rgbaf32_to_rgba8,
+    bench_rgba_to_yuv_bt2020,
+    bench_yuv_to_rgba_bt2020,
+    bench_argb_to_nv12,
+    bench_rgba8_to_argb8,
+    bench_rgba8_to_rgb8,
+    bench_rgba8_to_rgbaf32,
 );
 criterion_main!(benches);

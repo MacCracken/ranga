@@ -329,3 +329,98 @@ proptest! {
         prop_assert_eq!(buf.data[2], b);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Oklab/Oklch roundtrips
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #[test]
+    fn oklab_roundtrip(r in 0u8..=255, g in 0u8..=255, b in 0u8..=255) {
+        let orig = Srgba { r, g, b, a: 255 };
+        let lin: LinRgba = orig.into();
+        let oklab: Oklab = lin.into();
+        let back_lin: LinRgba = oklab.into();
+        let back: Srgba = back_lin.into();
+        prop_assert!((orig.r as i16 - back.r as i16).unsigned_abs() <= 1,
+            "r: {} vs {}", orig.r, back.r);
+        prop_assert!((orig.g as i16 - back.g as i16).unsigned_abs() <= 1);
+        prop_assert!((orig.b as i16 - back.b as i16).unsigned_abs() <= 1);
+    }
+
+    #[test]
+    fn oklch_roundtrip(r in 0u8..=255, g in 0u8..=255, b in 0u8..=255) {
+        let orig = Srgba { r, g, b, a: 255 };
+        let lin: LinRgba = orig.into();
+        let oklab: Oklab = lin.into();
+        let oklch: Oklch = oklab.into();
+        let back_oklab: Oklab = oklch.into();
+        let back_lin: LinRgba = back_oklab.into();
+        let back: Srgba = back_lin.into();
+        prop_assert!((orig.r as i16 - back.r as i16).unsigned_abs() <= 2,
+            "r: {} vs {}", orig.r, back.r);
+        prop_assert!((orig.g as i16 - back.g as i16).unsigned_abs() <= 2);
+        prop_assert!((orig.b as i16 - back.b as i16).unsigned_abs() <= 2);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Delta-E CIE94 properties
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #[test]
+    fn delta_e_94_non_negative(
+        l1 in 0.0f64..=100.0, a1 in -128.0f64..=128.0, b1 in -128.0f64..=128.0,
+        l2 in 0.0f64..=100.0, a2 in -128.0f64..=128.0, b2 in -128.0f64..=128.0,
+    ) {
+        let c1 = CieLab { l: l1, a: a1, b: b1 };
+        let c2 = CieLab { l: l2, a: a2, b: b2 };
+        prop_assert!(delta_e_cie94(&c1, &c2) >= 0.0);
+    }
+
+    #[test]
+    fn delta_e_94_identity(l in 0.0f64..=100.0, a in -128.0f64..=128.0, b_val in -128.0f64..=128.0) {
+        let c = CieLab { l, a, b: b_val };
+        prop_assert!(delta_e_cie94(&c, &c) < 1e-10);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BT.2020 YUV roundtrip
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #[test]
+    fn yuv420p_bt2020_roundtrip_gray(v in 16u8..=235) {
+        let data: Vec<u8> = [v, v, v, 255].repeat(16);
+        let buf = PixelBuffer::new(data, 4, 4, PixelFormat::Rgba8).unwrap();
+        let yuv = convert::rgba_to_yuv420p_bt2020(&buf).unwrap();
+        let back = convert::yuv420p_to_rgba_bt2020(&yuv).unwrap();
+        prop_assert!((back.data[0] as i16 - v as i16).unsigned_abs() < 3,
+            "in={} out={}", v, back.data[0]);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Additional composite properties
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #[test]
+    fn fade_one_is_identity(r in 0u8..=255, g in 0u8..=255, b in 0u8..=255) {
+        let mut buf = PixelBuffer::new(vec![r, g, b, 255], 1, 1, PixelFormat::Rgba8).unwrap();
+        ranga::composite::fade(&mut buf, 1.0).unwrap();
+        prop_assert_eq!(buf.data[0], r);
+        prop_assert_eq!(buf.data[1], g);
+        prop_assert_eq!(buf.data[2], b);
+    }
+
+    #[test]
+    fn wipe_at_zero_is_all_a(r in 0u8..=255, g in 0u8..=255, b in 0u8..=255) {
+        let a = PixelBuffer::new([r, g, b, 255].repeat(4), 2, 2, PixelFormat::Rgba8).unwrap();
+        let b_buf = PixelBuffer::new([0, 0, 0, 255].repeat(4), 2, 2, PixelFormat::Rgba8).unwrap();
+        let result = ranga::composite::wipe(&a, &b_buf, 0.0).unwrap();
+        prop_assert_eq!(result.data[0], r);
+    }
+}

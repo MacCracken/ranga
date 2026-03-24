@@ -69,6 +69,61 @@ fn bench_checkerboard(c: &mut Criterion) {
     });
 }
 
+fn bench_unpremultiply(c: &mut Criterion) {
+    let mut buf = make_buf();
+    c.bench_function("unpremultiply_alpha_1080p", |b| {
+        b.iter(|| composite::unpremultiply_alpha(black_box(&mut buf)).unwrap())
+    });
+}
+
+fn bench_apply_mask(c: &mut Criterion) {
+    let mut buf = make_buf();
+    let mask = make_buf();
+    c.bench_function("apply_mask_1080p", |b| {
+        b.iter(|| composite::apply_mask(black_box(&mut buf), black_box(&mask)).unwrap())
+    });
+}
+
+fn bench_gradient_radial(c: &mut Criterion) {
+    let mut buf = make_buf();
+    c.bench_function("gradient_radial_1080p", |b| {
+        b.iter(|| {
+            composite::gradient_radial(
+                black_box(&mut buf),
+                (960.0, 540.0),
+                540.0,
+                [255, 0, 0, 255],
+                [0, 0, 255, 255],
+            )
+            .unwrap()
+        })
+    });
+}
+
+fn bench_gradient_angled(c: &mut Criterion) {
+    let mut buf = make_buf();
+    c.bench_function("gradient_linear_angled_1080p", |b| {
+        b.iter(|| {
+            composite::gradient_linear_angled(
+                black_box(&mut buf),
+                [255, 0, 0, 255],
+                [0, 0, 255, 255],
+                45.0,
+            )
+            .unwrap()
+        })
+    });
+}
+
+fn bench_composite_at_argb(c: &mut Criterion) {
+    let mut dst =
+        PixelBuffer::new(vec![128; 1920 * 1080 * 4], 1920, 1080, PixelFormat::Argb8).unwrap();
+    let src = PixelBuffer::new(vec![200; 640 * 480 * 4], 640, 480, PixelFormat::Argb8).unwrap();
+    c.bench_function("composite_at_argb_640x480_on_1080p", |b| {
+        b.iter(|| composite::composite_at_argb(black_box(&src), &mut dst, 100, 100, 0.8).unwrap())
+    });
+}
+
 criterion_group!(
     benches,
     bench_premultiply,
@@ -78,5 +133,10 @@ criterion_group!(
     bench_wipe,
     bench_gradient,
     bench_checkerboard,
+    bench_unpremultiply,
+    bench_apply_mask,
+    bench_gradient_radial,
+    bench_gradient_angled,
+    bench_composite_at_argb,
 );
 criterion_main!(benches);
