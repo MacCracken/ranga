@@ -92,9 +92,13 @@ impl PixelFormat {
 /// ```
 #[derive(Debug, Clone)]
 pub struct PixelBuffer {
+    /// Raw pixel data.
     pub data: Vec<u8>,
+    /// Image width in pixels.
     pub width: u32,
+    /// Image height in pixels.
     pub height: u32,
+    /// Pixel format of the buffer.
     pub format: PixelFormat,
 }
 

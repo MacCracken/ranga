@@ -1,6 +1,6 @@
 [package]
 name = "ranga"
-version = "0.21.4"
+version = "0.23.3"
 edition = "2024"
 rust-version = "1.89"
 license = "AGPL-3.0-only"
@@ -18,15 +18,17 @@ simd = []
 gpu = ["dep:wgpu"]
 hwaccel = ["dep:ai-hwaccel"]
 parallel = ["dep:rayon"]
-full = ["simd", "gpu", "hwaccel", "parallel"]
+spectral = ["dep:prakash"]
+full = ["simd", "gpu", "hwaccel", "parallel", "spectral"]
 
 [dependencies]
-ai-hwaccel = { version = "0.21.3", optional = true }
+ai-hwaccel = { version = "0.23.3", optional = true }
 rayon = { version = "1", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
+prakash = { version = "0.23", default-features = false, features = ["spectral"], optional = true }
 wgpu = { version = "24", optional = true }
 
 [dev-dependencies]
@@ -69,3 +71,8 @@ harness = false
 [[bench]]
 name = "icc"
 harness = false
+
+[[bench]]
+name = "spectral"
+harness = false
+required-features = ["spectral"]

@@ -30,11 +30,17 @@ use serde::{Deserialize, Serialize};
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Affine {
+    /// Scale X / cos(rotation).
     pub a: f64,
+    /// Skew Y / sin(rotation).
     pub b: f64,
+    /// Skew X / -sin(rotation).
     pub c: f64,
+    /// Scale Y / cos(rotation).
     pub d: f64,
+    /// Translate X.
     pub tx: f64,
+    /// Translate Y.
     pub ty: f64,
 }
 

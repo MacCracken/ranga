@@ -41,6 +41,8 @@ pub mod histogram;
 pub mod hwaccel;
 pub mod icc;
 pub mod pixel;
+#[cfg(feature = "spectral")]
+pub mod spectral;
 pub mod transform;
 
 mod error;

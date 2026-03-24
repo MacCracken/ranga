@@ -18,10 +18,10 @@ fuzz_target!(|data: &[u8]| {
     let rgba_size = (w * h * 4) as usize;
     if remaining.len() >= rgba_size {
         let rgba_data = remaining[..rgba_size].to_vec();
-        if let Ok(buf) = PixelBuffer::new(rgba_data, w, h, PixelFormat::Rgba8) {
-            if let Ok(yuv) = rgba_to_yuv420p(&buf) {
-                let _ = yuv420p_to_rgba(&yuv);
-            }
+        if let Ok(buf) = PixelBuffer::new(rgba_data, w, h, PixelFormat::Rgba8)
+            && let Ok(yuv) = rgba_to_yuv420p(&buf)
+        {
+            let _ = yuv420p_to_rgba(&yuv);
         }
     }
 

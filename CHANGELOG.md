@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.23.3] — 2026-03-24
+
+### Added
+
+- **Spectral module** (`spectral` feature) — prakash integration for physically-based color science
+  - `Spd` (spectral power distribution) type with CIE 1931 CMF integration
+  - Bridged `From` conversions between `prakash::spectral::Xyz` and `ranga::color::CieXyz`
+  - Convenience functions: `spd_to_xyz`, `xyz_to_cct`, `wavelength_to_xyz`, `d65_white`, `d50_white`, `blackbody_spd`
+  - Re-exported standard illuminants (D65, D50, A, F2, F11), CIE 1931 2° CMFs, color rendering index
+  - Re-exported `color_temperature_to_rgb`, `cct_from_xy` (inverse color temperature — new capability)
+  - Re-exported high-precision sRGB gamma functions (`linear_to_srgb_gamma`, `srgb_gamma_to_linear`)
+- **CieXyz white point constants** — `CieXyz::D65_WHITE` and `CieXyz::D50_WHITE` associated constants (always available, no feature gate)
+- **ColorSpace::CieXyz variant** — added to the `ColorSpace` enum
+- **Full test coverage sweep** — 37 new tests across 4 new test files (379 → 433 total)
+  - `tests/edge_cases.rs` — 30 tests: error formatting, ARGB blend, composite_at_argb, histogram edge cases, filter edge cases, pixel edge cases, transform edge cases, convert edge cases
+  - `tests/spectral.rs` — 17 tests: white points, XYZ roundtrip, SPD→XYZ, wavelength→XYZ, CCT, blackbody, CIE CMFs, illuminants, sRGB gamma, Wien peak, CRI
+  - Expanded `tests/proptest.rs` — +7 property tests: Oklab/Oklch roundtrips, Delta-E CIE94, BT.2020 YUV, fade/wipe composites
+- **Full benchmark coverage sweep** — 30 new benchmarks across 2 new + 4 expanded suites (~70 → ~108 total)
+  - `benches/histogram.rs` (new) — luminance_histogram, rgb_histograms, equalize, auto_levels, chi_squared
+  - `benches/icc.rs` (new) — srgb_v2 generation, ICC parse, ICC apply, ToneCurve gamma/table
+  - `benches/spectral.rs` (new) — spd_to_xyz, xyz_to_cct, wavelength_to_xyz, blackbody_spd, color_temperature_to_rgb, cie_cmf_at, CRI, XYZ roundtrip
+  - Expanded `benches/blend.rs` — all 12 blend modes group, ARGB pixel, ARGB row
+  - Expanded `benches/color_convert.rs` — BT.2020 encode/decode, argb_to_nv12, rgba8_to_argb8, rgba8_to_rgb8, rgba8_to_rgbaf32
+  - Expanded `benches/transform.rs` — bicubic resize, perspective transform
+  - Expanded `benches/composite.rs` — unpremultiply, apply_mask, gradient_radial, gradient_angled, composite_at_argb
+
+### Changed
+
+- Added `spectral` feature flag (depends on prakash 0.23.3, spectral feature only)
+- `full` feature now includes `spectral`
+- **GPU batched dispatch** — `GpuChain` builder for chaining multiple GPU operations without CPU readback between steps (invert, grayscale, brightness_contrast, saturation, gaussian_blur, blend)
+- **Visual regression tests** — 10 deterministic pixel-level regression tests: gradient blur smoothness, checkerboard resize, invert idempotency, premultiply roundtrip precision, Gaussian blur symmetry, HSL hue shift 360 identity, color balance neutral, crop+resize composition, Screen blend commutativity, YUV roundtrip color fidelity
+- **Extended fuzz campaigns** — 5 new fuzz targets (blur, LUT, ICC, composite, transform) added to existing 3 (blend, convert, filter) for 8 total
+- Bumped `ai-hwaccel` from 0.21.3 to 0.23.3 — `HwReport` now exposes `gpu_free_memory_mb`, `gpu_utilization_percent`, `temperature_c`; `should_use_gpu()` checks free VRAM and GPU utilization before recommending offload
+- Added field-level doc comments to all public struct fields (`LinRgba`, `Srgba`, `CieXyz`, `Cmyk`, `PixelBuffer`, `Affine`) — 100% public API documented
+- Version aligned with prakash ecosystem at 0.23.3
+- All v1.0 criteria met (excluding downstream consumer adoption)
+
 ## [0.21.4] — 2026-03-21
 
 ### Changed

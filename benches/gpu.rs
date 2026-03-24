@@ -128,6 +128,40 @@ fn bench_gpu_vs_cpu_blur(c: &mut Criterion) {
     });
 }
 
+fn bench_gpu_chain_vs_sequential(c: &mut Criterion) {
+    let ctx = match get_ctx() {
+        Some(ctx) => ctx,
+        None => return,
+    };
+
+    let data = vec![128u8; 1920 * 1080 * 4];
+
+    c.bench_function("gpu_chain_invert_brightness_saturation_1080p", |b| {
+        let buf = PixelBuffer::new(data.clone(), 1920, 1080, PixelFormat::Rgba8).unwrap();
+        b.iter(|| {
+            gpu::GpuChain::new(&ctx, black_box(&buf))
+                .unwrap()
+                .invert()
+                .unwrap()
+                .brightness_contrast(0.1, 1.2)
+                .unwrap()
+                .saturation(1.5)
+                .unwrap()
+                .finish()
+                .unwrap()
+        })
+    });
+
+    c.bench_function("gpu_sequential_invert_brightness_saturation_1080p", |b| {
+        let mut buf = PixelBuffer::new(data.clone(), 1920, 1080, PixelFormat::Rgba8).unwrap();
+        b.iter(|| {
+            gpu::gpu_invert(&ctx, black_box(&mut buf)).unwrap();
+            gpu::gpu_brightness_contrast(&ctx, black_box(&mut buf), 0.1, 1.2).unwrap();
+            gpu::gpu_saturation(&ctx, black_box(&mut buf), 1.5).unwrap();
+        })
+    });
+}
+
 criterion_group!(
     benches,
     bench_gpu_vs_cpu_blend,
@@ -136,5 +170,6 @@ criterion_group!(
     bench_gpu_vs_cpu_brightness,
     bench_gpu_vs_cpu_saturation,
     bench_gpu_vs_cpu_blur,
+    bench_gpu_chain_vs_sequential,
 );
 criterion_main!(benches);

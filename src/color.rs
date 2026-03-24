@@ -28,9 +28,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LinRgba {
+    /// Red channel (0.0–1.0).
     pub r: f32,
+    /// Green channel (0.0–1.0).
     pub g: f32,
+    /// Blue channel (0.0–1.0).
     pub b: f32,
+    /// Alpha channel (0.0–1.0).
     pub a: f32,
 }
 
@@ -50,9 +54,13 @@ pub struct LinRgba {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Srgba {
+    /// Red channel (0–255).
     pub r: u8,
+    /// Green channel (0–255).
     pub g: u8,
+    /// Blue channel (0–255).
     pub b: u8,
+    /// Alpha channel (0–255).
     pub a: u8,
 }
 
@@ -96,9 +104,27 @@ pub struct Hsl {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CieXyz {
+    /// X tristimulus value.
     pub x: f64,
+    /// Y tristimulus value (luminance).
     pub y: f64,
+    /// Z tristimulus value.
     pub z: f64,
+}
+
+impl CieXyz {
+    /// CIE D65 standard illuminant white point.
+    pub const D65_WHITE: Self = Self {
+        x: 0.95047,
+        y: 1.0,
+        z: 1.08883,
+    };
+    /// CIE D50 standard illuminant white point.
+    pub const D50_WHITE: Self = Self {
+        x: 0.96422,
+        y: 1.0,
+        z: 0.82521,
+    };
 }
 
 /// A color in CIE L\*a\*b\* space (D65 illuminant).
@@ -145,9 +171,13 @@ pub struct CieLab {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Cmyk {
+    /// Cyan (0.0–1.0).
     pub c: f32,
+    /// Magenta (0.0–1.0).
     pub m: f32,
+    /// Yellow (0.0–1.0).
     pub y: f32,
+    /// Key/black (0.0–1.0).
     pub k: f32,
 }
 
@@ -228,6 +258,8 @@ pub enum ColorSpace {
     Bt709,
     /// ITU-R BT.2020 wide-gamut color space (HDR/UHD video).
     Bt2020,
+    /// CIE XYZ tristimulus (device-independent reference space).
+    CieXyz,
 }
 
 impl std::fmt::Display for ColorSpace {
@@ -239,6 +271,7 @@ impl std::fmt::Display for ColorSpace {
             Self::Bt601 => write!(f, "BT.601"),
             Self::Bt709 => write!(f, "BT.709"),
             Self::Bt2020 => write!(f, "BT.2020"),
+            Self::CieXyz => write!(f, "CIE XYZ"),
         }
     }
 }

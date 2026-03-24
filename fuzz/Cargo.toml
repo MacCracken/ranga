@@ -29,3 +29,28 @@ doc = false
 name = "fuzz_filter"
 path = "fuzz_targets/fuzz_filter.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_blur"
+path = "fuzz_targets/fuzz_blur.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_lut"
+path = "fuzz_targets/fuzz_lut.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_icc"
+path = "fuzz_targets/fuzz_icc.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_composite"
+path = "fuzz_targets/fuzz_composite.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_transform"
+path = "fuzz_targets/fuzz_transform.rs"
+doc = false

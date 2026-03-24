@@ -287,6 +287,459 @@ pub fn gpu_saturation(
     Ok(())
 }
 
+// ── GPU chain builder ──────────────────────────────────────────────────────
+
+/// A chain of GPU operations executed without CPU readback between steps.
+///
+/// Upload once, apply multiple operations on the GPU, download once at the end.
+/// This avoids the overhead of CPU-to-GPU transfers between chained operations.
+///
+/// Uses a ping-pong buffer pattern internally: in-place shaders (invert,
+/// grayscale, brightness/contrast, saturation) operate on the current buffer
+/// directly, while shaders that need separate input/output (blur) swap between
+/// two GPU buffers.
+///
+/// # Examples
+///
+/// ```no_run
+/// use ranga::gpu::{GpuContext, GpuChain};
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+///
+/// let ctx = GpuContext::new().unwrap();
+/// let buf = PixelBuffer::zeroed(1920, 1080, PixelFormat::Rgba8);
+/// let result = GpuChain::new(&ctx, &buf).unwrap()
+///     .invert().unwrap()
+///     .brightness_contrast(0.1, 1.2).unwrap()
+///     .saturation(1.5).unwrap()
+///     .finish().unwrap();
+/// assert_eq!(result.width, 1920);
+/// ```
+pub struct GpuChain<'a> {
+    ctx: &'a GpuContext,
+    /// Current GPU buffer being operated on (ping).
+    buf_a: GpuBuffer,
+    /// Secondary buffer for operations that need a separate output (pong).
+    buf_b: GpuBuffer,
+    /// Which buffer is "current" (`true` = `buf_a`, `false` = `buf_b`).
+    current_is_a: bool,
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+}
+
+impl<'a> GpuChain<'a> {
+    /// Upload a [`PixelBuffer`] and begin a chain of GPU operations.
+    ///
+    /// Creates both ping and pong GPU buffers. The input data is uploaded to
+    /// buffer A; buffer B is initialized to zeroes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the buffer is not RGBA8 or exceeds `u32` pixel count.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ranga::gpu::{GpuContext, GpuChain};
+    /// use ranga::pixel::{PixelBuffer, PixelFormat};
+    ///
+    /// let ctx = GpuContext::new().unwrap();
+    /// let buf = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
+    /// let chain = GpuChain::new(&ctx, &buf).unwrap();
+    /// ```
+    pub fn new(ctx: &'a GpuContext, buf: &PixelBuffer) -> Result<Self, RangaError> {
+        if buf.format != PixelFormat::Rgba8 {
+            return Err(RangaError::InvalidFormat("GpuChain requires RGBA8".into()));
+        }
+        let pixel_count = u32::try_from(buf.pixel_count()).map_err(|_| {
+            RangaError::Other("image too large for GPU pipeline (exceeds u32 pixel count)".into())
+        })?;
+
+        let buf_a = GpuBuffer::upload(ctx, buf);
+        let zeroed = PixelBuffer::zeroed(buf.width, buf.height, PixelFormat::Rgba8);
+        let buf_b = GpuBuffer::upload(ctx, &zeroed);
+
+        Ok(Self {
+            ctx,
+            buf_a,
+            buf_b,
+            current_is_a: true,
+            width: buf.width,
+            height: buf.height,
+            pixel_count,
+        })
+    }
+
+    /// Reference to whichever buffer is currently active.
+    #[must_use]
+    fn current_buf(&self) -> &GpuBuffer {
+        if self.current_is_a {
+            &self.buf_a
+        } else {
+            &self.buf_b
+        }
+    }
+
+    /// Reference to whichever buffer is NOT currently active.
+    #[must_use]
+    fn other_buf(&self) -> &GpuBuffer {
+        if self.current_is_a {
+            &self.buf_b
+        } else {
+            &self.buf_a
+        }
+    }
+
+    /// Apply color inversion (in-place on current buffer).
+    ///
+    /// Inverts R, G, B channels while preserving alpha.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the GPU dispatch fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ranga::gpu::{GpuContext, GpuChain};
+    /// use ranga::pixel::{PixelBuffer, PixelFormat};
+    ///
+    /// let ctx = GpuContext::new().unwrap();
+    /// let buf = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
+    /// let result = GpuChain::new(&ctx, &buf).unwrap()
+    ///     .invert().unwrap()
+    ///     .finish().unwrap();
+    /// ```
+    pub fn invert(self) -> Result<Self, RangaError> {
+        let params = [self.pixel_count];
+        let params_bytes = params_to_bytes(&params);
+        dispatch_1buf_shader(
+            self.ctx,
+            "invert",
+            &shaders::build_shader(shaders::INVERT),
+            self.current_buf().wgpu_buffer(),
+            params_bytes,
+            self.pixel_count.div_ceil(256),
+        );
+        Ok(self)
+    }
+
+    /// Apply grayscale conversion (in-place on current buffer).
+    ///
+    /// Sets R, G, B to BT.709 luminance while preserving alpha.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the GPU dispatch fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ranga::gpu::{GpuContext, GpuChain};
+    /// use ranga::pixel::{PixelBuffer, PixelFormat};
+    ///
+    /// let ctx = GpuContext::new().unwrap();
+    /// let buf = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
+    /// let result = GpuChain::new(&ctx, &buf).unwrap()
+    ///     .grayscale().unwrap()
+    ///     .finish().unwrap();
+    /// ```
+    pub fn grayscale(self) -> Result<Self, RangaError> {
+        let params = [self.pixel_count];
+        let params_bytes = params_to_bytes(&params);
+        dispatch_1buf_shader(
+            self.ctx,
+            "grayscale",
+            &shaders::build_shader(shaders::GRAYSCALE),
+            self.current_buf().wgpu_buffer(),
+            params_bytes,
+            self.pixel_count.div_ceil(256),
+        );
+        Ok(self)
+    }
+
+    /// Apply brightness and contrast adjustment (in-place on current buffer).
+    ///
+    /// `brightness` is an offset in the -1.0 to 1.0 range.
+    /// `contrast` is a multiplier where 1.0 is unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the GPU dispatch fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ranga::gpu::{GpuContext, GpuChain};
+    /// use ranga::pixel::{PixelBuffer, PixelFormat};
+    ///
+    /// let ctx = GpuContext::new().unwrap();
+    /// let buf = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
+    /// let result = GpuChain::new(&ctx, &buf).unwrap()
+    ///     .brightness_contrast(0.1, 1.2).unwrap()
+    ///     .finish().unwrap();
+    /// ```
+    pub fn brightness_contrast(self, brightness: f32, contrast: f32) -> Result<Self, RangaError> {
+        let params = [
+            self.pixel_count,
+            brightness.to_bits(),
+            contrast.to_bits(),
+            0u32,
+        ];
+        let params_bytes = params_to_bytes(&params);
+        dispatch_1buf_shader(
+            self.ctx,
+            "brightness_contrast",
+            &shaders::build_shader(shaders::BRIGHTNESS_CONTRAST),
+            self.current_buf().wgpu_buffer(),
+            params_bytes,
+            self.pixel_count.div_ceil(256),
+        );
+        Ok(self)
+    }
+
+    /// Apply saturation adjustment (in-place on current buffer).
+    ///
+    /// `factor` of 1.0 is unchanged; 0.0 is grayscale; >1.0 increases saturation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the GPU dispatch fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ranga::gpu::{GpuContext, GpuChain};
+    /// use ranga::pixel::{PixelBuffer, PixelFormat};
+    ///
+    /// let ctx = GpuContext::new().unwrap();
+    /// let buf = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
+    /// let result = GpuChain::new(&ctx, &buf).unwrap()
+    ///     .saturation(1.5).unwrap()
+    ///     .finish().unwrap();
+    /// ```
+    pub fn saturation(self, factor: f32) -> Result<Self, RangaError> {
+        let params = [self.pixel_count, factor.to_bits(), 0u32, 0u32];
+        let params_bytes = params_to_bytes(&params);
+        dispatch_1buf_shader(
+            self.ctx,
+            "saturation",
+            &shaders::build_shader(shaders::SATURATION),
+            self.current_buf().wgpu_buffer(),
+            params_bytes,
+            self.pixel_count.div_ceil(256),
+        );
+        Ok(self)
+    }
+
+    /// Apply Gaussian blur using a separable two-pass approach.
+    ///
+    /// Uses ping-pong buffers: horizontal pass writes current -> other,
+    /// then vertical pass writes other -> current. The active buffer
+    /// remains the same after the operation.
+    ///
+    /// A `radius` of 0 is a no-op.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the GPU dispatch fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ranga::gpu::{GpuContext, GpuChain};
+    /// use ranga::pixel::{PixelBuffer, PixelFormat};
+    ///
+    /// let ctx = GpuContext::new().unwrap();
+    /// let buf = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
+    /// let result = GpuChain::new(&ctx, &buf).unwrap()
+    ///     .gaussian_blur(3).unwrap()
+    ///     .finish().unwrap();
+    /// ```
+    pub fn gaussian_blur(self, radius: u32) -> Result<Self, RangaError> {
+        if radius == 0 {
+            return Ok(self);
+        }
+
+        let kernel = build_gaussian_kernel(radius);
+
+        // SAFETY: kernel is a contiguous Vec<f32>, reinterpreted as bytes for GPU upload.
+        let kernel_bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(
+                kernel.as_ptr().cast::<u8>(),
+                kernel.len() * std::mem::size_of::<f32>(),
+            )
+        };
+
+        use wgpu::util::DeviceExt;
+        let kernel_gpu = self
+            .ctx
+            .device()
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("blur_kernel"),
+                contents: kernel_bytes,
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+
+        let params = [self.width, self.height, radius, 0u32];
+        // SAFETY: params is a contiguous array of u32, reinterpreted as bytes.
+        let params_bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(params.as_ptr().cast::<u8>(), std::mem::size_of_val(&params))
+        };
+
+        let workgroups_x = self.width.div_ceil(16);
+        let workgroups_y = self.height.div_ceil(16);
+
+        // Pass 1: horizontal blur (current -> other)
+        dispatch_blur_shader(
+            self.ctx,
+            "blur_horizontal",
+            &shaders::build_shader(shaders::BLUR_HORIZONTAL),
+            self.current_buf().wgpu_buffer(),
+            self.other_buf().wgpu_buffer(),
+            &kernel_gpu,
+            params_bytes,
+            workgroups_x,
+            workgroups_y,
+        );
+
+        // Pass 2: vertical blur (other -> current)
+        // After this, the result is back in the current buffer.
+        dispatch_blur_shader(
+            self.ctx,
+            "blur_vertical",
+            &shaders::build_shader(shaders::BLUR_VERTICAL),
+            self.other_buf().wgpu_buffer(),
+            self.current_buf().wgpu_buffer(),
+            &kernel_gpu,
+            params_bytes,
+            workgroups_x,
+            workgroups_y,
+        );
+
+        // current_is_a stays the same — result is back in the current buffer
+        Ok(self)
+    }
+
+    /// Blend another image over the current buffer using the specified mode.
+    ///
+    /// The `other` buffer is uploaded to the GPU and blended onto the current
+    /// buffer. Dimensions must match.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `other` is not RGBA8, dimensions do not match,
+    /// or a GPU operation fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ranga::gpu::{GpuContext, GpuChain};
+    /// use ranga::pixel::{PixelBuffer, PixelFormat};
+    /// use ranga::blend::BlendMode;
+    ///
+    /// let ctx = GpuContext::new().unwrap();
+    /// let base = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
+    /// let overlay = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
+    /// let result = GpuChain::new(&ctx, &base).unwrap()
+    ///     .blend(&overlay, BlendMode::Normal, 0.5).unwrap()
+    ///     .finish().unwrap();
+    /// ```
+    pub fn blend(
+        self,
+        other: &PixelBuffer,
+        mode: BlendMode,
+        opacity: f32,
+    ) -> Result<Self, RangaError> {
+        if other.format != PixelFormat::Rgba8 {
+            return Err(RangaError::InvalidFormat(
+                "GpuChain blend requires RGBA8".into(),
+            ));
+        }
+        if other.width != self.width || other.height != self.height {
+            return Err(RangaError::DimensionMismatch {
+                expected: (self.width as usize) * (self.height as usize),
+                actual: other.pixel_count(),
+            });
+        }
+
+        let mode_id: u32 = match mode {
+            BlendMode::Normal => 0,
+            BlendMode::Multiply => 1,
+            BlendMode::Screen => 2,
+            BlendMode::Overlay => 3,
+            BlendMode::Darken => 4,
+            BlendMode::Lighten => 5,
+            BlendMode::ColorDodge => 6,
+            BlendMode::ColorBurn => 7,
+            BlendMode::SoftLight => 8,
+            BlendMode::HardLight => 9,
+            BlendMode::Difference => 10,
+            BlendMode::Exclusion => 11,
+        };
+
+        let src_gpu = GpuBuffer::upload(self.ctx, other);
+
+        let params = [self.pixel_count, mode_id, opacity.to_bits(), 0u32];
+        let params_bytes = params_to_bytes(&params);
+
+        // Blend shader: src (read-only) at binding 0, dst (read-write) at binding 1.
+        // The current buffer is the destination.
+        dispatch_3buf_shader(
+            self.ctx,
+            "blend_all",
+            &shaders::build_shader(shaders::BLEND_ALL),
+            src_gpu.wgpu_buffer(),
+            self.current_buf().wgpu_buffer(),
+            params_bytes,
+            self.pixel_count.div_ceil(256),
+        );
+
+        Ok(self)
+    }
+
+    /// Download the current GPU buffer back to CPU and return the result.
+    ///
+    /// This is the terminal operation of the chain. After calling `finish`,
+    /// the chain is consumed and all GPU resources are released.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the GPU download fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ranga::gpu::{GpuContext, GpuChain};
+    /// use ranga::pixel::{PixelBuffer, PixelFormat};
+    ///
+    /// let ctx = GpuContext::new().unwrap();
+    /// let buf = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
+    /// let result = GpuChain::new(&ctx, &buf).unwrap()
+    ///     .invert().unwrap()
+    ///     .finish().unwrap();
+    /// assert_eq!(result.width, 64);
+    /// ```
+    pub fn finish(self) -> Result<PixelBuffer, RangaError> {
+        self.current_buf().download(self.ctx).map_err(Into::into)
+    }
+}
+
+/// Convert a `[u32]` params array to a byte slice.
+///
+/// # Safety
+///
+/// This is safe because `u32` has no padding bytes and `u8` has alignment 1.
+/// The returned slice borrows the input array and is valid for its lifetime.
+#[inline]
+fn params_to_bytes(params: &[u32]) -> &[u8] {
+    // SAFETY: params is a contiguous slice of u32, reinterpreted as bytes.
+    // Alignment is satisfied (u8 has alignment 1) and the size is exact.
+    unsafe {
+        std::slice::from_raw_parts(params.as_ptr().cast::<u8>(), std::mem::size_of_val(params))
+    }
+}
+
 // ── Internal dispatch helpers ──────────────────────────────────────────────
 
 /// Dispatch a compute shader with 1 storage buffer + 1 uniform buffer.
@@ -922,5 +1375,99 @@ mod tests {
         // Verify cache has the entry
         let cache = ctx.cache.borrow();
         assert!(cache.pipelines.contains_key("invert"));
+    }
+
+    // ── GpuChain tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn gpu_chain_invert_matches_single() {
+        let ctx = match try_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
+
+        let data: Vec<u8> = (0..64u8).flat_map(|i| [i * 4, i * 3, i * 2, 255]).collect();
+        let buf = PixelBuffer::new(data.clone(), 8, 8, PixelFormat::Rgba8).unwrap();
+
+        // Chain with just invert
+        let chain_result = GpuChain::new(&ctx, &buf)
+            .unwrap()
+            .invert()
+            .unwrap()
+            .finish()
+            .unwrap();
+
+        // Single gpu_invert
+        let mut single_buf = PixelBuffer::new(data, 8, 8, PixelFormat::Rgba8).unwrap();
+        gpu_invert(&ctx, &mut single_buf).unwrap();
+
+        for (c, s) in chain_result.data.iter().zip(single_buf.data.iter()) {
+            assert!(
+                (*c as i16 - *s as i16).unsigned_abs() <= 1,
+                "chain={c} single={s}"
+            );
+        }
+    }
+
+    #[test]
+    fn gpu_chain_multiple_ops() {
+        let ctx = match try_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
+
+        let data: Vec<u8> = (0..64u8).flat_map(|i| [i * 4, i * 3, i * 2, 255]).collect();
+        let buf = PixelBuffer::new(data.clone(), 8, 8, PixelFormat::Rgba8).unwrap();
+
+        let result = GpuChain::new(&ctx, &buf)
+            .unwrap()
+            .invert()
+            .unwrap()
+            .brightness_contrast(0.1, 1.2)
+            .unwrap()
+            .finish()
+            .unwrap();
+
+        // Result should differ from the original (non-trivial transformation)
+        assert_ne!(result.data, data, "chain should produce a different result");
+        assert_eq!(result.width, 8);
+        assert_eq!(result.height, 8);
+        assert_eq!(result.data.len(), 8 * 8 * 4);
+    }
+
+    #[test]
+    fn gpu_chain_with_blur() {
+        let ctx = match try_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
+
+        let data: Vec<u8> = (0..64u8).flat_map(|i| [i * 4, i * 3, i * 2, 255]).collect();
+        let buf = PixelBuffer::new(data, 8, 8, PixelFormat::Rgba8).unwrap();
+
+        let result = GpuChain::new(&ctx, &buf)
+            .unwrap()
+            .invert()
+            .unwrap()
+            .gaussian_blur(2)
+            .unwrap()
+            .finish()
+            .unwrap();
+
+        assert_eq!(result.width, 8);
+        assert_eq!(result.height, 8);
+        assert_eq!(result.data.len(), 8 * 8 * 4);
+    }
+
+    #[test]
+    fn gpu_chain_rejects_non_rgba8() {
+        let ctx = match try_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
+
+        let buf = PixelBuffer::zeroed(4, 4, PixelFormat::Rgb8);
+        let result = GpuChain::new(&ctx, &buf);
+        assert!(result.is_err());
     }
 }

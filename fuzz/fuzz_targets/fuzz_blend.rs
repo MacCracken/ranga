@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use ranga::blend::{blend_pixel, blend_row_normal, BlendMode};
+use ranga::blend::{BlendMode, blend_pixel, blend_row_normal};
 
 fuzz_target!(|data: &[u8]| {
     // Need at least 9 bytes: 4 src + 4 dst + 1 opacity
