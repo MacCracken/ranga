@@ -13,9 +13,12 @@ fn div255(val: u16) -> u16 {
     (tmp + (tmp >> 8)) >> 8
 }
 
-fn validate_rgba8(buf: &PixelBuffer) -> Result<(), RangaError> {
+fn validate_rgba8(op: &str, buf: &PixelBuffer) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "{op}: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     Ok(())
 }
@@ -50,7 +53,7 @@ fn validate_same_size(a: &PixelBuffer, b: &PixelBuffer) -> Result<(), RangaError
 /// assert_eq!(buf.data[0], 128); // 255 * 128 / 255 ≈ 128
 /// ```
 pub fn premultiply_alpha(buf: &mut PixelBuffer) -> Result<(), RangaError> {
-    validate_rgba8(buf)?;
+    validate_rgba8("premultiply_alpha", buf)?;
     for pixel in buf.data.chunks_exact_mut(4) {
         let a = pixel[3] as u16;
         pixel[0] = ((pixel[0] as u16 * a) / 255) as u8;
@@ -74,7 +77,7 @@ pub fn premultiply_alpha(buf: &mut PixelBuffer) -> Result<(), RangaError> {
 /// assert!(buf.data[0] > 250);
 /// ```
 pub fn unpremultiply_alpha(buf: &mut PixelBuffer) -> Result<(), RangaError> {
-    validate_rgba8(buf)?;
+    validate_rgba8("unpremultiply_alpha", buf)?;
     for pixel in buf.data.chunks_exact_mut(4) {
         let a = pixel[3] as u16;
         if a == 0 {
@@ -110,8 +113,8 @@ pub fn unpremultiply_alpha(buf: &mut PixelBuffer) -> Result<(), RangaError> {
 /// assert_eq!(buf.data[3], 128); // alpha halved by mask
 /// ```
 pub fn apply_mask(buf: &mut PixelBuffer, mask: &PixelBuffer) -> Result<(), RangaError> {
-    validate_rgba8(buf)?;
-    validate_rgba8(mask)?;
+    validate_rgba8("apply_mask", buf)?;
+    validate_rgba8("apply_mask", mask)?;
     validate_same_size(buf, mask)?;
     for (pixel, mask_pixel) in buf.data.chunks_exact_mut(4).zip(mask.data.chunks_exact(4)) {
         let mask_val = mask_pixel[0] as u16; // use red channel as mask
@@ -141,13 +144,14 @@ pub fn apply_mask(buf: &mut PixelBuffer, mask: &PixelBuffer) -> Result<(), Ranga
 /// assert!(mid.data[0] > 100 && mid.data[0] < 155); // ~128
 /// assert!(mid.data[2] > 100 && mid.data[2] < 155);
 /// ```
+#[must_use = "returns a new blended buffer"]
 pub fn dissolve(
     a: &PixelBuffer,
     b: &PixelBuffer,
     progress: f32,
 ) -> Result<PixelBuffer, RangaError> {
-    validate_rgba8(a)?;
-    validate_rgba8(b)?;
+    validate_rgba8("dissolve", a)?;
+    validate_rgba8("dissolve", b)?;
     validate_same_size(a, b)?;
     let t = progress.clamp(0.0, 1.0);
     let inv_t = 1.0 - t;
@@ -173,7 +177,7 @@ pub fn dissolve(
 /// assert_eq!(buf.data[0], 100);
 /// ```
 pub fn fade(buf: &mut PixelBuffer, progress: f32) -> Result<(), RangaError> {
-    validate_rgba8(buf)?;
+    validate_rgba8("fade", buf)?;
     let p = progress.clamp(0.0, 1.0);
     for pixel in buf.data.chunks_exact_mut(4) {
         pixel[0] = (pixel[0] as f32 * p + 0.5).clamp(0.0, 255.0) as u8;
@@ -200,9 +204,10 @@ pub fn fade(buf: &mut PixelBuffer, progress: f32) -> Result<(), RangaError> {
 /// assert_eq!(result.data[0], 0);    // left half is b (black)
 /// assert_eq!(result.data[7 * 4], 255); // right half is a (white)
 /// ```
+#[must_use = "returns a new wiped buffer"]
 pub fn wipe(a: &PixelBuffer, b: &PixelBuffer, progress: f32) -> Result<PixelBuffer, RangaError> {
-    validate_rgba8(a)?;
-    validate_rgba8(b)?;
+    validate_rgba8("wipe", a)?;
+    validate_rgba8("wipe", b)?;
     validate_same_size(a, b)?;
     let threshold = (progress.clamp(0.0, 1.0) * a.width as f32) as u32;
     let w = a.width as usize;
@@ -238,7 +243,7 @@ pub fn wipe(a: &PixelBuffer, b: &PixelBuffer, progress: f32) -> Result<PixelBuff
 /// assert_eq!(buf.data[0], 255);
 /// ```
 pub fn fill_solid(buf: &mut PixelBuffer, color: [u8; 4]) -> Result<(), RangaError> {
-    validate_rgba8(buf)?;
+    validate_rgba8("fill_solid", buf)?;
     for pixel in buf.data.chunks_exact_mut(4) {
         pixel.copy_from_slice(&color);
     }
@@ -265,7 +270,7 @@ pub fn gradient_linear(
     start: [u8; 4],
     end: [u8; 4],
 ) -> Result<(), RangaError> {
-    validate_rgba8(buf)?;
+    validate_rgba8("gradient_linear", buf)?;
     let w = buf.width as f32;
     if w < 1.0 {
         return Ok(());
@@ -304,7 +309,7 @@ pub fn gradient_linear_angled(
     end: [u8; 4],
     angle_deg: f32,
 ) -> Result<(), RangaError> {
-    validate_rgba8(buf)?;
+    validate_rgba8("gradient_linear_angled", buf)?;
     let w = buf.width as f32;
     let h = buf.height as f32;
     if w < 1.0 || h < 1.0 {
@@ -371,7 +376,7 @@ pub fn gradient_radial(
     start: [u8; 4],
     end: [u8; 4],
 ) -> Result<(), RangaError> {
-    validate_rgba8(buf)?;
+    validate_rgba8("gradient_radial", buf)?;
     let r = radius.max(1e-6);
     for y in 0..buf.height as usize {
         for x in 0..buf.width as usize {
@@ -419,8 +424,8 @@ pub fn composite_at(
     y: i32,
     opacity: f32,
 ) -> Result<(), RangaError> {
-    validate_rgba8(src)?;
-    validate_rgba8(dst)?;
+    validate_rgba8("composite_at", src)?;
+    validate_rgba8("composite_at", dst)?;
 
     let dw = dst.width as i32;
     let dh = dst.height as i32;
@@ -494,10 +499,16 @@ pub fn composite_at_argb(
     opacity: f32,
 ) -> Result<(), RangaError> {
     if src.format != PixelFormat::Argb8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", src.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "composite_at_argb: expected Argb8, got {:?}",
+            src.format
+        )));
     }
     if dst.format != PixelFormat::Argb8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", dst.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "composite_at_argb: expected Argb8, got {:?}",
+            dst.format
+        )));
     }
 
     let dw = dst.width as i32;
@@ -571,7 +582,7 @@ pub fn fill_checkerboard(
     color_a: [u8; 4],
     color_b: [u8; 4],
 ) -> Result<(), RangaError> {
-    validate_rgba8(buf)?;
+    validate_rgba8("fill_checkerboard", buf)?;
     let bs = block_size.max(1) as usize;
     for y in 0..buf.height as usize {
         for x in 0..buf.width as usize {

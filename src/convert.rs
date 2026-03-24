@@ -163,9 +163,13 @@ unsafe fn compute_y_row_simd_neon(rgba: &[u8], y_out: &mut [u8], cr: u16, cg: u1
 /// assert_eq!(yuv.format, PixelFormat::Yuv420p);
 /// assert!(yuv.data[0] > 250);
 /// ```
+#[must_use = "returns a new YUV420p buffer"]
 pub fn rgba_to_yuv420p(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "rgba_to_yuv420p: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     let w = buf.width as usize;
     let h = buf.height as usize;
@@ -212,9 +216,13 @@ pub fn rgba_to_yuv420p(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
 /// let back = convert::yuv420p_to_rgba(&yuv).unwrap();
 /// assert!((back.data[0] as i16 - 128).unsigned_abs() < 10);
 /// ```
+#[must_use = "returns a new RGBA buffer"]
 pub fn yuv420p_to_rgba(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
     if buf.format != PixelFormat::Yuv420p {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "yuv420p_to_rgba: expected Yuv420p, got {:?}",
+            buf.format
+        )));
     }
     let w = buf.width as usize;
     let h = buf.height as usize;
@@ -252,9 +260,13 @@ pub fn yuv420p_to_rgba(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
 /// let nv12 = convert::argb_to_nv12(&argb).unwrap();
 /// assert_eq!(nv12.format, PixelFormat::Nv12);
 /// ```
+#[must_use = "returns a new NV12 buffer"]
 pub fn argb_to_nv12(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
     if buf.format != PixelFormat::Argb8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "argb_to_nv12: expected Argb8, got {:?}",
+            buf.format
+        )));
     }
     let w = buf.width as usize;
     let h = buf.height as usize;
@@ -305,9 +317,13 @@ pub fn argb_to_nv12(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
 /// let yuv = convert::rgba_to_yuv420p_bt709(&rgba).unwrap();
 /// assert!(yuv.data[0] > 250);
 /// ```
+#[must_use = "returns a new YUV420p BT.709 buffer"]
 pub fn rgba_to_yuv420p_bt709(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "rgba_to_yuv420p_bt709: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     let w = buf.width as usize;
     let h = buf.height as usize;
@@ -351,9 +367,13 @@ pub fn rgba_to_yuv420p_bt709(buf: &PixelBuffer) -> Result<PixelBuffer, RangaErro
 /// let back = convert::yuv420p_to_rgba_bt709(&yuv).unwrap();
 /// assert!((back.data[0] as i16 - 128).unsigned_abs() < 10);
 /// ```
+#[must_use = "returns a new RGBA BT.709 buffer"]
 pub fn yuv420p_to_rgba_bt709(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
     if buf.format != PixelFormat::Yuv420p {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "yuv420p_to_rgba_bt709: expected Yuv420p, got {:?}",
+            buf.format
+        )));
     }
     let w = buf.width as usize;
     let h = buf.height as usize;
@@ -406,9 +426,13 @@ fn compute_y_row_bt2020(rgba: &[u8], y_out: &mut [u8]) {
 /// let yuv = convert::rgba_to_yuv420p_bt2020(&rgba).unwrap();
 /// assert!(yuv.data[0] > 250);
 /// ```
+#[must_use = "returns a new YUV420p BT.2020 buffer"]
 pub fn rgba_to_yuv420p_bt2020(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "rgba_to_yuv420p_bt2020: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     let w = buf.width as usize;
     let h = buf.height as usize;
@@ -455,9 +479,13 @@ pub fn rgba_to_yuv420p_bt2020(buf: &PixelBuffer) -> Result<PixelBuffer, RangaErr
 /// let back = convert::yuv420p_to_rgba_bt2020(&yuv).unwrap();
 /// assert!((back.data[0] as i16 - 128).unsigned_abs() < 10);
 /// ```
+#[must_use = "returns a new RGBA BT.2020 buffer"]
 pub fn yuv420p_to_rgba_bt2020(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
     if buf.format != PixelFormat::Yuv420p {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "yuv420p_to_rgba_bt2020: expected Yuv420p, got {:?}",
+            buf.format
+        )));
     }
     let w = buf.width as usize;
     let h = buf.height as usize;
@@ -506,9 +534,13 @@ pub fn yuv420p_to_rgba_bt2020(buf: &PixelBuffer) -> Result<PixelBuffer, RangaErr
 /// let rgba = convert::nv12_to_rgba(&nv12).unwrap();
 /// assert_eq!(rgba.format, PixelFormat::Rgba8);
 /// ```
+#[must_use = "returns a new RGBA buffer"]
 pub fn nv12_to_rgba(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
     if buf.format != PixelFormat::Nv12 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "nv12_to_rgba: expected Nv12, got {:?}",
+            buf.format
+        )));
     }
     let w = buf.width as usize;
     let h = buf.height as usize;
@@ -551,9 +583,13 @@ pub fn nv12_to_rgba(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
 /// let rgba = convert::rgb8_to_rgba8(&rgb).unwrap();
 /// assert_eq!(rgba.data, vec![255, 0, 0, 255, 0, 255, 0, 255]);
 /// ```
+#[must_use = "returns a new RGBA8 buffer"]
 pub fn rgb8_to_rgba8(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
     if buf.format != PixelFormat::Rgb8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "rgb8_to_rgba8: expected Rgb8, got {:?}",
+            buf.format
+        )));
     }
     let n = buf.pixel_count();
     let mut rgba = vec![0u8; n * 4];
@@ -578,9 +614,13 @@ pub fn rgb8_to_rgba8(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
 /// let rgb = convert::rgba8_to_rgb8(&rgba).unwrap();
 /// assert_eq!(rgb.data, vec![255, 0, 0, 0, 255, 0]);
 /// ```
+#[must_use = "returns a new RGB8 buffer"]
 pub fn rgba8_to_rgb8(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "rgba8_to_rgb8: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     let n = buf.pixel_count();
     let mut rgb = vec![0u8; n * 3];
@@ -604,9 +644,13 @@ pub fn rgba8_to_rgb8(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
 /// let rgba = convert::argb8_to_rgba8(&argb).unwrap();
 /// assert_eq!(rgba.data, vec![128, 64, 32, 255]);
 /// ```
+#[must_use = "returns a new RGBA8 buffer"]
 pub fn argb8_to_rgba8(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
     if buf.format != PixelFormat::Argb8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "argb8_to_rgba8: expected Argb8, got {:?}",
+            buf.format
+        )));
     }
     let mut rgba = vec![0u8; buf.data.len()];
     for (src, dst) in buf.data.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
@@ -630,9 +674,13 @@ pub fn argb8_to_rgba8(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
 /// let argb = convert::rgba8_to_argb8(&rgba).unwrap();
 /// assert_eq!(argb.data, vec![255, 128, 64, 32]);
 /// ```
+#[must_use = "returns a new ARGB8 buffer"]
 pub fn rgba8_to_argb8(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "rgba8_to_argb8: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     let mut argb = vec![0u8; buf.data.len()];
     for (src, dst) in buf.data.chunks_exact(4).zip(argb.chunks_exact_mut(4)) {
@@ -663,9 +711,13 @@ pub fn rgba8_to_argb8(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
 /// assert_eq!(rgba.data[0], 128);
 /// assert_eq!(rgba.data[2], 255);
 /// ```
+#[must_use = "returns a new RGBA8 buffer"]
 pub fn rgbaf32_to_rgba8(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
     if buf.format != PixelFormat::RgbaF32 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "rgbaf32_to_rgba8: expected RgbaF32, got {:?}",
+            buf.format
+        )));
     }
     let n = buf.pixel_count();
     let mut rgba = vec![0u8; n * 4];
@@ -698,9 +750,13 @@ pub fn rgbaf32_to_rgba8(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
 /// let r = f32::from_ne_bytes([f32buf.data[0], f32buf.data[1], f32buf.data[2], f32buf.data[3]]);
 /// assert!((r - 128.0 / 255.0).abs() < 0.01);
 /// ```
+#[must_use = "returns a new RgbaF32 buffer"]
 pub fn rgba8_to_rgbaf32(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "rgba8_to_rgbaf32: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     let n = buf.pixel_count();
     let mut f32data = vec![0u8; n * 16];

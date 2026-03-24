@@ -22,9 +22,13 @@ use crate::pixel::{PixelBuffer, PixelFormat};
 /// let sum: f64 = hist.iter().sum();
 /// assert!((sum - 1.0).abs() < 1e-6);
 /// ```
+#[must_use = "returns the computed histogram"]
 pub fn luminance_histogram(buf: &PixelBuffer, bins: usize) -> Result<Vec<f64>, RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "luminance_histogram: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     if bins == 0 {
         return Err(RangaError::Other("bins must be > 0".into()));
@@ -61,9 +65,13 @@ pub fn luminance_histogram(buf: &PixelBuffer, bins: usize) -> Result<Vec<f64>, R
 /// // All pixels are 128, so bin 128 should be 1.0
 /// assert!((r[128] - 1.0).abs() < 1e-6);
 /// ```
+#[must_use = "returns the computed RGB histograms"]
 pub fn rgb_histograms(buf: &PixelBuffer) -> Result<[Vec<f64>; 3], RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "rgb_histograms: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     let mut r_hist = vec![0u64; 256];
     let mut g_hist = vec![0u64; 256];
@@ -137,7 +145,10 @@ pub fn chi_squared(a: &[f64], b: &[f64]) -> f64 {
 /// ```
 pub fn equalize(buf: &mut PixelBuffer) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "equalize: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     // Build 256-bin luminance histogram.
     let mut hist = [0u64; 256];
@@ -212,7 +223,10 @@ pub fn equalize(buf: &mut PixelBuffer) -> Result<(), RangaError> {
 /// ```
 pub fn auto_levels(buf: &mut PixelBuffer) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "auto_levels: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     if buf.data.is_empty() {
         return Ok(());

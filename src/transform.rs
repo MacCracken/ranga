@@ -188,9 +188,12 @@ fn sample_clamped(data: &[u8], x: isize, y: isize, w: usize, h: usize, c: usize)
     data[(cy * w + cx) * 4 + c] as f64
 }
 
-fn validate_rgba8(buf: &PixelBuffer) -> Result<(), RangaError> {
+fn validate_rgba8(op: &str, buf: &PixelBuffer) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "{op}: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     Ok(())
 }
@@ -211,6 +214,7 @@ fn validate_rgba8(buf: &PixelBuffer) -> Result<(), RangaError> {
 /// assert_eq!(cropped.width, 40);
 /// assert_eq!(cropped.height, 40);
 /// ```
+#[must_use = "returns a new cropped buffer"]
 pub fn crop(
     buf: &PixelBuffer,
     left: u32,
@@ -218,7 +222,7 @@ pub fn crop(
     right: u32,
     bottom: u32,
 ) -> Result<PixelBuffer, RangaError> {
-    validate_rgba8(buf)?;
+    validate_rgba8("crop", buf)?;
     let l = left.min(buf.width) as usize;
     let t = top.min(buf.height) as usize;
     let r = right.min(buf.width).max(l as u32) as usize;
@@ -251,13 +255,14 @@ pub fn crop(
 /// let small = transform::resize(&buf, 50, 50, ScaleFilter::Bilinear).unwrap();
 /// assert_eq!(small.width, 50);
 /// ```
+#[must_use = "returns a new resized buffer"]
 pub fn resize(
     buf: &PixelBuffer,
     new_w: u32,
     new_h: u32,
     filter: ScaleFilter,
 ) -> Result<PixelBuffer, RangaError> {
-    validate_rgba8(buf)?;
+    validate_rgba8("resize", buf)?;
     if new_w == 0 || new_h == 0 {
         return Ok(PixelBuffer::zeroed(0, 0, PixelFormat::Rgba8));
     }
@@ -365,8 +370,9 @@ pub fn resize(
 /// let flipped = transform::flip_horizontal(&buf).unwrap();
 /// assert_eq!(flipped.data[0], 0); // green pixel now first
 /// ```
+#[must_use = "returns a new flipped buffer"]
 pub fn flip_horizontal(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
-    validate_rgba8(buf)?;
+    validate_rgba8("flip_horizontal", buf)?;
     let w = buf.width as usize;
     let h = buf.height as usize;
     let mut out = vec![0u8; buf.data.len()];
@@ -394,8 +400,9 @@ pub fn flip_horizontal(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
 /// let flipped = transform::flip_vertical(&buf).unwrap();
 /// assert_eq!(flipped.data[2 * 4], 255); // now bottom-left
 /// ```
+#[must_use = "returns a new flipped buffer"]
 pub fn flip_vertical(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
-    validate_rgba8(buf)?;
+    validate_rgba8("flip_vertical", buf)?;
     let w = buf.width as usize;
     let h = buf.height as usize;
     let stride = w * 4;
@@ -423,6 +430,7 @@ pub fn flip_vertical(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
 /// let rotated = transform::affine_transform(&buf, &Affine::rotate(0.5), 100, 100, ScaleFilter::Bilinear).unwrap();
 /// assert_eq!(rotated.width, 100);
 /// ```
+#[must_use = "returns a new transformed buffer"]
 pub fn affine_transform(
     buf: &PixelBuffer,
     transform: &Affine,
@@ -430,7 +438,7 @@ pub fn affine_transform(
     out_h: u32,
     filter: ScaleFilter,
 ) -> Result<PixelBuffer, RangaError> {
-    validate_rgba8(buf)?;
+    validate_rgba8("affine_transform", buf)?;
     let inv = transform
         .inverse()
         .ok_or_else(|| RangaError::Other("singular affine transform cannot be inverted".into()))?;
@@ -668,13 +676,14 @@ fn solve_8x8(mut a: [[f64; 8]; 8], mut b: [f64; 8]) -> Option<[f64; 8]> {
 /// let result = transform::perspective_transform(&buf, &p, 100, 100).unwrap();
 /// assert_eq!(result.width, 100);
 /// ```
+#[must_use = "returns a new transformed buffer"]
 pub fn perspective_transform(
     buf: &PixelBuffer,
     transform: &Perspective,
     out_w: u32,
     out_h: u32,
 ) -> Result<PixelBuffer, RangaError> {
-    validate_rgba8(buf)?;
+    validate_rgba8("perspective_transform", buf)?;
     let inv = transform
         .inverse()
         .ok_or_else(|| RangaError::Other("singular perspective transform".into()))?;

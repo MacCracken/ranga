@@ -549,6 +549,355 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+/// Gaussian noise generation shader using PCG hash.
+///
+/// Applies Gaussian-distributed noise to R, G, B channels using a PCG hash
+/// for deterministic pseudo-random generation and Box-Muller transform for
+/// Gaussian distribution. Preserves alpha.
+///
+/// Bindings:
+/// - `@binding(0)`: pixels (`array<u32>`, read-write)
+/// - `@binding(1)`: uniform params (`count: u32`, `seed: u32`, `strength: f32`, `_pad: u32`)
+pub const NOISE_GAUSSIAN: &str = r#"
+@group(0) @binding(0) var<storage, read_write> pixels: array<u32>;
+
+struct Params {
+    count: u32,
+    seed: u32,
+    strength: f32,
+    _pad: u32,
+}
+@group(0) @binding(1) var<uniform> params: Params;
+
+fn pcg(v: u32) -> u32 {
+    var state = v * 747796405u + 2891336453u;
+    let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+fn rand_uniform(seed_val: u32) -> f32 {
+    return f32(pcg(seed_val)) / 4294967295.0;
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if idx >= params.count { return; }
+    let px = unpack_rgba(pixels[idx]);
+
+    // Generate two uniform random values for Box-Muller
+    let u1 = max(rand_uniform(idx * 2u + params.seed), 0.0001);
+    let u2 = rand_uniform(idx * 2u + params.seed + 1u);
+
+    // Box-Muller transform for Gaussian distribution
+    let mag = sqrt(-2.0 * log(u1)) * params.strength;
+    let angle = 6.283185307 * u2;
+    let g1 = mag * cos(angle);
+    let g2 = mag * sin(angle);
+
+    // Apply noise using g1 for R/B and g2 for G
+    let r = clamp(px.r + g1, 0.0, 1.0);
+    let g = clamp(px.g + g2, 0.0, 1.0);
+    let b = clamp(px.b + g1 * 0.7 + g2 * 0.3, 0.0, 1.0);
+
+    pixels[idx] = pack_rgba(vec4<f32>(r, g, b, px.a));
+}
+"#;
+
+/// Cross-dissolve transition between two buffers.
+///
+/// Linearly interpolates between source and destination pixels.
+/// `factor` 0.0 = all source, 1.0 = all destination (original).
+///
+/// Bindings:
+/// - `@binding(0)`: source pixels (`array<u32>`, read-only)
+/// - `@binding(1)`: destination pixels (`array<u32>`, read-write)
+/// - `@binding(2)`: uniform params (`count: u32`, `factor_bits: u32`, `_pad1: u32`, `_pad2: u32`)
+pub const DISSOLVE: &str = r#"
+@group(0) @binding(0) var<storage, read> src: array<u32>;
+@group(0) @binding(1) var<storage, read_write> dst: array<u32>;
+
+struct Params {
+    count: u32,
+    factor: f32,
+    _pad1: u32,
+    _pad2: u32,
+}
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if idx >= params.count { return; }
+
+    let s = unpack_rgba(src[idx]);
+    let d = unpack_rgba(dst[idx]);
+    let f = params.factor;
+
+    dst[idx] = pack_rgba(mix(s, d, vec4<f32>(f, f, f, f)));
+}
+"#;
+
+/// Fade toward black shader.
+///
+/// Multiplies R, G, B channels by the fade factor while preserving alpha.
+/// `factor` 0.0 = black, 1.0 = identity.
+///
+/// Bindings:
+/// - `@binding(0)`: pixels (`array<u32>`, read-write)
+/// - `@binding(1)`: uniform params (`count: u32`, `factor: f32`, `_pad1: u32`, `_pad2: u32`)
+pub const FADE: &str = r#"
+@group(0) @binding(0) var<storage, read_write> pixels: array<u32>;
+
+struct Params {
+    count: u32,
+    factor: f32,
+    _pad1: u32,
+    _pad2: u32,
+}
+@group(0) @binding(1) var<uniform> params: Params;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if idx >= params.count { return; }
+    let px = unpack_rgba(pixels[idx]);
+    let f = params.factor;
+    pixels[idx] = pack_rgba(vec4<f32>(px.r * f, px.g * f, px.b * f, px.a));
+}
+"#;
+
+/// Horizontal wipe transition between two buffers.
+///
+/// Pixels left of the wipe line come from destination, pixels right come from
+/// source. `progress` 0.0 = all source, 1.0 = all destination.
+///
+/// Bindings:
+/// - `@binding(0)`: source pixels (`array<u32>`, read-only)
+/// - `@binding(1)`: destination pixels (`array<u32>`, read-write)
+/// - `@binding(2)`: uniform params (`count: u32`, `width: u32`, `height: u32`, `progress: f32`)
+pub const WIPE: &str = r#"
+@group(0) @binding(0) var<storage, read> src: array<u32>;
+@group(0) @binding(1) var<storage, read_write> dst: array<u32>;
+
+struct Params {
+    count: u32,
+    width: u32,
+    height: u32,
+    progress: f32,
+}
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if idx >= params.count { return; }
+
+    let x = idx % params.width;
+    let wipe_x = u32(f32(params.width) * params.progress);
+
+    if x < wipe_x {
+        // Keep dst as-is (already in dst buffer)
+    } else {
+        dst[idx] = src[idx];
+    }
+}
+"#;
+
+/// Crop shader — copies a rectangular region from input to output.
+///
+/// Each thread copies one output pixel, reading from the corresponding
+/// position in the source (offset by `src_x`, `src_y`).
+///
+/// Bindings:
+/// - `@binding(0)`: input pixels (`array<u32>`, read-only)
+/// - `@binding(1)`: output pixels (`array<u32>`, read-write)
+/// - `@binding(2)`: uniform params
+pub const CROP: &str = r#"
+@group(0) @binding(0) var<storage, read> input: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output: array<u32>;
+
+struct Params {
+    src_width: u32,
+    dst_width: u32,
+    dst_height: u32,
+    src_x: u32,
+    src_y: u32,
+    _pad1: u32,
+    _pad2: u32,
+    _pad3: u32,
+}
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let gx = gid.x;
+    let gy = gid.y;
+    if gx >= params.dst_width || gy >= params.dst_height { return; }
+
+    let src_idx = (params.src_y + gy) * params.src_width + (params.src_x + gx);
+    let dst_idx = gy * params.dst_width + gx;
+    output[dst_idx] = input[src_idx];
+}
+"#;
+
+/// Bilinear interpolation resize shader.
+///
+/// Each thread computes one output pixel using bilinear sampling from input.
+///
+/// Bindings:
+/// - `@binding(0)`: input pixels (`array<u32>`, read-only)
+/// - `@binding(1)`: output pixels (`array<u32>`, read-write)
+/// - `@binding(2)`: uniform params
+pub const RESIZE_BILINEAR: &str = r#"
+@group(0) @binding(0) var<storage, read> input: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output: array<u32>;
+
+struct Params {
+    src_width: u32,
+    src_height: u32,
+    dst_width: u32,
+    dst_height: u32,
+}
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let gx = gid.x;
+    let gy = gid.y;
+    if gx >= params.dst_width || gy >= params.dst_height { return; }
+
+    let sw = f32(params.src_width);
+    let sh = f32(params.src_height);
+    let dw = f32(params.dst_width);
+    let dh = f32(params.dst_height);
+
+    var sx: f32;
+    var sy: f32;
+    if params.dst_width > 1u {
+        sx = f32(gx) * (sw - 1.0) / (dw - 1.0);
+    } else {
+        sx = 0.0;
+    }
+    if params.dst_height > 1u {
+        sy = f32(gy) * (sh - 1.0) / (dh - 1.0);
+    } else {
+        sy = 0.0;
+    }
+
+    let x0 = u32(floor(sx));
+    let y0 = u32(floor(sy));
+    let x1 = min(x0 + 1u, params.src_width - 1u);
+    let y1 = min(y0 + 1u, params.src_height - 1u);
+    let fx = sx - floor(sx);
+    let fy = sy - floor(sy);
+
+    let c00 = unpack_rgba(input[y0 * params.src_width + x0]);
+    let c10 = unpack_rgba(input[y0 * params.src_width + x1]);
+    let c01 = unpack_rgba(input[y1 * params.src_width + x0]);
+    let c11 = unpack_rgba(input[y1 * params.src_width + x1]);
+
+    let top = mix(c00, c10, fx);
+    let bot = mix(c01, c11, fx);
+    let result = mix(top, bot, fy);
+
+    output[gy * params.dst_width + gx] = pack_rgba(result);
+}
+"#;
+
+/// Nearest-neighbor resize shader.
+///
+/// Each thread copies one output pixel from the nearest source pixel.
+///
+/// Bindings:
+/// - `@binding(0)`: input pixels (`array<u32>`, read-only)
+/// - `@binding(1)`: output pixels (`array<u32>`, read-write)
+/// - `@binding(2)`: uniform params
+pub const RESIZE_NEAREST: &str = r#"
+@group(0) @binding(0) var<storage, read> input: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output: array<u32>;
+
+struct Params {
+    src_width: u32,
+    src_height: u32,
+    dst_width: u32,
+    dst_height: u32,
+}
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let gx = gid.x;
+    let gy = gid.y;
+    if gx >= params.dst_width || gy >= params.dst_height { return; }
+
+    let sx = min(gx * params.src_width / params.dst_width, params.src_width - 1u);
+    let sy = min(gy * params.src_height / params.dst_height, params.src_height - 1u);
+
+    output[gy * params.dst_width + gx] = input[sy * params.src_width + sx];
+}
+"#;
+
+/// Horizontal flip shader — mirrors pixels left-to-right.
+///
+/// Bindings:
+/// - `@binding(0)`: input pixels (`array<u32>`, read-only)
+/// - `@binding(1)`: output pixels (`array<u32>`, read-write)
+/// - `@binding(2)`: uniform params
+pub const FLIP_HORIZONTAL: &str = r#"
+@group(0) @binding(0) var<storage, read> input: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output: array<u32>;
+
+struct Params {
+    width: u32,
+    height: u32,
+    _pad1: u32,
+    _pad2: u32,
+}
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = gid.x;
+    let y = gid.y;
+    if x >= params.width || y >= params.height { return; }
+
+    let src_idx = y * params.width + x;
+    let dst_idx = y * params.width + (params.width - 1u - x);
+    output[dst_idx] = input[src_idx];
+}
+"#;
+
+/// Vertical flip shader — mirrors pixels top-to-bottom.
+///
+/// Bindings:
+/// - `@binding(0)`: input pixels (`array<u32>`, read-only)
+/// - `@binding(1)`: output pixels (`array<u32>`, read-write)
+/// - `@binding(2)`: uniform params
+pub const FLIP_VERTICAL: &str = r#"
+@group(0) @binding(0) var<storage, read> input: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output: array<u32>;
+
+struct Params {
+    width: u32,
+    height: u32,
+    _pad1: u32,
+    _pad2: u32,
+}
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = gid.x;
+    let y = gid.y;
+    if x >= params.width || y >= params.height { return; }
+
+    let src_idx = y * params.width + x;
+    let dst_idx = (params.height - 1u - y) * params.width + x;
+    output[dst_idx] = input[src_idx];
+}
+"#;
+
 /// Build a complete shader by prepending the pack/unpack helpers.
 ///
 /// All shaders require the `unpack_rgba` and `pack_rgba` functions. This
@@ -629,5 +978,65 @@ mod tests {
         assert!(COLOR_BALANCE.contains("mid_w"));
         assert!(COLOR_BALANCE.contains("high_w"));
         assert!(COLOR_BALANCE.contains("shadow_r"));
+    }
+
+    #[test]
+    fn noise_shader_has_pcg() {
+        assert!(NOISE_GAUSSIAN.contains("pcg"));
+        assert!(NOISE_GAUSSIAN.contains("Box-Muller"));
+        assert!(NOISE_GAUSSIAN.contains("params.strength"));
+    }
+
+    #[test]
+    fn dissolve_shader_has_mix() {
+        assert!(DISSOLVE.contains("mix"));
+        assert!(DISSOLVE.contains("params.factor"));
+    }
+
+    #[test]
+    fn fade_shader_preserves_alpha() {
+        assert!(FADE.contains("px.a"));
+        assert!(FADE.contains("params.factor"));
+    }
+
+    #[test]
+    fn wipe_shader_has_width() {
+        assert!(WIPE.contains("width"));
+        assert!(WIPE.contains("params.progress"));
+    }
+
+    #[test]
+    fn crop_shader_has_src_offset() {
+        assert!(CROP.contains("src_x"));
+        assert!(CROP.contains("src_y"));
+        assert!(CROP.contains("src_width"));
+        assert!(CROP.contains("@workgroup_size(16, 16)"));
+    }
+
+    #[test]
+    fn resize_bilinear_shader_has_mix() {
+        assert!(RESIZE_BILINEAR.contains("mix"));
+        assert!(RESIZE_BILINEAR.contains("unpack_rgba"));
+        assert!(RESIZE_BILINEAR.contains("src_width"));
+        assert!(RESIZE_BILINEAR.contains("dst_width"));
+    }
+
+    #[test]
+    fn resize_nearest_shader_has_sampling() {
+        assert!(RESIZE_NEAREST.contains("src_width"));
+        assert!(RESIZE_NEAREST.contains("dst_width"));
+        assert!(RESIZE_NEAREST.contains("@workgroup_size(16, 16)"));
+    }
+
+    #[test]
+    fn flip_horizontal_shader_mirrors() {
+        assert!(FLIP_HORIZONTAL.contains("width - 1u - x"));
+        assert!(FLIP_HORIZONTAL.contains("@workgroup_size(16, 16)"));
+    }
+
+    #[test]
+    fn flip_vertical_shader_mirrors() {
+        assert!(FLIP_VERTICAL.contains("height - 1u - y"));
+        assert!(FLIP_VERTICAL.contains("@workgroup_size(16, 16)"));
     }
 }

@@ -10,6 +10,7 @@ use super::shaders;
 use crate::RangaError;
 use crate::blend::BlendMode;
 use crate::pixel::{PixelBuffer, PixelFormat};
+use crate::transform::ScaleFilter;
 
 /// GPU-accelerated blend of `src` over `dst` using the specified blend mode.
 ///
@@ -41,7 +42,14 @@ pub fn gpu_blend(
     opacity: f32,
 ) -> Result<(), RangaError> {
     if src.format != PixelFormat::Rgba8 || dst.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat("GPU blend requires RGBA8".into()));
+        return Err(RangaError::InvalidFormat(format!(
+            "gpu_blend: expected Rgba8, got {:?}",
+            if src.format != PixelFormat::Rgba8 {
+                src.format
+            } else {
+                dst.format
+            }
+        )));
     }
     if src.width != dst.width || src.height != dst.height {
         return Err(RangaError::DimensionMismatch {
@@ -50,9 +58,8 @@ pub fn gpu_blend(
         });
     }
 
-    let pixel_count = u32::try_from(src.pixel_count()).map_err(|_| {
-        RangaError::Other("image too large for GPU pipeline (exceeds u32 pixel count)".into())
-    })?;
+    let pixel_count = u32::try_from(src.pixel_count())
+        .map_err(|_| RangaError::Other("gpu_blend: pixel count exceeds u32::MAX".into()))?;
     let mode_id: u32 = match mode {
         BlendMode::Normal => 0,
         BlendMode::Multiply => 1,
@@ -115,11 +122,13 @@ pub fn gpu_blend(
 /// ```
 pub fn gpu_invert(ctx: &GpuContext, buf: &mut PixelBuffer) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat("GPU requires RGBA8".into()));
+        return Err(RangaError::InvalidFormat(format!(
+            "gpu_invert: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
-    let pixel_count = u32::try_from(buf.pixel_count()).map_err(|_| {
-        RangaError::Other("image too large for GPU pipeline (exceeds u32 pixel count)".into())
-    })?;
+    let pixel_count = u32::try_from(buf.pixel_count())
+        .map_err(|_| RangaError::Other("gpu_invert: pixel count exceeds u32::MAX".into()))?;
     let gpu_buf = GpuBuffer::upload(ctx, buf);
     let params = [pixel_count];
     // SAFETY: params is a contiguous array of u32, reinterpreted as bytes.
@@ -161,11 +170,13 @@ pub fn gpu_invert(ctx: &GpuContext, buf: &mut PixelBuffer) -> Result<(), RangaEr
 /// ```
 pub fn gpu_grayscale(ctx: &GpuContext, buf: &mut PixelBuffer) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat("GPU requires RGBA8".into()));
+        return Err(RangaError::InvalidFormat(format!(
+            "gpu_grayscale: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
-    let pixel_count = u32::try_from(buf.pixel_count()).map_err(|_| {
-        RangaError::Other("image too large for GPU pipeline (exceeds u32 pixel count)".into())
-    })?;
+    let pixel_count = u32::try_from(buf.pixel_count())
+        .map_err(|_| RangaError::Other("gpu_grayscale: pixel count exceeds u32::MAX".into()))?;
     let gpu_buf = GpuBuffer::upload(ctx, buf);
     let params = [pixel_count];
     // SAFETY: params is a contiguous array of u32, reinterpreted as bytes.
@@ -212,10 +223,13 @@ pub fn gpu_brightness_contrast(
     contrast: f32,
 ) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat("GPU requires RGBA8".into()));
+        return Err(RangaError::InvalidFormat(format!(
+            "gpu_brightness_contrast: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     let pixel_count = u32::try_from(buf.pixel_count()).map_err(|_| {
-        RangaError::Other("image too large for GPU pipeline (exceeds u32 pixel count)".into())
+        RangaError::Other("gpu_brightness_contrast: pixel count exceeds u32::MAX".into())
     })?;
     let gpu_buf = GpuBuffer::upload(ctx, buf);
     let params = [pixel_count, brightness.to_bits(), contrast.to_bits(), 0u32];
@@ -262,11 +276,13 @@ pub fn gpu_saturation(
     factor: f32,
 ) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat("GPU requires RGBA8".into()));
+        return Err(RangaError::InvalidFormat(format!(
+            "gpu_saturation: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
-    let pixel_count = u32::try_from(buf.pixel_count()).map_err(|_| {
-        RangaError::Other("image too large for GPU pipeline (exceeds u32 pixel count)".into())
-    })?;
+    let pixel_count = u32::try_from(buf.pixel_count())
+        .map_err(|_| RangaError::Other("gpu_saturation: pixel count exceeds u32::MAX".into()))?;
     let gpu_buf = GpuBuffer::upload(ctx, buf);
     let params = [pixel_count, factor.to_bits(), 0u32, 0u32];
     // SAFETY: params is a contiguous array of u32, reinterpreted as bytes.
@@ -284,6 +300,242 @@ pub fn gpu_saturation(
     );
     let result = gpu_buf.download(ctx)?;
     buf.data = result.data;
+    Ok(())
+}
+
+/// GPU-accelerated Gaussian noise generation.
+///
+/// Applies Gaussian-distributed noise to R, G, B channels using a PCG hash
+/// for deterministic pseudo-random generation. Alpha is preserved.
+/// The buffer is modified in-place.
+///
+/// # Errors
+///
+/// Returns an error if the buffer is not RGBA8 or a GPU operation fails.
+///
+/// # Examples
+///
+/// ```no_run
+/// use ranga::gpu::{GpuContext, gpu_noise_gaussian};
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+///
+/// let ctx = GpuContext::new().unwrap();
+/// let mut buf = PixelBuffer::new(vec![128; 64 * 64 * 4], 64, 64, PixelFormat::Rgba8).unwrap();
+/// gpu_noise_gaussian(&ctx, &mut buf, 0.1, 42).unwrap();
+/// ```
+pub fn gpu_noise_gaussian(
+    ctx: &GpuContext,
+    buf: &mut PixelBuffer,
+    strength: f32,
+    seed: u32,
+) -> Result<(), RangaError> {
+    if buf.format != PixelFormat::Rgba8 {
+        return Err(RangaError::InvalidFormat(format!(
+            "gpu_noise_gaussian: expected Rgba8, got {:?}",
+            buf.format
+        )));
+    }
+    let pixel_count = u32::try_from(buf.pixel_count()).map_err(|_| {
+        RangaError::Other("gpu_noise_gaussian: pixel count exceeds u32::MAX".into())
+    })?;
+    let gpu_buf = GpuBuffer::upload(ctx, buf);
+    let params = [pixel_count, seed, strength.to_bits(), 0u32];
+    let params_bytes = params_to_bytes(&params);
+    dispatch_1buf_shader(
+        ctx,
+        "noise_gaussian",
+        &shaders::build_shader(shaders::NOISE_GAUSSIAN),
+        gpu_buf.wgpu_buffer(),
+        params_bytes,
+        pixel_count.div_ceil(256),
+    );
+    let result = gpu_buf.download(ctx)?;
+    buf.data = result.data;
+    Ok(())
+}
+
+/// GPU-accelerated cross-dissolve transition.
+///
+/// Linearly interpolates between `src` and `dst` pixels. A `factor` of 0.0
+/// produces all source; 1.0 preserves the original destination. Both buffers
+/// must be RGBA8 with identical dimensions. The `dst` buffer is modified
+/// in-place with the interpolated result.
+///
+/// # Errors
+///
+/// Returns an error if buffers are not RGBA8, dimensions do not match, or
+/// a GPU operation fails.
+///
+/// # Examples
+///
+/// ```no_run
+/// use ranga::gpu::{GpuContext, gpu_dissolve};
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+///
+/// let ctx = GpuContext::new().unwrap();
+/// let src = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
+/// let mut dst = PixelBuffer::new(vec![255; 64 * 64 * 4], 64, 64, PixelFormat::Rgba8).unwrap();
+/// gpu_dissolve(&ctx, &src, &mut dst, 0.5).unwrap();
+/// ```
+pub fn gpu_dissolve(
+    ctx: &GpuContext,
+    src: &PixelBuffer,
+    dst: &mut PixelBuffer,
+    factor: f32,
+) -> Result<(), RangaError> {
+    if src.format != PixelFormat::Rgba8 || dst.format != PixelFormat::Rgba8 {
+        return Err(RangaError::InvalidFormat(format!(
+            "gpu_dissolve: expected Rgba8, got {:?}",
+            if src.format != PixelFormat::Rgba8 {
+                src.format
+            } else {
+                dst.format
+            }
+        )));
+    }
+    if src.width != dst.width || src.height != dst.height {
+        return Err(RangaError::DimensionMismatch {
+            expected: src.pixel_count(),
+            actual: dst.pixel_count(),
+        });
+    }
+
+    let pixel_count = u32::try_from(src.pixel_count())
+        .map_err(|_| RangaError::Other("gpu_dissolve: pixel count exceeds u32::MAX".into()))?;
+
+    let src_gpu = GpuBuffer::upload(ctx, src);
+    let dst_gpu = GpuBuffer::upload(ctx, dst);
+
+    let params = [pixel_count, factor.to_bits(), 0u32, 0u32];
+    let params_bytes = params_to_bytes(&params);
+
+    dispatch_3buf_shader(
+        ctx,
+        "dissolve",
+        &shaders::build_shader(shaders::DISSOLVE),
+        src_gpu.wgpu_buffer(),
+        dst_gpu.wgpu_buffer(),
+        params_bytes,
+        pixel_count.div_ceil(256),
+    );
+
+    let result = dst_gpu.download(ctx)?;
+    dst.data = result.data;
+    Ok(())
+}
+
+/// GPU-accelerated fade toward black.
+///
+/// Multiplies R, G, B channels by `factor` while preserving alpha.
+/// A `factor` of 0.0 produces black; 1.0 is identity. The buffer is modified
+/// in-place.
+///
+/// # Errors
+///
+/// Returns an error if the buffer is not RGBA8 or a GPU operation fails.
+///
+/// # Examples
+///
+/// ```no_run
+/// use ranga::gpu::{GpuContext, gpu_fade};
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+///
+/// let ctx = GpuContext::new().unwrap();
+/// let mut buf = PixelBuffer::new(vec![200; 64 * 64 * 4], 64, 64, PixelFormat::Rgba8).unwrap();
+/// gpu_fade(&ctx, &mut buf, 0.5).unwrap();
+/// ```
+pub fn gpu_fade(ctx: &GpuContext, buf: &mut PixelBuffer, factor: f32) -> Result<(), RangaError> {
+    if buf.format != PixelFormat::Rgba8 {
+        return Err(RangaError::InvalidFormat(format!(
+            "gpu_fade: expected Rgba8, got {:?}",
+            buf.format
+        )));
+    }
+    let pixel_count = u32::try_from(buf.pixel_count())
+        .map_err(|_| RangaError::Other("gpu_fade: pixel count exceeds u32::MAX".into()))?;
+    let gpu_buf = GpuBuffer::upload(ctx, buf);
+    let params = [pixel_count, factor.to_bits(), 0u32, 0u32];
+    let params_bytes = params_to_bytes(&params);
+    dispatch_1buf_shader(
+        ctx,
+        "fade",
+        &shaders::build_shader(shaders::FADE),
+        gpu_buf.wgpu_buffer(),
+        params_bytes,
+        pixel_count.div_ceil(256),
+    );
+    let result = gpu_buf.download(ctx)?;
+    buf.data = result.data;
+    Ok(())
+}
+
+/// GPU-accelerated horizontal wipe transition.
+///
+/// Pixels left of `progress * width` come from `dst` (preserved), pixels right
+/// come from `src`. A `progress` of 0.0 produces all source; 1.0 preserves all
+/// destination. Both buffers must be RGBA8 with identical dimensions. The `dst`
+/// buffer is modified in-place.
+///
+/// # Errors
+///
+/// Returns an error if buffers are not RGBA8, dimensions do not match, or
+/// a GPU operation fails.
+///
+/// # Examples
+///
+/// ```no_run
+/// use ranga::gpu::{GpuContext, gpu_wipe};
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+///
+/// let ctx = GpuContext::new().unwrap();
+/// let src = PixelBuffer::new(vec![255; 64 * 64 * 4], 64, 64, PixelFormat::Rgba8).unwrap();
+/// let mut dst = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
+/// gpu_wipe(&ctx, &src, &mut dst, 0.5).unwrap();
+/// ```
+pub fn gpu_wipe(
+    ctx: &GpuContext,
+    src: &PixelBuffer,
+    dst: &mut PixelBuffer,
+    progress: f32,
+) -> Result<(), RangaError> {
+    if src.format != PixelFormat::Rgba8 || dst.format != PixelFormat::Rgba8 {
+        return Err(RangaError::InvalidFormat(format!(
+            "gpu_wipe: expected Rgba8, got {:?}",
+            if src.format != PixelFormat::Rgba8 {
+                src.format
+            } else {
+                dst.format
+            }
+        )));
+    }
+    if src.width != dst.width || src.height != dst.height {
+        return Err(RangaError::DimensionMismatch {
+            expected: src.pixel_count(),
+            actual: dst.pixel_count(),
+        });
+    }
+
+    let pixel_count = u32::try_from(src.pixel_count())
+        .map_err(|_| RangaError::Other("gpu_wipe: pixel count exceeds u32::MAX".into()))?;
+
+    let src_gpu = GpuBuffer::upload(ctx, src);
+    let dst_gpu = GpuBuffer::upload(ctx, dst);
+
+    let params = [pixel_count, src.width, src.height, progress.to_bits()];
+    let params_bytes = params_to_bytes(&params);
+
+    dispatch_3buf_shader(
+        ctx,
+        "wipe",
+        &shaders::build_shader(shaders::WIPE),
+        src_gpu.wgpu_buffer(),
+        dst_gpu.wgpu_buffer(),
+        params_bytes,
+        pixel_count.div_ceil(256),
+    );
+
+    let result = dst_gpu.download(ctx)?;
+    dst.data = result.data;
     Ok(())
 }
 
@@ -347,13 +599,16 @@ impl<'a> GpuChain<'a> {
     /// let buf = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
     /// let chain = GpuChain::new(&ctx, &buf).unwrap();
     /// ```
+    #[must_use = "returns a new GPU processing chain"]
     pub fn new(ctx: &'a GpuContext, buf: &PixelBuffer) -> Result<Self, RangaError> {
         if buf.format != PixelFormat::Rgba8 {
-            return Err(RangaError::InvalidFormat("GpuChain requires RGBA8".into()));
+            return Err(RangaError::InvalidFormat(format!(
+                "GpuChain::new: expected Rgba8, got {:?}",
+                buf.format
+            )));
         }
-        let pixel_count = u32::try_from(buf.pixel_count()).map_err(|_| {
-            RangaError::Other("image too large for GPU pipeline (exceeds u32 pixel count)".into())
-        })?;
+        let pixel_count = u32::try_from(buf.pixel_count())
+            .map_err(|_| RangaError::Other("GpuChain::new: pixel count exceeds u32::MAX".into()))?;
 
         let buf_a = GpuBuffer::upload(ctx, buf);
         let zeroed = PixelBuffer::zeroed(buf.width, buf.height, PixelFormat::Rgba8);
@@ -532,6 +787,190 @@ impl<'a> GpuChain<'a> {
         Ok(self)
     }
 
+    /// Apply Gaussian noise (in-place on current buffer).
+    ///
+    /// Adds Gaussian-distributed noise to R, G, B channels while preserving alpha.
+    /// Uses PCG hash for deterministic pseudo-random generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the GPU dispatch fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ranga::gpu::{GpuContext, GpuChain};
+    /// use ranga::pixel::{PixelBuffer, PixelFormat};
+    ///
+    /// let ctx = GpuContext::new().unwrap();
+    /// let buf = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
+    /// let result = GpuChain::new(&ctx, &buf).unwrap()
+    ///     .noise_gaussian(0.1, 42).unwrap()
+    ///     .finish().unwrap();
+    /// ```
+    pub fn noise_gaussian(self, strength: f32, seed: u32) -> Result<Self, RangaError> {
+        let params = [self.pixel_count, seed, strength.to_bits(), 0u32];
+        let params_bytes = params_to_bytes(&params);
+        dispatch_1buf_shader(
+            self.ctx,
+            "noise_gaussian",
+            &shaders::build_shader(shaders::NOISE_GAUSSIAN),
+            self.current_buf().wgpu_buffer(),
+            params_bytes,
+            self.pixel_count.div_ceil(256),
+        );
+        Ok(self)
+    }
+
+    /// Apply cross-dissolve with another buffer.
+    ///
+    /// Linearly interpolates between the `other` buffer (source) and the current
+    /// buffer (destination). `factor` 0.0 = all other, 1.0 = all current.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `other` is not RGBA8, dimensions do not match,
+    /// or a GPU operation fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ranga::gpu::{GpuContext, GpuChain};
+    /// use ranga::pixel::{PixelBuffer, PixelFormat};
+    ///
+    /// let ctx = GpuContext::new().unwrap();
+    /// let buf = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
+    /// let other = PixelBuffer::new(vec![255; 64 * 64 * 4], 64, 64, PixelFormat::Rgba8).unwrap();
+    /// let result = GpuChain::new(&ctx, &buf).unwrap()
+    ///     .dissolve(&other, 0.5).unwrap()
+    ///     .finish().unwrap();
+    /// ```
+    pub fn dissolve(self, other: &PixelBuffer, factor: f32) -> Result<Self, RangaError> {
+        if other.format != PixelFormat::Rgba8 {
+            return Err(RangaError::InvalidFormat(format!(
+                "GpuChain::dissolve: expected Rgba8, got {:?}",
+                other.format
+            )));
+        }
+        if other.width != self.width || other.height != self.height {
+            return Err(RangaError::DimensionMismatch {
+                expected: (self.width as usize) * (self.height as usize),
+                actual: other.pixel_count(),
+            });
+        }
+
+        let src_gpu = GpuBuffer::upload(self.ctx, other);
+        let params = [self.pixel_count, factor.to_bits(), 0u32, 0u32];
+        let params_bytes = params_to_bytes(&params);
+
+        dispatch_3buf_shader(
+            self.ctx,
+            "dissolve",
+            &shaders::build_shader(shaders::DISSOLVE),
+            src_gpu.wgpu_buffer(),
+            self.current_buf().wgpu_buffer(),
+            params_bytes,
+            self.pixel_count.div_ceil(256),
+        );
+
+        Ok(self)
+    }
+
+    /// Apply fade toward black (in-place on current buffer).
+    ///
+    /// Multiplies R, G, B by `factor` while preserving alpha.
+    /// `factor` 0.0 = black, 1.0 = identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the GPU dispatch fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ranga::gpu::{GpuContext, GpuChain};
+    /// use ranga::pixel::{PixelBuffer, PixelFormat};
+    ///
+    /// let ctx = GpuContext::new().unwrap();
+    /// let buf = PixelBuffer::new(vec![200; 64 * 64 * 4], 64, 64, PixelFormat::Rgba8).unwrap();
+    /// let result = GpuChain::new(&ctx, &buf).unwrap()
+    ///     .fade(0.5).unwrap()
+    ///     .finish().unwrap();
+    /// ```
+    pub fn fade(self, factor: f32) -> Result<Self, RangaError> {
+        let params = [self.pixel_count, factor.to_bits(), 0u32, 0u32];
+        let params_bytes = params_to_bytes(&params);
+        dispatch_1buf_shader(
+            self.ctx,
+            "fade",
+            &shaders::build_shader(shaders::FADE),
+            self.current_buf().wgpu_buffer(),
+            params_bytes,
+            self.pixel_count.div_ceil(256),
+        );
+        Ok(self)
+    }
+
+    /// Apply horizontal wipe transition with another buffer.
+    ///
+    /// Pixels left of `progress * width` come from the current buffer,
+    /// pixels right come from `other`. `progress` 0.0 = all other,
+    /// 1.0 = all current.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `other` is not RGBA8, dimensions do not match,
+    /// or a GPU operation fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ranga::gpu::{GpuContext, GpuChain};
+    /// use ranga::pixel::{PixelBuffer, PixelFormat};
+    ///
+    /// let ctx = GpuContext::new().unwrap();
+    /// let buf = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
+    /// let other = PixelBuffer::new(vec![255; 64 * 64 * 4], 64, 64, PixelFormat::Rgba8).unwrap();
+    /// let result = GpuChain::new(&ctx, &buf).unwrap()
+    ///     .wipe(&other, 0.5).unwrap()
+    ///     .finish().unwrap();
+    /// ```
+    pub fn wipe(self, other: &PixelBuffer, progress: f32) -> Result<Self, RangaError> {
+        if other.format != PixelFormat::Rgba8 {
+            return Err(RangaError::InvalidFormat(format!(
+                "GpuChain::wipe: expected Rgba8, got {:?}",
+                other.format
+            )));
+        }
+        if other.width != self.width || other.height != self.height {
+            return Err(RangaError::DimensionMismatch {
+                expected: (self.width as usize) * (self.height as usize),
+                actual: other.pixel_count(),
+            });
+        }
+
+        let src_gpu = GpuBuffer::upload(self.ctx, other);
+        let params = [
+            self.pixel_count,
+            self.width,
+            self.height,
+            progress.to_bits(),
+        ];
+        let params_bytes = params_to_bytes(&params);
+
+        dispatch_3buf_shader(
+            self.ctx,
+            "wipe",
+            &shaders::build_shader(shaders::WIPE),
+            src_gpu.wgpu_buffer(),
+            self.current_buf().wgpu_buffer(),
+            params_bytes,
+            self.pixel_count.div_ceil(256),
+        );
+
+        Ok(self)
+    }
+
     /// Apply Gaussian blur using a separable two-pass approach.
     ///
     /// Uses ping-pong buffers: horizontal pass writes current -> other,
@@ -652,9 +1091,10 @@ impl<'a> GpuChain<'a> {
         opacity: f32,
     ) -> Result<Self, RangaError> {
         if other.format != PixelFormat::Rgba8 {
-            return Err(RangaError::InvalidFormat(
-                "GpuChain blend requires RGBA8".into(),
-            ));
+            return Err(RangaError::InvalidFormat(format!(
+                "GpuChain::blend: expected Rgba8, got {:?}",
+                other.format
+            )));
         }
         if other.width != self.width || other.height != self.height {
             return Err(RangaError::DimensionMismatch {
@@ -720,6 +1160,7 @@ impl<'a> GpuChain<'a> {
     ///     .finish().unwrap();
     /// assert_eq!(result.width, 64);
     /// ```
+    #[must_use = "returns the final processed buffer"]
     pub fn finish(self) -> Result<PixelBuffer, RangaError> {
         self.current_buf().download(self.ctx).map_err(Into::into)
     }
@@ -906,13 +1347,17 @@ fn dispatch_3buf_shader(
 /// let blurred = gpu_gaussian_blur(&ctx, &buf, 3).unwrap();
 /// assert_eq!(blurred.width, 64);
 /// ```
+#[must_use = "returns a new blurred buffer"]
 pub fn gpu_gaussian_blur(
     ctx: &GpuContext,
     buf: &PixelBuffer,
     radius: u32,
 ) -> Result<PixelBuffer, RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat("GPU blur requires RGBA8".into()));
+        return Err(RangaError::InvalidFormat(format!(
+            "gpu_gaussian_blur: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     if radius == 0 {
         return Ok(buf.clone());
@@ -1011,6 +1456,406 @@ fn build_gaussian_kernel(radius: u32) -> Vec<f32> {
         *v /= sum;
     }
     kernel
+}
+
+// ── GPU transform operations ───────────────────────────────────────────────
+
+/// GPU-accelerated crop of a rectangular region.
+///
+/// Returns a new [`PixelBuffer`] with dimensions `(right - left) x (bottom - top)`.
+/// Coordinates are clamped to image bounds.
+///
+/// # Errors
+///
+/// Returns an error if the buffer is not RGBA8, the crop region is empty,
+/// or a GPU operation fails.
+///
+/// # Examples
+///
+/// ```no_run
+/// use ranga::gpu::{GpuContext, gpu_crop};
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+///
+/// let ctx = GpuContext::new().unwrap();
+/// let buf = PixelBuffer::zeroed(100, 100, PixelFormat::Rgba8);
+/// let cropped = gpu_crop(&ctx, &buf, 10, 20, 50, 60).unwrap();
+/// assert_eq!(cropped.width, 40);
+/// assert_eq!(cropped.height, 40);
+/// ```
+#[must_use = "returns a new cropped buffer"]
+pub fn gpu_crop(
+    ctx: &GpuContext,
+    buf: &PixelBuffer,
+    left: u32,
+    top: u32,
+    right: u32,
+    bottom: u32,
+) -> Result<PixelBuffer, RangaError> {
+    if buf.format != PixelFormat::Rgba8 {
+        return Err(RangaError::InvalidFormat(format!(
+            "gpu_crop: expected Rgba8, got {:?}",
+            buf.format
+        )));
+    }
+
+    let l = left.min(buf.width);
+    let t = top.min(buf.height);
+    let r = right.min(buf.width).max(l);
+    let b = bottom.min(buf.height).max(t);
+    let dst_w = r - l;
+    let dst_h = b - t;
+
+    if dst_w == 0 || dst_h == 0 {
+        return Ok(PixelBuffer::zeroed(0, 0, PixelFormat::Rgba8));
+    }
+
+    let input_gpu = GpuBuffer::upload(ctx, buf);
+    let output_pb = PixelBuffer::zeroed(dst_w, dst_h, PixelFormat::Rgba8);
+    let output_gpu = GpuBuffer::upload(ctx, &output_pb);
+
+    // Params: src_width, dst_width, dst_height, src_x, src_y, _pad1, _pad2, _pad3
+    let params = [buf.width, dst_w, dst_h, l, t, 0u32, 0u32, 0u32];
+    let params_bytes = params_to_bytes(&params);
+
+    let workgroups_x = dst_w.div_ceil(16);
+    let workgroups_y = dst_h.div_ceil(16);
+
+    dispatch_2d_3buf_shader(
+        ctx,
+        "crop",
+        &shaders::build_shader(shaders::CROP),
+        input_gpu.wgpu_buffer(),
+        output_gpu.wgpu_buffer(),
+        params_bytes,
+        workgroups_x,
+        workgroups_y,
+    );
+
+    output_gpu.download(ctx).map_err(Into::into)
+}
+
+/// GPU-accelerated resize with configurable interpolation filter.
+///
+/// Resizes the input buffer to `new_w x new_h`. Uses nearest-neighbor for
+/// [`ScaleFilter::Nearest`] and bilinear interpolation for
+/// [`ScaleFilter::Bilinear`] and [`ScaleFilter::Bicubic`] (GPU approximation).
+///
+/// # Errors
+///
+/// Returns an error if the buffer is not RGBA8, dimensions are zero, or a GPU
+/// operation fails.
+///
+/// # Examples
+///
+/// ```no_run
+/// use ranga::gpu::{GpuContext, gpu_resize};
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+/// use ranga::transform::ScaleFilter;
+///
+/// let ctx = GpuContext::new().unwrap();
+/// let buf = PixelBuffer::zeroed(100, 100, PixelFormat::Rgba8);
+/// let resized = gpu_resize(&ctx, &buf, 200, 200, ScaleFilter::Bilinear).unwrap();
+/// assert_eq!(resized.width, 200);
+/// assert_eq!(resized.height, 200);
+/// ```
+#[must_use = "returns a new resized buffer"]
+pub fn gpu_resize(
+    ctx: &GpuContext,
+    buf: &PixelBuffer,
+    new_w: u32,
+    new_h: u32,
+    filter: ScaleFilter,
+) -> Result<PixelBuffer, RangaError> {
+    if buf.format != PixelFormat::Rgba8 {
+        return Err(RangaError::InvalidFormat(format!(
+            "gpu_resize: expected Rgba8, got {:?}",
+            buf.format
+        )));
+    }
+    if new_w == 0 || new_h == 0 {
+        return Ok(PixelBuffer::zeroed(0, 0, PixelFormat::Rgba8));
+    }
+
+    let input_gpu = GpuBuffer::upload(ctx, buf);
+    let output_pb = PixelBuffer::zeroed(new_w, new_h, PixelFormat::Rgba8);
+    let output_gpu = GpuBuffer::upload(ctx, &output_pb);
+
+    // Params: src_width, src_height, dst_width, dst_height
+    let params = [buf.width, buf.height, new_w, new_h];
+    let params_bytes = params_to_bytes(&params);
+
+    let (shader_name, shader_src) = match filter {
+        ScaleFilter::Nearest => (
+            "resize_nearest",
+            shaders::build_shader(shaders::RESIZE_NEAREST),
+        ),
+        ScaleFilter::Bilinear | ScaleFilter::Bicubic => (
+            "resize_bilinear",
+            shaders::build_shader(shaders::RESIZE_BILINEAR),
+        ),
+    };
+
+    let workgroups_x = new_w.div_ceil(16);
+    let workgroups_y = new_h.div_ceil(16);
+
+    dispatch_2d_3buf_shader(
+        ctx,
+        shader_name,
+        &shader_src,
+        input_gpu.wgpu_buffer(),
+        output_gpu.wgpu_buffer(),
+        params_bytes,
+        workgroups_x,
+        workgroups_y,
+    );
+
+    output_gpu.download(ctx).map_err(Into::into)
+}
+
+/// GPU-accelerated horizontal flip (mirror left-to-right).
+///
+/// Returns a new [`PixelBuffer`] with pixels mirrored horizontally.
+///
+/// # Errors
+///
+/// Returns an error if the buffer is not RGBA8 or a GPU operation fails.
+///
+/// # Examples
+///
+/// ```no_run
+/// use ranga::gpu::{GpuContext, gpu_flip_horizontal};
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+///
+/// let ctx = GpuContext::new().unwrap();
+/// let buf = PixelBuffer::new(
+///     vec![255, 0, 0, 255, 0, 255, 0, 255], 2, 1, PixelFormat::Rgba8,
+/// ).unwrap();
+/// let flipped = gpu_flip_horizontal(&ctx, &buf).unwrap();
+/// assert_eq!(flipped.data[0], 0); // green pixel now first
+/// ```
+#[must_use = "returns a new flipped buffer"]
+pub fn gpu_flip_horizontal(ctx: &GpuContext, buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
+    if buf.format != PixelFormat::Rgba8 {
+        return Err(RangaError::InvalidFormat(format!(
+            "gpu_flip_horizontal: expected Rgba8, got {:?}",
+            buf.format
+        )));
+    }
+
+    let input_gpu = GpuBuffer::upload(ctx, buf);
+    let output_pb = PixelBuffer::zeroed(buf.width, buf.height, PixelFormat::Rgba8);
+    let output_gpu = GpuBuffer::upload(ctx, &output_pb);
+
+    let params = [buf.width, buf.height, 0u32, 0u32];
+    let params_bytes = params_to_bytes(&params);
+
+    let workgroups_x = buf.width.div_ceil(16);
+    let workgroups_y = buf.height.div_ceil(16);
+
+    dispatch_2d_3buf_shader(
+        ctx,
+        "flip_horizontal",
+        &shaders::build_shader(shaders::FLIP_HORIZONTAL),
+        input_gpu.wgpu_buffer(),
+        output_gpu.wgpu_buffer(),
+        params_bytes,
+        workgroups_x,
+        workgroups_y,
+    );
+
+    output_gpu.download(ctx).map_err(Into::into)
+}
+
+/// GPU-accelerated vertical flip (mirror top-to-bottom).
+///
+/// Returns a new [`PixelBuffer`] with pixels mirrored vertically.
+///
+/// # Errors
+///
+/// Returns an error if the buffer is not RGBA8 or a GPU operation fails.
+///
+/// # Examples
+///
+/// ```no_run
+/// use ranga::gpu::{GpuContext, gpu_flip_vertical};
+/// use ranga::pixel::{PixelBuffer, PixelFormat};
+///
+/// let ctx = GpuContext::new().unwrap();
+/// let buf = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
+/// let flipped = gpu_flip_vertical(&ctx, &buf).unwrap();
+/// assert_eq!(flipped.width, 64);
+/// ```
+#[must_use = "returns a new flipped buffer"]
+pub fn gpu_flip_vertical(ctx: &GpuContext, buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
+    if buf.format != PixelFormat::Rgba8 {
+        return Err(RangaError::InvalidFormat(format!(
+            "gpu_flip_vertical: expected Rgba8, got {:?}",
+            buf.format
+        )));
+    }
+
+    let input_gpu = GpuBuffer::upload(ctx, buf);
+    let output_pb = PixelBuffer::zeroed(buf.width, buf.height, PixelFormat::Rgba8);
+    let output_gpu = GpuBuffer::upload(ctx, &output_pb);
+
+    let params = [buf.width, buf.height, 0u32, 0u32];
+    let params_bytes = params_to_bytes(&params);
+
+    let workgroups_x = buf.width.div_ceil(16);
+    let workgroups_y = buf.height.div_ceil(16);
+
+    dispatch_2d_3buf_shader(
+        ctx,
+        "flip_vertical",
+        &shaders::build_shader(shaders::FLIP_VERTICAL),
+        input_gpu.wgpu_buffer(),
+        output_gpu.wgpu_buffer(),
+        params_bytes,
+        workgroups_x,
+        workgroups_y,
+    );
+
+    output_gpu.download(ctx).map_err(Into::into)
+}
+
+/// Dispatch a 2D compute shader with 3 bindings (input read, output write, params uniform).
+///
+/// Similar to [`dispatch_blur_shader`] but without the kernel buffer. Creates
+/// the bind group layout inline and caches the pipeline by name.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_2d_3buf_shader(
+    ctx: &GpuContext,
+    name: &'static str,
+    shader_src: &str,
+    input_buf: &wgpu::Buffer,
+    output_buf: &wgpu::Buffer,
+    params_data: &[u8],
+    workgroups_x: u32,
+    workgroups_y: u32,
+) {
+    let cache = ctx.cache.borrow();
+    let cached = cache.pipelines.contains_key(name);
+    drop(cache);
+
+    if !cached {
+        let bgl = ctx
+            .device()
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("ranga_2d_3buf_bgl"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let pl = ctx
+            .device()
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("ranga_2d_3buf_pl"),
+                bind_group_layouts: &[&bgl],
+                push_constant_ranges: &[],
+            });
+
+        let shader = ctx
+            .device()
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(name),
+                source: wgpu::ShaderSource::Wgsl(shader_src.into()),
+            });
+
+        let pipeline = ctx
+            .device()
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(name),
+                layout: Some(&pl),
+                module: &shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+
+        let mut cache = ctx.cache.borrow_mut();
+        cache.pipelines.insert(name, pipeline);
+    }
+
+    // Pad params to 16-byte alignment
+    let aligned_size = params_data.len().div_ceil(16) * 16;
+    let mut aligned_data = vec![0u8; aligned_size];
+    aligned_data[..params_data.len()].copy_from_slice(params_data);
+
+    let params_buf = ctx.device().create_buffer(&wgpu::BufferDescriptor {
+        label: Some("transform_params"),
+        size: aligned_size as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    ctx.queue().write_buffer(&params_buf, 0, &aligned_data);
+
+    let cache = ctx.cache.borrow();
+    let pipeline = cache.pipelines.get(name).expect("just created");
+    let bgl = pipeline.get_bind_group_layout(0);
+
+    let bg = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: input_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: output_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: params_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let mut encoder = ctx
+        .device()
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: None,
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &bg, &[]);
+        pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+    }
+    drop(cache);
+    ctx.queue().submit(Some(encoder.finish()));
 }
 
 /// Dispatch a blur compute shader with 4 bindings (input, output, kernel, params).
@@ -1469,5 +2314,273 @@ mod tests {
         let buf = PixelBuffer::zeroed(4, 4, PixelFormat::Rgb8);
         let result = GpuChain::new(&ctx, &buf);
         assert!(result.is_err());
+    }
+
+    // ── Noise / transition tests ─────────────────────────────────────────
+
+    #[test]
+    fn gpu_noise_gaussian_modifies_buffer() {
+        let ctx = match try_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
+
+        let data = vec![128u8; 8 * 8 * 4];
+        let original = data.clone();
+        let mut buf = PixelBuffer::new(data, 8, 8, PixelFormat::Rgba8).unwrap();
+        gpu_noise_gaussian(&ctx, &mut buf, 0.3, 42).unwrap();
+
+        // Noise with non-zero strength should change at least some pixels
+        assert_ne!(buf.data, original, "noise should modify the buffer");
+    }
+
+    #[test]
+    fn gpu_noise_gaussian_deterministic() {
+        let ctx = match try_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
+
+        let data = vec![128u8; 8 * 8 * 4];
+        let mut buf1 = PixelBuffer::new(data.clone(), 8, 8, PixelFormat::Rgba8).unwrap();
+        let mut buf2 = PixelBuffer::new(data, 8, 8, PixelFormat::Rgba8).unwrap();
+
+        gpu_noise_gaussian(&ctx, &mut buf1, 0.2, 123).unwrap();
+        gpu_noise_gaussian(&ctx, &mut buf2, 0.2, 123).unwrap();
+
+        assert_eq!(
+            buf1.data, buf2.data,
+            "same seed+strength should produce same output"
+        );
+    }
+
+    #[test]
+    fn gpu_dissolve_at_zero_is_src() {
+        let ctx = match try_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
+
+        let src_data = vec![200u8; 4 * 4 * 4];
+        let dst_data = vec![50u8; 4 * 4 * 4];
+
+        let src = PixelBuffer::new(src_data.clone(), 4, 4, PixelFormat::Rgba8).unwrap();
+        let mut dst = PixelBuffer::new(dst_data, 4, 4, PixelFormat::Rgba8).unwrap();
+
+        // factor=0.0 means all src
+        gpu_dissolve(&ctx, &src, &mut dst, 0.0).unwrap();
+
+        for (g, s) in dst.data.iter().zip(src_data.iter()) {
+            assert!(
+                (*g as i16 - *s as i16).unsigned_abs() <= 1,
+                "GPU={g} src={s}"
+            );
+        }
+    }
+
+    #[test]
+    fn gpu_dissolve_at_one_is_dst() {
+        let ctx = match try_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
+
+        let src_data = vec![200u8; 4 * 4 * 4];
+        let dst_data = vec![50u8; 4 * 4 * 4];
+        let original_dst = dst_data.clone();
+
+        let src = PixelBuffer::new(src_data, 4, 4, PixelFormat::Rgba8).unwrap();
+        let mut dst = PixelBuffer::new(dst_data, 4, 4, PixelFormat::Rgba8).unwrap();
+
+        // factor=1.0 means all dst (original)
+        gpu_dissolve(&ctx, &src, &mut dst, 1.0).unwrap();
+
+        for (g, d) in dst.data.iter().zip(original_dst.iter()) {
+            assert!(
+                (*g as i16 - *d as i16).unsigned_abs() <= 1,
+                "GPU={g} dst={d}"
+            );
+        }
+    }
+
+    #[test]
+    fn gpu_fade_zero_is_black() {
+        let ctx = match try_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
+
+        let data = vec![200u8; 4 * 4 * 4];
+        let mut buf = PixelBuffer::new(data, 4, 4, PixelFormat::Rgba8).unwrap();
+
+        gpu_fade(&ctx, &mut buf, 0.0).unwrap();
+
+        // RGB should be zero, alpha preserved
+        for pixel in buf.data.chunks_exact(4) {
+            assert!(pixel[0] <= 1, "R should be ~0, got {}", pixel[0]);
+            assert!(pixel[1] <= 1, "G should be ~0, got {}", pixel[1]);
+            assert!(pixel[2] <= 1, "B should be ~0, got {}", pixel[2]);
+            assert_eq!(pixel[3], 200, "alpha should be preserved");
+        }
+    }
+
+    #[test]
+    fn gpu_fade_one_is_identity() {
+        let ctx = match try_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
+
+        let data: Vec<u8> = (0..16u8)
+            .flat_map(|i| [i * 16, i * 8, i * 4, 255])
+            .collect();
+        let original = data.clone();
+        let mut buf = PixelBuffer::new(data, 4, 4, PixelFormat::Rgba8).unwrap();
+
+        gpu_fade(&ctx, &mut buf, 1.0).unwrap();
+
+        for (g, o) in buf.data.iter().zip(original.iter()) {
+            assert!(
+                (*g as i16 - *o as i16).unsigned_abs() <= 1,
+                "GPU={g} original={o}"
+            );
+        }
+    }
+
+    #[test]
+    fn gpu_wipe_zero_is_src() {
+        let ctx = match try_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
+
+        let src_data = vec![200u8; 4 * 4 * 4];
+        let dst_data = vec![50u8; 4 * 4 * 4];
+
+        let src = PixelBuffer::new(src_data.clone(), 4, 4, PixelFormat::Rgba8).unwrap();
+        let mut dst = PixelBuffer::new(dst_data, 4, 4, PixelFormat::Rgba8).unwrap();
+
+        // progress=0.0 means wipe_x=0, so all pixels come from src
+        gpu_wipe(&ctx, &src, &mut dst, 0.0).unwrap();
+
+        for (g, s) in dst.data.iter().zip(src_data.iter()) {
+            assert!(
+                (*g as i16 - *s as i16).unsigned_abs() <= 1,
+                "GPU={g} src={s}"
+            );
+        }
+    }
+
+    #[test]
+    fn gpu_wipe_one_is_dst() {
+        let ctx = match try_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
+
+        let src_data = vec![200u8; 4 * 4 * 4];
+        let dst_data = vec![50u8; 4 * 4 * 4];
+        let original_dst = dst_data.clone();
+
+        let src = PixelBuffer::new(src_data, 4, 4, PixelFormat::Rgba8).unwrap();
+        let mut dst = PixelBuffer::new(dst_data, 4, 4, PixelFormat::Rgba8).unwrap();
+
+        // progress=1.0 means wipe_x=width, so all pixels stay as dst
+        gpu_wipe(&ctx, &src, &mut dst, 1.0).unwrap();
+
+        for (g, d) in dst.data.iter().zip(original_dst.iter()) {
+            assert!(
+                (*g as i16 - *d as i16).unsigned_abs() <= 1,
+                "GPU={g} dst={d}"
+            );
+        }
+    }
+
+    // ── GPU transform tests ────────────────────────────────────────────────
+
+    #[test]
+    fn gpu_crop_basic() {
+        let ctx = match try_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
+
+        let buf = PixelBuffer::zeroed(8, 8, PixelFormat::Rgba8);
+        let cropped = gpu_crop(&ctx, &buf, 2, 2, 6, 6).unwrap();
+        assert_eq!(cropped.width, 4);
+        assert_eq!(cropped.height, 4);
+        assert_eq!(cropped.data.len(), 4 * 4 * 4);
+    }
+
+    #[test]
+    fn gpu_crop_rejects_non_rgba8() {
+        let ctx = match try_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
+
+        let buf = PixelBuffer::zeroed(8, 8, PixelFormat::Rgb8);
+        let result = gpu_crop(&ctx, &buf, 0, 0, 4, 4);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn gpu_resize_nearest_doubles() {
+        let ctx = match try_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
+
+        let buf = PixelBuffer::zeroed(4, 4, PixelFormat::Rgba8);
+        let resized = gpu_resize(&ctx, &buf, 8, 8, ScaleFilter::Nearest).unwrap();
+        assert_eq!(resized.width, 8);
+        assert_eq!(resized.height, 8);
+        assert_eq!(resized.data.len(), 8 * 8 * 4);
+    }
+
+    #[test]
+    fn gpu_resize_bilinear_halves() {
+        let ctx = match try_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
+
+        let buf = PixelBuffer::new(vec![128; 8 * 8 * 4], 8, 8, PixelFormat::Rgba8).unwrap();
+        let resized = gpu_resize(&ctx, &buf, 4, 4, ScaleFilter::Bilinear).unwrap();
+        assert_eq!(resized.width, 4);
+        assert_eq!(resized.height, 4);
+        assert_eq!(resized.data.len(), 4 * 4 * 4);
+    }
+
+    #[test]
+    fn gpu_flip_horizontal_roundtrip() {
+        let ctx = match try_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
+
+        let data: Vec<u8> = (0..16u8)
+            .flat_map(|i| [i * 16, i * 8, i * 4, 255])
+            .collect();
+        let buf = PixelBuffer::new(data.clone(), 4, 4, PixelFormat::Rgba8).unwrap();
+        let f1 = gpu_flip_horizontal(&ctx, &buf).unwrap();
+        let f2 = gpu_flip_horizontal(&ctx, &f1).unwrap();
+        assert_eq!(f2.data, data);
+    }
+
+    #[test]
+    fn gpu_flip_vertical_roundtrip() {
+        let ctx = match try_gpu() {
+            Some(ctx) => ctx,
+            None => return,
+        };
+
+        let data: Vec<u8> = (0..16u8)
+            .flat_map(|i| [i * 16, i * 8, i * 4, 255])
+            .collect();
+        let buf = PixelBuffer::new(data.clone(), 4, 4, PixelFormat::Rgba8).unwrap();
+        let f1 = gpu_flip_vertical(&ctx, &buf).unwrap();
+        let f2 = gpu_flip_vertical(&ctx, &f1).unwrap();
+        assert_eq!(f2.data, data);
     }
 }

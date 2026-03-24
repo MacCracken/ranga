@@ -29,7 +29,10 @@ use rayon::prelude::*;
 /// ```
 pub fn brightness(buf: &mut PixelBuffer, offset: f32) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "brightness: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     let shift = (offset * 255.0) as i16;
 
@@ -164,7 +167,10 @@ unsafe fn brightness_neon(data: &mut [u8], shift: i16) {
 /// ```
 pub fn contrast(buf: &mut PixelBuffer, factor: f32) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "contrast: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     for pixel in buf.data.chunks_exact_mut(4) {
         pixel[0] = ((((pixel[0] as f32 - 128.0) * factor) + 128.0).clamp(0.0, 255.0)) as u8;
@@ -193,7 +199,10 @@ pub fn contrast(buf: &mut PixelBuffer, factor: f32) -> Result<(), RangaError> {
 /// ```
 pub fn saturation(buf: &mut PixelBuffer, factor: f32) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "saturation: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     for pixel in buf.data.chunks_exact_mut(4) {
         let r = pixel[0] as f32;
@@ -226,7 +235,10 @@ pub fn saturation(buf: &mut PixelBuffer, factor: f32) -> Result<(), RangaError> 
 /// ```
 pub fn levels(buf: &mut PixelBuffer, black: f32, white: f32, gamma: f32) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "levels: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     let range = (white - black).max(1e-6);
     // Build LUT for speed
@@ -267,7 +279,10 @@ pub fn levels(buf: &mut PixelBuffer, black: f32, white: f32, gamma: f32) -> Resu
 /// ```
 pub fn curves(buf: &mut PixelBuffer, lut: &[u8; 256]) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "curves: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     for pixel in buf.data.chunks_exact_mut(4) {
         pixel[0] = lut[pixel[0] as usize];
@@ -295,7 +310,10 @@ pub fn curves(buf: &mut PixelBuffer, lut: &[u8; 256]) -> Result<(), RangaError> 
 /// ```
 pub fn grayscale(buf: &mut PixelBuffer) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "grayscale: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
 
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -437,7 +455,10 @@ unsafe fn grayscale_neon(data: &mut [u8]) {
 /// ```
 pub fn invert(buf: &mut PixelBuffer) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "invert: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     for pixel in buf.data.chunks_exact_mut(4) {
         pixel[0] = 255 - pixel[0];
@@ -562,9 +583,13 @@ fn blur_pass_vertical(src: &[u8], dst: &mut [u8], w: usize, h: usize, kernel: &[
 /// let blurred = filter::gaussian_blur(&buf, 2).unwrap();
 /// assert_eq!(blurred.width, 8);
 /// ```
+#[must_use = "returns a new blurred buffer"]
 pub fn gaussian_blur(buf: &PixelBuffer, radius: u32) -> Result<PixelBuffer, RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "gaussian_blur: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     if radius == 0 {
         return Ok(buf.clone());
@@ -597,9 +622,13 @@ pub fn gaussian_blur(buf: &PixelBuffer, radius: u32) -> Result<PixelBuffer, Rang
 /// let blurred = filter::box_blur(&buf, 2).unwrap();
 /// assert_eq!(blurred.width, 8);
 /// ```
+#[must_use = "returns a new blurred buffer"]
 pub fn box_blur(buf: &PixelBuffer, radius: u32) -> Result<PixelBuffer, RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "box_blur: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     if radius == 0 {
         return Ok(buf.clone());
@@ -634,6 +663,7 @@ pub fn box_blur(buf: &PixelBuffer, radius: u32) -> Result<PixelBuffer, RangaErro
 /// let sharp = filter::unsharp_mask(&buf, 2, 1.0).unwrap();
 /// assert_eq!(sharp.width, 8);
 /// ```
+#[must_use = "returns a new sharpened buffer"]
 pub fn unsharp_mask(
     buf: &PixelBuffer,
     radius: u32,
@@ -673,7 +703,10 @@ pub fn unsharp_mask(
 /// ```
 pub fn hue_shift(buf: &mut PixelBuffer, degrees: f32) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "hue_shift: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     for pixel in buf.data.chunks_exact_mut(4) {
         let srgb = crate::color::Srgba {
@@ -720,7 +753,10 @@ pub fn color_balance(
     highlights: [f32; 3],
 ) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "color_balance: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     for pixel in buf.data.chunks_exact_mut(4) {
         let lum =
@@ -756,7 +792,10 @@ pub fn color_balance(
 /// ```
 pub fn vignette(buf: &mut PixelBuffer, strength: f32) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "vignette: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     let w = buf.width as f32;
     let h = buf.height as f32;
@@ -806,6 +845,7 @@ pub struct Lut3d {
 
 impl Lut3d {
     /// Parse a `.cube` file into a 3D LUT.
+    #[must_use = "returns a new Lut3d"]
     pub fn from_cube(text: &str) -> Result<Self, RangaError> {
         let mut size = 0usize;
         let mut data = Vec::new();
@@ -923,7 +963,10 @@ impl Lut3d {
 /// ```
 pub fn apply_lut3d(buf: &mut PixelBuffer, lut: &Lut3d) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "apply_lut3d: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     for pixel in buf.data.chunks_exact_mut(4) {
         let r = pixel[0] as f32 / 255.0;
@@ -991,7 +1034,10 @@ impl Xorshift64 {
 /// ```
 pub fn noise_gaussian(buf: &mut PixelBuffer, amount: f32, seed: u64) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "noise_gaussian: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     let scale = amount * 255.0;
     let mut rng = Xorshift64::new(seed);
@@ -1020,7 +1066,10 @@ pub fn noise_gaussian(buf: &mut PixelBuffer, amount: f32, seed: u64) -> Result<(
 /// ```
 pub fn noise_salt_pepper(buf: &mut PixelBuffer, density: f32, seed: u64) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "noise_salt_pepper: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     let mut rng = Xorshift64::new(seed);
     for pixel in buf.data.chunks_exact_mut(4) {
@@ -1058,9 +1107,13 @@ pub fn noise_salt_pepper(buf: &mut PixelBuffer, density: f32, seed: u64) -> Resu
 /// let filtered = filter::median(&buf, 1).unwrap();
 /// assert_eq!(filtered.data[0], 128); // uniform → unchanged
 /// ```
+#[must_use = "returns a new filtered buffer"]
 pub fn median(buf: &PixelBuffer, radius: u32) -> Result<PixelBuffer, RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "median: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     if radius == 0 {
         return Ok(buf.clone());
@@ -1108,6 +1161,7 @@ pub fn median(buf: &PixelBuffer, radius: u32) -> Result<PixelBuffer, RangaError>
 /// let filtered = filter::bilateral(&buf, 2, 10.0, 30.0).unwrap();
 /// assert_eq!(filtered.data[0], 128);
 /// ```
+#[must_use = "returns a new filtered buffer"]
 pub fn bilateral(
     buf: &PixelBuffer,
     radius: u32,
@@ -1115,7 +1169,10 @@ pub fn bilateral(
     sigma_color: f32,
 ) -> Result<PixelBuffer, RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "bilateral: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     if radius == 0 {
         return Ok(buf.clone());
@@ -1194,7 +1251,10 @@ pub fn bilateral(
 /// ```
 pub fn vibrance(buf: &mut PixelBuffer, amount: f32) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "vibrance: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     for pixel in buf.data.chunks_exact_mut(4) {
         let r = pixel[0] as f32;
@@ -1233,7 +1293,10 @@ pub fn vibrance(buf: &mut PixelBuffer, amount: f32) -> Result<(), RangaError> {
 /// ```
 pub fn channel_mixer(buf: &mut PixelBuffer, matrix: [[f32; 3]; 3]) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "channel_mixer: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     for pixel in buf.data.chunks_exact_mut(4) {
         let r = pixel[0] as f32;
@@ -1263,7 +1326,10 @@ pub fn channel_mixer(buf: &mut PixelBuffer, matrix: [[f32; 3]; 3]) -> Result<(),
 /// ```
 pub fn threshold(buf: &mut PixelBuffer, level: u8) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "threshold: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     for pixel in buf.data.chunks_exact_mut(4) {
         let lum =
@@ -1300,7 +1366,10 @@ pub fn flood_fill(
     tolerance: u8,
 ) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "flood_fill: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     let w = buf.width as usize;
     let h = buf.height as usize;
@@ -1375,7 +1444,10 @@ pub fn flood_fill(
 /// ```
 pub fn auto_white_balance(buf: &mut PixelBuffer) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
-        return Err(RangaError::InvalidFormat(format!("{:?}", buf.format)));
+        return Err(RangaError::InvalidFormat(format!(
+            "auto_white_balance: expected Rgba8, got {:?}",
+            buf.format
+        )));
     }
     let count = buf.pixel_count();
     if count == 0 {

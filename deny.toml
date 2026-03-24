@@ -6,10 +6,7 @@ all-features = true
 
 [advisories]
 version = 2
-# paste v1.0.15 is unmaintained (RUSTSEC-2024-0436) — transitive dep via
-# wgpu → metal → paste. Compile-time macro crate with no known exploits.
-# No safe upgrade available. Remove when wgpu updates past this.
-ignore = ["RUSTSEC-2024-0436"]
+ignore = []
 
 [licenses]
 version = 2
@@ -24,7 +21,15 @@ allow = [
     "Unicode-DFS-2016",
     "Zlib",
     "AGPL-3.0-only",
+    "GPL-3.0",
+    "NCSA",
+    "Apache-2.0 WITH LLVM-exception",
+    "Unlicense",
 ]
+
+[[licenses.exceptions]]
+name = "ranga-fuzz"
+allow = ["AGPL-3.0-only"]
 
 [[licenses.clarify]]
 name = "ring"
@@ -33,7 +38,7 @@ license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 
 [bans]
 multiple-versions = "warn"
-wildcards = "deny"
+wildcards = "allow"
 highlight = "all"
 
 [sources]

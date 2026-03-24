@@ -124,10 +124,10 @@ pub fn should_use_gpu(width: u32, height: u32) -> bool {
     }
 
     // Skip GPU if it's heavily loaded (>90% utilization).
-    if let Some(util) = report.gpu_utilization_percent {
-        if util > 90 {
-            return false;
-        }
+    if let Some(util) = report.gpu_utilization_percent
+        && util > 90
+    {
+        return false;
     }
 
     true

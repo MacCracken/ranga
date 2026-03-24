@@ -11,6 +11,7 @@ use crate::RangaError;
 
 /// Errors specific to GPU operations.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum GpuError {
     /// No suitable GPU adapter was found on the system.
     #[error("no suitable GPU adapter found")]

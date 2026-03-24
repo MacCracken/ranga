@@ -119,6 +119,7 @@ impl PixelBuffer {
     /// // Wrong size is rejected
     /// assert!(PixelBuffer::new(vec![0; 100], 10, 10, PixelFormat::Rgba8).is_err());
     /// ```
+    #[must_use = "returns a new pixel buffer"]
     pub fn new(
         data: Vec<u8>,
         width: u32,
@@ -190,6 +191,7 @@ impl PixelBuffer {
     /// assert_eq!(buf.rows().count(), 3);
     /// assert_eq!(buf.rows().next().unwrap().len(), 16); // 4 pixels * 4 bytes
     /// ```
+    #[must_use = "returns a row iterator"]
     pub fn rows(&self) -> impl Iterator<Item = &[u8]> {
         let stride = match self.format {
             PixelFormat::Rgba8 | PixelFormat::Argb8 => self.width as usize * 4,
@@ -367,6 +369,7 @@ pub struct PixelView<'a> {
 
 impl<'a> PixelView<'a> {
     /// Create a view from a byte slice, validating length.
+    #[must_use = "returns a new pixel view"]
     pub fn new(
         data: &'a [u8],
         width: u32,
@@ -434,6 +437,7 @@ pub struct PixelViewMut<'a> {
 
 impl<'a> PixelViewMut<'a> {
     /// Create a mutable view from a byte slice, validating length.
+    #[must_use = "returns a new mutable pixel view"]
     pub fn new(
         data: &'a mut [u8],
         width: u32,

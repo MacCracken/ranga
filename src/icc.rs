@@ -67,6 +67,7 @@ pub struct IccProfile {
 /// assert!((table.apply(0.5) - 0.5).abs() < 1e-10);
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum ToneCurve {
     /// Simple gamma curve: `output = input.powf(gamma)`.
     Gamma(f64),
@@ -139,6 +140,7 @@ impl IccProfile {
     /// println!("version: {}.{}", profile.version.0, profile.version.1);
     /// # }
     /// ```
+    #[must_use = "returns a parsed ICC profile"]
     pub fn from_bytes(data: &[u8]) -> Result<Self, RangaError> {
         if data.len() < MIN_PROFILE_SIZE {
             return Err(RangaError::InvalidFormat(
@@ -264,6 +266,7 @@ impl IccLutProfile {
     ///
     /// Supports `mAB ` (v4) and `mft2`/`mft1` (v2) tag types via the
     /// `A2B0` tag. Returns an error if no LUT tag is found.
+    #[must_use = "returns a parsed ICC LUT profile"]
     pub fn from_bytes(data: &[u8]) -> Result<Self, RangaError> {
         if data.len() < MIN_PROFILE_SIZE {
             return Err(RangaError::InvalidFormat("ICC profile too short".into()));

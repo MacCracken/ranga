@@ -90,6 +90,7 @@ impl GpuBuffer {
     /// let result = gpu_buf.download(&ctx).unwrap();
     /// assert_eq!(result.data.len(), 32 * 32 * 4);
     /// ```
+    #[must_use = "returns the downloaded pixel buffer"]
     pub fn download(&self, ctx: &GpuContext) -> Result<PixelBuffer, GpuError> {
         let staging = ctx.device().create_buffer(&wgpu::BufferDescriptor {
             label: Some("staging_readback"),
@@ -153,6 +154,7 @@ impl GpuBuffer {
     /// let result = receiver.recv().unwrap().unwrap();
     /// assert_eq!(result.width, 64);
     /// ```
+    #[must_use = "returns a receiver for the downloaded pixel buffer"]
     pub fn download_async(
         &self,
         ctx: &GpuContext,

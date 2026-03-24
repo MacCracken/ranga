@@ -30,13 +30,17 @@
 
 - Added `spectral` feature flag (depends on prakash 0.23.3, spectral feature only)
 - `full` feature now includes `spectral`
-- **GPU batched dispatch** — `GpuChain` builder for chaining multiple GPU operations without CPU readback between steps (invert, grayscale, brightness_contrast, saturation, gaussian_blur, blend)
+- **GPU batched dispatch** — `GpuChain` builder for chaining multiple GPU operations without CPU readback between steps (invert, grayscale, brightness_contrast, saturation, gaussian_blur, blend, noise, dissolve, fade, wipe, crop, resize, flip)
+- **GPU noise generation** — `gpu_noise_gaussian` compute shader using PCG hash + Box-Muller transform for deterministic Gaussian noise
+- **GPU transition shaders** — `gpu_dissolve`, `gpu_fade`, `gpu_wipe` compute shaders for cross-dissolve, fade-to-black, and horizontal wipe transitions
+- **GPU geometry shaders** — `gpu_crop`, `gpu_resize` (nearest + bilinear), `gpu_flip_horizontal`, `gpu_flip_vertical` compute shaders
 - **Visual regression tests** — 10 deterministic pixel-level regression tests: gradient blur smoothness, checkerboard resize, invert idempotency, premultiply roundtrip precision, Gaussian blur symmetry, HSL hue shift 360 identity, color balance neutral, crop+resize composition, Screen blend commutativity, YUV roundtrip color fidelity
 - **Extended fuzz campaigns** — 5 new fuzz targets (blur, LUT, ICC, composite, transform) added to existing 3 (blend, convert, filter) for 8 total
+- **Consistent error messages** — standardized all `InvalidFormat` errors to `"<operation>: expected <format>, got <actual>"` across filter, composite, histogram, convert, transform, and GPU modules
 - Bumped `ai-hwaccel` from 0.21.3 to 0.23.3 — `HwReport` now exposes `gpu_free_memory_mb`, `gpu_utilization_percent`, `temperature_c`; `should_use_gpu()` checks free VRAM and GPU utilization before recommending offload
 - Added field-level doc comments to all public struct fields (`LinRgba`, `Srgba`, `CieXyz`, `Cmyk`, `PixelBuffer`, `Affine`) — 100% public API documented
 - Version aligned with prakash ecosystem at 0.23.3
-- All v1.0 criteria met (excluding downstream consumer adoption)
+- Roadmap fully cleared — all backlog items completed
 
 ## [0.21.4] — 2026-03-21
 
