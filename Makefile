@@ -1,4 +1,4 @@
-.PHONY: check fmt clippy test audit deny vet fuzz coverage build doc clean
+.PHONY: check fmt clippy test audit deny vet fuzz coverage build doc clean msrv
 
 # Run all CI checks locally
 check: fmt clippy test audit
@@ -32,6 +32,11 @@ fuzz:
 	cargo fuzz run fuzz_blend -- -max_total_time=30
 	cargo fuzz run fuzz_convert -- -max_total_time=30
 	cargo fuzz run fuzz_filter -- -max_total_time=30
+	cargo fuzz run fuzz_blur -- -max_total_time=30
+	cargo fuzz run fuzz_lut -- -max_total_time=30
+	cargo fuzz run fuzz_icc -- -max_total_time=30
+	cargo fuzz run fuzz_composite -- -max_total_time=30
+	cargo fuzz run fuzz_transform -- -max_total_time=30
 
 # Generate coverage report
 coverage:
@@ -50,3 +55,7 @@ doc:
 clean:
 	cargo clean
 	rm -rf coverage/
+
+# Verify minimum supported Rust version (MSRV 1.89)
+msrv:
+	cargo +1.89 check --all-features

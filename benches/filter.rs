@@ -203,6 +203,13 @@ fn bench_flood_fill(c: &mut Criterion) {
     });
 }
 
+fn bench_auto_white_balance(c: &mut Criterion) {
+    let mut buf = make_varied_buf();
+    c.bench_function("auto_white_balance_1080p", |b| {
+        b.iter(|| filter::auto_white_balance(black_box(&mut buf)).unwrap())
+    });
+}
+
 criterion_group!(
     benches,
     bench_brightness,
@@ -227,5 +234,6 @@ criterion_group!(
     bench_channel_mixer,
     bench_threshold,
     bench_flood_fill,
+    bench_auto_white_balance,
 );
 criterion_main!(benches);

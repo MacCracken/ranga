@@ -52,6 +52,7 @@ fn validate_same_size(a: &PixelBuffer, b: &PixelBuffer) -> Result<(), RangaError
 /// composite::premultiply_alpha(&mut buf).unwrap();
 /// assert_eq!(buf.data[0], 128); // 255 * 128 / 255 ≈ 128
 /// ```
+#[must_use = "this returns a Result that may contain an error"]
 pub fn premultiply_alpha(buf: &mut PixelBuffer) -> Result<(), RangaError> {
     validate_rgba8("premultiply_alpha", buf)?;
     for pixel in buf.data.chunks_exact_mut(4) {
@@ -76,6 +77,7 @@ pub fn premultiply_alpha(buf: &mut PixelBuffer) -> Result<(), RangaError> {
 /// // 128 / (128/255) ≈ 255
 /// assert!(buf.data[0] > 250);
 /// ```
+#[must_use = "this returns a Result that may contain an error"]
 pub fn unpremultiply_alpha(buf: &mut PixelBuffer) -> Result<(), RangaError> {
     validate_rgba8("unpremultiply_alpha", buf)?;
     for pixel in buf.data.chunks_exact_mut(4) {
@@ -112,6 +114,7 @@ pub fn unpremultiply_alpha(buf: &mut PixelBuffer) -> Result<(), RangaError> {
 /// composite::apply_mask(&mut buf, &mask).unwrap();
 /// assert_eq!(buf.data[3], 128); // alpha halved by mask
 /// ```
+#[must_use = "this returns a Result that may contain an error"]
 pub fn apply_mask(buf: &mut PixelBuffer, mask: &PixelBuffer) -> Result<(), RangaError> {
     validate_rgba8("apply_mask", buf)?;
     validate_rgba8("apply_mask", mask)?;
@@ -176,6 +179,7 @@ pub fn dissolve(
 /// composite::fade(&mut buf, 0.5).unwrap();
 /// assert_eq!(buf.data[0], 100);
 /// ```
+#[must_use = "this returns a Result that may contain an error"]
 pub fn fade(buf: &mut PixelBuffer, progress: f32) -> Result<(), RangaError> {
     validate_rgba8("fade", buf)?;
     let p = progress.clamp(0.0, 1.0);
@@ -242,6 +246,7 @@ pub fn wipe(a: &PixelBuffer, b: &PixelBuffer, progress: f32) -> Result<PixelBuff
 /// composite::fill_solid(&mut buf, [255, 0, 0, 255]).unwrap();
 /// assert_eq!(buf.data[0], 255);
 /// ```
+#[must_use = "this returns a Result that may contain an error"]
 pub fn fill_solid(buf: &mut PixelBuffer, color: [u8; 4]) -> Result<(), RangaError> {
     validate_rgba8("fill_solid", buf)?;
     for pixel in buf.data.chunks_exact_mut(4) {
@@ -265,6 +270,7 @@ pub fn fill_solid(buf: &mut PixelBuffer, color: [u8; 4]) -> Result<(), RangaErro
 /// assert!(buf.data[0] > 200); // left = red
 /// assert!(buf.data[99 * 4 + 2] > 200); // right = blue
 /// ```
+#[must_use = "this returns a Result that may contain an error"]
 pub fn gradient_linear(
     buf: &mut PixelBuffer,
     start: [u8; 4],
@@ -303,6 +309,7 @@ pub fn gradient_linear(
 /// let mut buf = PixelBuffer::zeroed(100, 100, PixelFormat::Rgba8);
 /// composite::gradient_linear_angled(&mut buf, [255, 0, 0, 255], [0, 0, 255, 255], 45.0).unwrap();
 /// ```
+#[must_use = "this returns a Result that may contain an error"]
 pub fn gradient_linear_angled(
     buf: &mut PixelBuffer,
     start: [u8; 4],
@@ -369,6 +376,7 @@ pub fn gradient_linear_angled(
 /// composite::gradient_radial(&mut buf, (50.0, 50.0), 40.0, [255, 0, 0, 255], [0, 0, 255, 255]).unwrap();
 /// assert!(buf.data[(50 * 100 + 50) * 4] > 200); // center = red
 /// ```
+#[must_use = "this returns a Result that may contain an error"]
 pub fn gradient_radial(
     buf: &mut PixelBuffer,
     center: (f32, f32),
@@ -417,6 +425,7 @@ pub fn gradient_radial(
 /// // Pixel at (10,10) should now have red content
 /// assert!(dst.data[(10 * 100 + 10) * 4] > 0);
 /// ```
+#[must_use = "this returns a Result that may contain an error"]
 pub fn composite_at(
     src: &PixelBuffer,
     dst: &mut PixelBuffer,
@@ -491,6 +500,7 @@ pub fn composite_at(
 /// let src = PixelBuffer::new(vec![200, 255, 0, 0].repeat(4), 2, 2, PixelFormat::Argb8).unwrap();
 /// composite::composite_at_argb(&src, &mut dst, 1, 1, 1.0).unwrap();
 /// ```
+#[must_use = "this returns a Result that may contain an error"]
 pub fn composite_at_argb(
     src: &PixelBuffer,
     dst: &mut PixelBuffer,
@@ -576,6 +586,7 @@ pub fn composite_at_argb(
 /// composite::fill_checkerboard(&mut buf, 8, [200, 200, 200, 255], [255, 255, 255, 255]).unwrap();
 /// assert_ne!(buf.data[0..4], buf.data[8 * 4..8 * 4 + 4]); // alternating
 /// ```
+#[must_use = "this returns a Result that may contain an error"]
 pub fn fill_checkerboard(
     buf: &mut PixelBuffer,
     block_size: u32,

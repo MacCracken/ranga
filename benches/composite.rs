@@ -115,6 +115,13 @@ fn bench_gradient_angled(c: &mut Criterion) {
     });
 }
 
+fn bench_fill_solid(c: &mut Criterion) {
+    let mut buf = make_buf();
+    c.bench_function("fill_solid_1080p", |b| {
+        b.iter(|| composite::fill_solid(black_box(&mut buf), [255, 0, 0, 255]).unwrap())
+    });
+}
+
 fn bench_composite_at_argb(c: &mut Criterion) {
     let mut dst =
         PixelBuffer::new(vec![128; 1920 * 1080 * 4], 1920, 1080, PixelFormat::Argb8).unwrap();
@@ -137,6 +144,7 @@ criterion_group!(
     bench_apply_mask,
     bench_gradient_radial,
     bench_gradient_angled,
+    bench_fill_solid,
     bench_composite_at_argb,
 );
 criterion_main!(benches);

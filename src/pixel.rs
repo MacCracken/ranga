@@ -216,6 +216,7 @@ impl PixelBuffer {
     /// assert_eq!(buf.data[0], 255);
     /// assert_eq!(buf.data[16], 255);
     /// ```
+    #[must_use = "returns a mutable row iterator"]
     pub fn rows_mut(&mut self) -> impl Iterator<Item = &mut [u8]> {
         let stride = match self.format {
             PixelFormat::Rgba8 | PixelFormat::Argb8 => self.width as usize * 4,
@@ -334,6 +335,7 @@ impl PixelBuffer {
     /// view.data_mut()[0] = 255;
     /// assert_eq!(buf.data[0], 255);
     /// ```
+    #[must_use]
     pub fn as_view_mut(&mut self) -> PixelViewMut<'_> {
         PixelViewMut {
             data: &mut self.data,
@@ -520,6 +522,7 @@ impl BufferPool {
     ///
     /// Reuses a pooled buffer if one of sufficient size exists, otherwise
     /// allocates a new one. The returned buffer is zero-filled.
+    #[must_use]
     pub fn acquire(&mut self, size: usize) -> Vec<u8> {
         // Find the smallest buffer that fits
         if let Some(pos) = self.pool.iter().position(|b| b.capacity() >= size) {

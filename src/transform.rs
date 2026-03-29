@@ -526,7 +526,23 @@ pub fn affine_transform(
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Perspective {
-    /// Row-major 3x3 matrix.
+    /// Row-major 3x3 homogeneous transformation matrix.
+    ///
+    /// ```text
+    /// | m[0][0]  m[0][1]  m[0][2] |
+    /// | m[1][0]  m[1][1]  m[1][2] |
+    /// | m[2][0]  m[2][1]  m[2][2] |
+    /// ```
+    ///
+    /// - `m[0][0]` — Row 0, column 0 of the 3x3 homogeneous transformation matrix (X scale / perspective).
+    /// - `m[0][1]` — Row 0, column 1 of the 3x3 homogeneous transformation matrix (X shear).
+    /// - `m[0][2]` — Row 0, column 2 of the 3x3 homogeneous transformation matrix (X translation).
+    /// - `m[1][0]` — Row 1, column 0 of the 3x3 homogeneous transformation matrix (Y shear).
+    /// - `m[1][1]` — Row 1, column 1 of the 3x3 homogeneous transformation matrix (Y scale / perspective).
+    /// - `m[1][2]` — Row 1, column 2 of the 3x3 homogeneous transformation matrix (Y translation).
+    /// - `m[2][0]` — Row 2, column 0 of the 3x3 homogeneous transformation matrix (X perspective divisor).
+    /// - `m[2][1]` — Row 2, column 1 of the 3x3 homogeneous transformation matrix (Y perspective divisor).
+    /// - `m[2][2]` — Row 2, column 2 of the 3x3 homogeneous transformation matrix (homogeneous scale, typically 1.0).
     pub m: [[f64; 3]; 3],
 }
 

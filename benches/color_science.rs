@@ -29,6 +29,22 @@ fn bench_delta_e_cie76(c: &mut Criterion) {
     });
 }
 
+fn bench_delta_e_cie94(c: &mut Criterion) {
+    let a = CieLab {
+        l: 50.0,
+        a: 25.0,
+        b: -10.0,
+    };
+    let b_lab = CieLab {
+        l: 55.0,
+        a: 20.0,
+        b: -15.0,
+    };
+    c.bench_function("delta_e_cie94", |b| {
+        b.iter(|| delta_e_cie94(black_box(&a), black_box(&b_lab)))
+    });
+}
+
 fn bench_delta_e_ciede2000(c: &mut Criterion) {
     let a = CieLab {
         l: 50.0,
@@ -122,6 +138,7 @@ criterion_group!(
     benches,
     bench_srgb_to_lab,
     bench_delta_e_cie76,
+    bench_delta_e_cie94,
     bench_delta_e_ciede2000,
     bench_p3_to_srgb,
     bench_cmyk_roundtrip,
