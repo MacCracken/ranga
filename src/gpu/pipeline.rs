@@ -1780,8 +1780,8 @@ fn dispatch_2d_3buf_shader(
             .device()
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("ranga_2d_3buf_pl"),
-                bind_group_layouts: &[&bgl],
-                push_constant_ranges: &[],
+                bind_group_layouts: &[Some(&bgl)],
+                immediate_size: 0,
             });
 
         let shader = ctx
@@ -1935,8 +1935,8 @@ fn dispatch_blur_shader(
             .device()
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("ranga_blur_pl"),
-                bind_group_layouts: &[&bgl],
-                push_constant_ranges: &[],
+                bind_group_layouts: &[Some(&bgl)],
+                immediate_size: 0,
             });
 
         let shader = ctx

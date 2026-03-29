@@ -110,7 +110,7 @@ impl GpuBuffer {
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = sender.send(result);
         });
-        ctx.device().poll(wgpu::Maintain::Wait);
+        ctx.device().poll(wgpu::PollType::wait_indefinitely()).ok();
         receiver
             .recv()
             .map_err(|e| GpuError::BufferOp(e.to_string()))?

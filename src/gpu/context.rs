@@ -97,17 +97,16 @@ impl GpuContext {
     /// let ctx = GpuContext::new().expect("GPU required");
     /// ```
     pub fn new() -> Result<Self, GpuError> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN | wgpu::Backends::METAL,
-            ..Default::default()
-        });
+        let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+        desc.backends = wgpu::Backends::VULKAN | wgpu::Backends::METAL;
+        let instance = wgpu::Instance::new(desc);
 
         let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
             force_fallback_adapter: false,
         }))
-        .ok_or(GpuError::NoAdapter)?;
+        .map_err(|_| GpuError::NoAdapter)?;
 
         let info = adapter.get_info();
         let adapter_name = info.name.clone();
@@ -120,9 +119,8 @@ impl GpuContext {
                 required_limits: wgpu::Limits::default(),
                 ..Default::default()
             },
-            None,
         ))
-        .map_err(|e| GpuError::DeviceRequest(e.to_string()))?;
+        .map_err(|e: wgpu::RequestDeviceError| GpuError::DeviceRequest(e.to_string()))?;
 
         Ok(Self {
             device,
@@ -235,8 +233,8 @@ impl GpuContext {
                     .device
                     .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                         label: Some("ranga_1buf_pl"),
-                        bind_group_layouts: &[&bgl],
-                        push_constant_ranges: &[],
+                        bind_group_layouts: &[Some(&bgl)],
+                        immediate_size: 0,
                     });
                 (bgl, pl)
             });
@@ -333,8 +331,8 @@ impl GpuContext {
                     .device
                     .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                         label: Some("ranga_3buf_pl"),
-                        bind_group_layouts: &[&bgl],
-                        push_constant_ranges: &[],
+                        bind_group_layouts: &[Some(&bgl)],
+                        immediate_size: 0,
                     });
                 (bgl, pl)
             });
