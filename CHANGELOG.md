@@ -2,6 +2,18 @@
 
 ## [Unreleased] — 1.0.0
 
+## [0.29.4] — 2026-03-29
+
+### Changed
+
+- **wgpu 24 → 29** — updated GPU compute backend to wgpu 29 (naga 29, wgpu-hal 29, wgpu-core 29)
+  - Migrated `Maintain::Wait` → `PollType::wait_indefinitely()`
+  - Migrated `Instance::new` to owned `InstanceDescriptor` via `new_without_display_handle()`
+  - Migrated `request_adapter` from `Option` to `Result` return type
+  - Migrated `PipelineLayoutDescriptor`: `push_constant_ranges` → `immediate_size`, `bind_group_layouts` now `Option`-wrapped
+  - Removed extra `None` trace path argument from `request_device`
+- **prakash 1.1.0 → 1.1.1** — bijli 1.0.1 dropped unnecessary soorat dependency; removed `default-features = false` workaround
+
 ## [0.29.3] — 2026-03-28
 
 ### Changed
