@@ -6,7 +6,22 @@
 
 ### Changed
 
+- **Major dep upgrades**: ai-hwaccel 0.23.3→1.0.0, prakash 0.23.3→1.1.0 (hisab 0.22.4→1.3.0 transitive)
 - Dependency update: wasm-bindgen 0.2.114→0.2.115, js-sys/web-sys 0.3.91→0.3.92, zerocopy 0.8.47→0.8.48
+- Version bump from 0.24.3 to 0.29.3
+
+### Added
+
+- `#[must_use]` attributes on public functions in `composite` (11 functions), `pixel` (3 methods) — completing API hardening sweep
+- Benchmarks: `auto_white_balance`, `delta_e_cie94`, `fill_solid`
+- `Perspective` struct field documentation (3×3 homogeneous matrix element descriptions)
+- `make msrv` target for local MSRV verification (`cargo +1.89 check --all-features`)
+- 1.0.0 roadmap at `docs/development/roadmap.md` with pre-1.0 and post-1.0 backlog
+
+### Fixed
+
+- `make fuzz` now runs all 8 fuzz targets (was only 3: blend, convert, filter)
+- Added `GPL-3.0-only` to `deny.toml` license allow list (hisab fixed SPDX identifier in 1.3.0)
 
 ## [0.24.3] — 2026-03-24
 
