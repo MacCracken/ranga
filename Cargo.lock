@@ -13,9 +13,9 @@ dependencies = [
 
 [[package]]
 name = "ai-hwaccel"
-version = "0.23.3"
+version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5da75a304805771ff2539246572847de881cf873eac8b4f4ddf2ccbbe2ad88c"
+checksum = "6cd3d3539f780343ed071981ff2c7341466202a5f46831efa58e3a628714bc23"
 dependencies = [
  "serde",
  "serde_json",
@@ -570,9 +570,9 @@ checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
 
 [[package]]
 name = "hisab"
-version = "0.22.4"
+version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c69ef9a41596ee017fb670eb47a281c292362096c35bc44a4ae77b7b6502b266"
+checksum = "6548cb83e812c5113aba95e8f3990b30e8d2680b76832807473d04adeac95831"
 dependencies = [
  "glam",
  "serde",
@@ -934,9 +934,9 @@ dependencies = [
 
 [[package]]
 name = "prakash"
-version = "0.23.3"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "865e8c2ab15f599023b61aa5917d9ccbf57b66fbae622dcaeeb3811b0663548f"
+checksum = "8a0cd46d269812d79cc849d1f5d0283b2acbbc5f4475c5fd6c31667ffd3c830d"
 dependencies = [
  "hisab",
  "serde",

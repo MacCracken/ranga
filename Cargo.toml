@@ -22,13 +22,13 @@ spectral = ["dep:prakash"]
 full = ["simd", "gpu", "hwaccel", "parallel", "spectral"]
 
 [dependencies]
-ai-hwaccel = { version = "0.23.3", optional = true }
+ai-hwaccel = { version = "1", optional = true }
 rayon = { version = "1", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
-prakash = { version = "0.23", default-features = false, features = ["spectral"], optional = true }
+prakash = { version = "1", default-features = false, features = ["spectral"], optional = true }
 wgpu = { version = "24", optional = true }
 
 [dev-dependencies]

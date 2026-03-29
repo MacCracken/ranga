@@ -25,6 +25,7 @@ allow = [
     "Zlib",
     "AGPL-3.0-only",
     "GPL-3.0",
+    "GPL-3.0-only",
     "NCSA",
     "Apache-2.0 WITH LLVM-exception",
     "Unlicense",
