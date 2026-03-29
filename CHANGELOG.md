@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.29.3] — 2026-03-28
+
+### Changed
+
+- Dependency update: wasm-bindgen 0.2.114→0.2.115, js-sys/web-sys 0.3.91→0.3.92, zerocopy 0.8.47→0.8.48
+
 ## [0.24.3] — 2026-03-24
 
 ### Added
