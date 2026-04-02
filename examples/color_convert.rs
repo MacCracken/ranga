@@ -27,7 +27,7 @@ fn main() {
         w,
         h,
         original.len(),
-        yuv.data.len()
+        yuv.data().len()
     );
 
     // Convert back to RGBA8
@@ -38,7 +38,7 @@ fn main() {
     let mut total_diff: u64 = 0;
     let mut samples: u64 = 0;
 
-    for (orig_pixel, round_pixel) in original.chunks_exact(4).zip(back.data.chunks_exact(4)) {
+    for (orig_pixel, round_pixel) in original.chunks_exact(4).zip(back.data().chunks_exact(4)) {
         for c in 0..3 {
             let d = (orig_pixel[c] as i16 - round_pixel[c] as i16).unsigned_abs();
             if d > max_diff {

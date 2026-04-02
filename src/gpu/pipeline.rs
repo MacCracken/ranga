@@ -1,6 +1,6 @@
 //! High-level GPU compute operations.
 //!
-//! Each function wraps the low-level wgpu pipeline setup, shader dispatch,
+//! Each function wraps the low-level mabda pipeline setup, shader dispatch,
 //! and buffer readback into a simple call that operates on [`PixelBuffer`]s.
 //! All operations require RGBA8 format.
 
@@ -29,13 +29,13 @@ use crate::transform::ScaleFilter;
 /// use ranga::pixel::{PixelBuffer, PixelFormat};
 /// use ranga::blend::BlendMode;
 ///
-/// let ctx = GpuContext::new().unwrap();
+/// let mut ctx = GpuContext::new().unwrap();
 /// let src = PixelBuffer::zeroed(1920, 1080, PixelFormat::Rgba8);
 /// let mut dst = PixelBuffer::zeroed(1920, 1080, PixelFormat::Rgba8);
-/// gpu_blend(&ctx, &src, &mut dst, BlendMode::Normal, 1.0).unwrap();
+/// gpu_blend(&mut ctx, &src, &mut dst, BlendMode::Normal, 1.0).unwrap();
 /// ```
 pub fn gpu_blend(
-    ctx: &GpuContext,
+    ctx: &mut GpuContext,
     src: &PixelBuffer,
     dst: &mut PixelBuffer,
     mode: BlendMode,
@@ -60,31 +60,14 @@ pub fn gpu_blend(
 
     let pixel_count = u32::try_from(src.pixel_count())
         .map_err(|_| RangaError::Other("gpu_blend: pixel count exceeds u32::MAX".into()))?;
-    let mode_id: u32 = match mode {
-        BlendMode::Normal => 0,
-        BlendMode::Multiply => 1,
-        BlendMode::Screen => 2,
-        BlendMode::Overlay => 3,
-        BlendMode::Darken => 4,
-        BlendMode::Lighten => 5,
-        BlendMode::ColorDodge => 6,
-        BlendMode::ColorBurn => 7,
-        BlendMode::SoftLight => 8,
-        BlendMode::HardLight => 9,
-        BlendMode::Difference => 10,
-        BlendMode::Exclusion => 11,
-    };
+    let mode_id: u32 = blend_mode_id(mode);
 
     let src_gpu = GpuBuffer::upload(ctx, src);
     let dst_gpu = GpuBuffer::upload(ctx, dst);
 
     // Params: count, mode, opacity, padding — matches shader Params struct
     let params = [pixel_count, mode_id, opacity.to_bits(), 0u32];
-    // SAFETY: params is a contiguous array of u32, reinterpreted as bytes.
-    // Alignment is satisfied (u8 has alignment 1) and the size is exact.
-    let params_bytes: &[u8] = unsafe {
-        std::slice::from_raw_parts(params.as_ptr().cast::<u8>(), std::mem::size_of_val(&params))
-    };
+    let params_bytes = params_to_bytes(&params);
 
     dispatch_3buf_shader(
         ctx,
@@ -116,11 +99,11 @@ pub fn gpu_blend(
 /// use ranga::gpu::{GpuContext, gpu_invert};
 /// use ranga::pixel::{PixelBuffer, PixelFormat};
 ///
-/// let ctx = GpuContext::new().unwrap();
+/// let mut ctx = GpuContext::new().unwrap();
 /// let mut buf = PixelBuffer::new(vec![100, 150, 200, 255], 1, 1, PixelFormat::Rgba8).unwrap();
-/// gpu_invert(&ctx, &mut buf).unwrap();
+/// gpu_invert(&mut ctx, &mut buf).unwrap();
 /// ```
-pub fn gpu_invert(ctx: &GpuContext, buf: &mut PixelBuffer) -> Result<(), RangaError> {
+pub fn gpu_invert(ctx: &mut GpuContext, buf: &mut PixelBuffer) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
         return Err(RangaError::InvalidFormat(format!(
             "gpu_invert: expected Rgba8, got {:?}",
@@ -131,11 +114,7 @@ pub fn gpu_invert(ctx: &GpuContext, buf: &mut PixelBuffer) -> Result<(), RangaEr
         .map_err(|_| RangaError::Other("gpu_invert: pixel count exceeds u32::MAX".into()))?;
     let gpu_buf = GpuBuffer::upload(ctx, buf);
     let params = [pixel_count];
-    // SAFETY: params is a contiguous array of u32, reinterpreted as bytes.
-    // Alignment is satisfied (u8 has alignment 1) and the size is exact.
-    let params_bytes: &[u8] = unsafe {
-        std::slice::from_raw_parts(params.as_ptr().cast::<u8>(), std::mem::size_of_val(&params))
-    };
+    let params_bytes = params_to_bytes(&params);
     dispatch_1buf_shader(
         ctx,
         "invert",
@@ -164,11 +143,11 @@ pub fn gpu_invert(ctx: &GpuContext, buf: &mut PixelBuffer) -> Result<(), RangaEr
 /// use ranga::gpu::{GpuContext, gpu_grayscale};
 /// use ranga::pixel::{PixelBuffer, PixelFormat};
 ///
-/// let ctx = GpuContext::new().unwrap();
+/// let mut ctx = GpuContext::new().unwrap();
 /// let mut buf = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
-/// gpu_grayscale(&ctx, &mut buf).unwrap();
+/// gpu_grayscale(&mut ctx, &mut buf).unwrap();
 /// ```
-pub fn gpu_grayscale(ctx: &GpuContext, buf: &mut PixelBuffer) -> Result<(), RangaError> {
+pub fn gpu_grayscale(ctx: &mut GpuContext, buf: &mut PixelBuffer) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
         return Err(RangaError::InvalidFormat(format!(
             "gpu_grayscale: expected Rgba8, got {:?}",
@@ -179,11 +158,7 @@ pub fn gpu_grayscale(ctx: &GpuContext, buf: &mut PixelBuffer) -> Result<(), Rang
         .map_err(|_| RangaError::Other("gpu_grayscale: pixel count exceeds u32::MAX".into()))?;
     let gpu_buf = GpuBuffer::upload(ctx, buf);
     let params = [pixel_count];
-    // SAFETY: params is a contiguous array of u32, reinterpreted as bytes.
-    // Alignment is satisfied (u8 has alignment 1) and the size is exact.
-    let params_bytes: &[u8] = unsafe {
-        std::slice::from_raw_parts(params.as_ptr().cast::<u8>(), std::mem::size_of_val(&params))
-    };
+    let params_bytes = params_to_bytes(&params);
     dispatch_1buf_shader(
         ctx,
         "grayscale",
@@ -212,12 +187,12 @@ pub fn gpu_grayscale(ctx: &GpuContext, buf: &mut PixelBuffer) -> Result<(), Rang
 /// use ranga::gpu::{GpuContext, gpu_brightness_contrast};
 /// use ranga::pixel::{PixelBuffer, PixelFormat};
 ///
-/// let ctx = GpuContext::new().unwrap();
+/// let mut ctx = GpuContext::new().unwrap();
 /// let mut buf = PixelBuffer::zeroed(128, 128, PixelFormat::Rgba8);
-/// gpu_brightness_contrast(&ctx, &mut buf, 0.1, 1.5).unwrap();
+/// gpu_brightness_contrast(&mut ctx, &mut buf, 0.1, 1.5).unwrap();
 /// ```
 pub fn gpu_brightness_contrast(
-    ctx: &GpuContext,
+    ctx: &mut GpuContext,
     buf: &mut PixelBuffer,
     brightness: f32,
     contrast: f32,
@@ -233,11 +208,7 @@ pub fn gpu_brightness_contrast(
     })?;
     let gpu_buf = GpuBuffer::upload(ctx, buf);
     let params = [pixel_count, brightness.to_bits(), contrast.to_bits(), 0u32];
-    // SAFETY: params is a contiguous array of u32, reinterpreted as bytes.
-    // Alignment is satisfied (u8 has alignment 1) and the size is exact.
-    let params_bytes: &[u8] = unsafe {
-        std::slice::from_raw_parts(params.as_ptr().cast::<u8>(), std::mem::size_of_val(&params))
-    };
+    let params_bytes = params_to_bytes(&params);
     dispatch_1buf_shader(
         ctx,
         "brightness_contrast",
@@ -266,12 +237,12 @@ pub fn gpu_brightness_contrast(
 /// use ranga::gpu::{GpuContext, gpu_saturation};
 /// use ranga::pixel::{PixelBuffer, PixelFormat};
 ///
-/// let ctx = GpuContext::new().unwrap();
+/// let mut ctx = GpuContext::new().unwrap();
 /// let mut buf = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
-/// gpu_saturation(&ctx, &mut buf, 0.5).unwrap();
+/// gpu_saturation(&mut ctx, &mut buf, 0.5).unwrap();
 /// ```
 pub fn gpu_saturation(
-    ctx: &GpuContext,
+    ctx: &mut GpuContext,
     buf: &mut PixelBuffer,
     factor: f32,
 ) -> Result<(), RangaError> {
@@ -285,11 +256,7 @@ pub fn gpu_saturation(
         .map_err(|_| RangaError::Other("gpu_saturation: pixel count exceeds u32::MAX".into()))?;
     let gpu_buf = GpuBuffer::upload(ctx, buf);
     let params = [pixel_count, factor.to_bits(), 0u32, 0u32];
-    // SAFETY: params is a contiguous array of u32, reinterpreted as bytes.
-    // Alignment is satisfied (u8 has alignment 1) and the size is exact.
-    let params_bytes: &[u8] = unsafe {
-        std::slice::from_raw_parts(params.as_ptr().cast::<u8>(), std::mem::size_of_val(&params))
-    };
+    let params_bytes = params_to_bytes(&params);
     dispatch_1buf_shader(
         ctx,
         "saturation",
@@ -319,12 +286,12 @@ pub fn gpu_saturation(
 /// use ranga::gpu::{GpuContext, gpu_noise_gaussian};
 /// use ranga::pixel::{PixelBuffer, PixelFormat};
 ///
-/// let ctx = GpuContext::new().unwrap();
+/// let mut ctx = GpuContext::new().unwrap();
 /// let mut buf = PixelBuffer::new(vec![128; 64 * 64 * 4], 64, 64, PixelFormat::Rgba8).unwrap();
-/// gpu_noise_gaussian(&ctx, &mut buf, 0.1, 42).unwrap();
+/// gpu_noise_gaussian(&mut ctx, &mut buf, 0.1, 42).unwrap();
 /// ```
 pub fn gpu_noise_gaussian(
-    ctx: &GpuContext,
+    ctx: &mut GpuContext,
     buf: &mut PixelBuffer,
     strength: f32,
     seed: u32,
@@ -372,13 +339,13 @@ pub fn gpu_noise_gaussian(
 /// use ranga::gpu::{GpuContext, gpu_dissolve};
 /// use ranga::pixel::{PixelBuffer, PixelFormat};
 ///
-/// let ctx = GpuContext::new().unwrap();
+/// let mut ctx = GpuContext::new().unwrap();
 /// let src = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
 /// let mut dst = PixelBuffer::new(vec![255; 64 * 64 * 4], 64, 64, PixelFormat::Rgba8).unwrap();
-/// gpu_dissolve(&ctx, &src, &mut dst, 0.5).unwrap();
+/// gpu_dissolve(&mut ctx, &src, &mut dst, 0.5).unwrap();
 /// ```
 pub fn gpu_dissolve(
-    ctx: &GpuContext,
+    ctx: &mut GpuContext,
     src: &PixelBuffer,
     dst: &mut PixelBuffer,
     factor: f32,
@@ -440,11 +407,15 @@ pub fn gpu_dissolve(
 /// use ranga::gpu::{GpuContext, gpu_fade};
 /// use ranga::pixel::{PixelBuffer, PixelFormat};
 ///
-/// let ctx = GpuContext::new().unwrap();
+/// let mut ctx = GpuContext::new().unwrap();
 /// let mut buf = PixelBuffer::new(vec![200; 64 * 64 * 4], 64, 64, PixelFormat::Rgba8).unwrap();
-/// gpu_fade(&ctx, &mut buf, 0.5).unwrap();
+/// gpu_fade(&mut ctx, &mut buf, 0.5).unwrap();
 /// ```
-pub fn gpu_fade(ctx: &GpuContext, buf: &mut PixelBuffer, factor: f32) -> Result<(), RangaError> {
+pub fn gpu_fade(
+    ctx: &mut GpuContext,
+    buf: &mut PixelBuffer,
+    factor: f32,
+) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
         return Err(RangaError::InvalidFormat(format!(
             "gpu_fade: expected Rgba8, got {:?}",
@@ -487,13 +458,13 @@ pub fn gpu_fade(ctx: &GpuContext, buf: &mut PixelBuffer, factor: f32) -> Result<
 /// use ranga::gpu::{GpuContext, gpu_wipe};
 /// use ranga::pixel::{PixelBuffer, PixelFormat};
 ///
-/// let ctx = GpuContext::new().unwrap();
+/// let mut ctx = GpuContext::new().unwrap();
 /// let src = PixelBuffer::new(vec![255; 64 * 64 * 4], 64, 64, PixelFormat::Rgba8).unwrap();
 /// let mut dst = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
-/// gpu_wipe(&ctx, &src, &mut dst, 0.5).unwrap();
+/// gpu_wipe(&mut ctx, &src, &mut dst, 0.5).unwrap();
 /// ```
 pub fn gpu_wipe(
-    ctx: &GpuContext,
+    ctx: &mut GpuContext,
     src: &PixelBuffer,
     dst: &mut PixelBuffer,
     progress: f32,
@@ -557,17 +528,17 @@ pub fn gpu_wipe(
 /// use ranga::gpu::{GpuContext, GpuChain};
 /// use ranga::pixel::{PixelBuffer, PixelFormat};
 ///
-/// let ctx = GpuContext::new().unwrap();
+/// let mut ctx = GpuContext::new().unwrap();
 /// let buf = PixelBuffer::zeroed(1920, 1080, PixelFormat::Rgba8);
-/// let result = GpuChain::new(&ctx, &buf).unwrap()
+/// let result = GpuChain::new(&mut ctx, &buf).unwrap()
 ///     .invert().unwrap()
 ///     .brightness_contrast(0.1, 1.2).unwrap()
 ///     .saturation(1.5).unwrap()
 ///     .finish().unwrap();
-/// assert_eq!(result.width, 1920);
+/// assert_eq!(result.width(), 1920);
 /// ```
 pub struct GpuChain<'a> {
-    ctx: &'a GpuContext,
+    ctx: &'a mut GpuContext,
     /// Current GPU buffer being operated on (ping).
     buf_a: GpuBuffer,
     /// Secondary buffer for operations that need a separate output (pong).
@@ -595,12 +566,12 @@ impl<'a> GpuChain<'a> {
     /// use ranga::gpu::{GpuContext, GpuChain};
     /// use ranga::pixel::{PixelBuffer, PixelFormat};
     ///
-    /// let ctx = GpuContext::new().unwrap();
+    /// let mut ctx = GpuContext::new().unwrap();
     /// let buf = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
-    /// let chain = GpuChain::new(&ctx, &buf).unwrap();
+    /// let chain = GpuChain::new(&mut ctx, &buf).unwrap();
     /// ```
     #[must_use = "returns a new GPU processing chain"]
-    pub fn new(ctx: &'a GpuContext, buf: &PixelBuffer) -> Result<Self, RangaError> {
+    pub fn new(ctx: &'a mut GpuContext, buf: &PixelBuffer) -> Result<Self, RangaError> {
         if buf.format != PixelFormat::Rgba8 {
             return Err(RangaError::InvalidFormat(format!(
                 "GpuChain::new: expected Rgba8, got {:?}",
@@ -625,26 +596,6 @@ impl<'a> GpuChain<'a> {
         })
     }
 
-    /// Reference to whichever buffer is currently active.
-    #[must_use]
-    fn current_buf(&self) -> &GpuBuffer {
-        if self.current_is_a {
-            &self.buf_a
-        } else {
-            &self.buf_b
-        }
-    }
-
-    /// Reference to whichever buffer is NOT currently active.
-    #[must_use]
-    fn other_buf(&self) -> &GpuBuffer {
-        if self.current_is_a {
-            &self.buf_b
-        } else {
-            &self.buf_a
-        }
-    }
-
     /// Apply color inversion (in-place on current buffer).
     ///
     /// Inverts R, G, B channels while preserving alpha.
@@ -659,20 +610,25 @@ impl<'a> GpuChain<'a> {
     /// use ranga::gpu::{GpuContext, GpuChain};
     /// use ranga::pixel::{PixelBuffer, PixelFormat};
     ///
-    /// let ctx = GpuContext::new().unwrap();
+    /// let mut ctx = GpuContext::new().unwrap();
     /// let buf = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
-    /// let result = GpuChain::new(&ctx, &buf).unwrap()
+    /// let result = GpuChain::new(&mut ctx, &buf).unwrap()
     ///     .invert().unwrap()
     ///     .finish().unwrap();
     /// ```
     pub fn invert(self) -> Result<Self, RangaError> {
         let params = [self.pixel_count];
         let params_bytes = params_to_bytes(&params);
+        let current = if self.current_is_a {
+            &self.buf_a
+        } else {
+            &self.buf_b
+        };
         dispatch_1buf_shader(
             self.ctx,
             "invert",
             &shaders::build_shader(shaders::INVERT),
-            self.current_buf().wgpu_buffer(),
+            current.wgpu_buffer(),
             params_bytes,
             self.pixel_count.div_ceil(256),
         )?;
@@ -693,9 +649,9 @@ impl<'a> GpuChain<'a> {
     /// use ranga::gpu::{GpuContext, GpuChain};
     /// use ranga::pixel::{PixelBuffer, PixelFormat};
     ///
-    /// let ctx = GpuContext::new().unwrap();
+    /// let mut ctx = GpuContext::new().unwrap();
     /// let buf = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
-    /// let result = GpuChain::new(&ctx, &buf).unwrap()
+    /// let result = GpuChain::new(&mut ctx, &buf).unwrap()
     ///     .grayscale().unwrap()
     ///     .finish().unwrap();
     /// ```
@@ -706,7 +662,12 @@ impl<'a> GpuChain<'a> {
             self.ctx,
             "grayscale",
             &shaders::build_shader(shaders::GRAYSCALE),
-            self.current_buf().wgpu_buffer(),
+            (if self.current_is_a {
+                &self.buf_a
+            } else {
+                &self.buf_b
+            })
+            .wgpu_buffer(),
             params_bytes,
             self.pixel_count.div_ceil(256),
         )?;
@@ -728,9 +689,9 @@ impl<'a> GpuChain<'a> {
     /// use ranga::gpu::{GpuContext, GpuChain};
     /// use ranga::pixel::{PixelBuffer, PixelFormat};
     ///
-    /// let ctx = GpuContext::new().unwrap();
+    /// let mut ctx = GpuContext::new().unwrap();
     /// let buf = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
-    /// let result = GpuChain::new(&ctx, &buf).unwrap()
+    /// let result = GpuChain::new(&mut ctx, &buf).unwrap()
     ///     .brightness_contrast(0.1, 1.2).unwrap()
     ///     .finish().unwrap();
     /// ```
@@ -746,7 +707,12 @@ impl<'a> GpuChain<'a> {
             self.ctx,
             "brightness_contrast",
             &shaders::build_shader(shaders::BRIGHTNESS_CONTRAST),
-            self.current_buf().wgpu_buffer(),
+            (if self.current_is_a {
+                &self.buf_a
+            } else {
+                &self.buf_b
+            })
+            .wgpu_buffer(),
             params_bytes,
             self.pixel_count.div_ceil(256),
         )?;
@@ -767,9 +733,9 @@ impl<'a> GpuChain<'a> {
     /// use ranga::gpu::{GpuContext, GpuChain};
     /// use ranga::pixel::{PixelBuffer, PixelFormat};
     ///
-    /// let ctx = GpuContext::new().unwrap();
+    /// let mut ctx = GpuContext::new().unwrap();
     /// let buf = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
-    /// let result = GpuChain::new(&ctx, &buf).unwrap()
+    /// let result = GpuChain::new(&mut ctx, &buf).unwrap()
     ///     .saturation(1.5).unwrap()
     ///     .finish().unwrap();
     /// ```
@@ -780,7 +746,12 @@ impl<'a> GpuChain<'a> {
             self.ctx,
             "saturation",
             &shaders::build_shader(shaders::SATURATION),
-            self.current_buf().wgpu_buffer(),
+            (if self.current_is_a {
+                &self.buf_a
+            } else {
+                &self.buf_b
+            })
+            .wgpu_buffer(),
             params_bytes,
             self.pixel_count.div_ceil(256),
         )?;
@@ -802,9 +773,9 @@ impl<'a> GpuChain<'a> {
     /// use ranga::gpu::{GpuContext, GpuChain};
     /// use ranga::pixel::{PixelBuffer, PixelFormat};
     ///
-    /// let ctx = GpuContext::new().unwrap();
+    /// let mut ctx = GpuContext::new().unwrap();
     /// let buf = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
-    /// let result = GpuChain::new(&ctx, &buf).unwrap()
+    /// let result = GpuChain::new(&mut ctx, &buf).unwrap()
     ///     .noise_gaussian(0.1, 42).unwrap()
     ///     .finish().unwrap();
     /// ```
@@ -815,7 +786,12 @@ impl<'a> GpuChain<'a> {
             self.ctx,
             "noise_gaussian",
             &shaders::build_shader(shaders::NOISE_GAUSSIAN),
-            self.current_buf().wgpu_buffer(),
+            (if self.current_is_a {
+                &self.buf_a
+            } else {
+                &self.buf_b
+            })
+            .wgpu_buffer(),
             params_bytes,
             self.pixel_count.div_ceil(256),
         )?;
@@ -838,10 +814,10 @@ impl<'a> GpuChain<'a> {
     /// use ranga::gpu::{GpuContext, GpuChain};
     /// use ranga::pixel::{PixelBuffer, PixelFormat};
     ///
-    /// let ctx = GpuContext::new().unwrap();
+    /// let mut ctx = GpuContext::new().unwrap();
     /// let buf = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
     /// let other = PixelBuffer::new(vec![255; 64 * 64 * 4], 64, 64, PixelFormat::Rgba8).unwrap();
-    /// let result = GpuChain::new(&ctx, &buf).unwrap()
+    /// let result = GpuChain::new(&mut ctx, &buf).unwrap()
     ///     .dissolve(&other, 0.5).unwrap()
     ///     .finish().unwrap();
     /// ```
@@ -868,7 +844,12 @@ impl<'a> GpuChain<'a> {
             "dissolve",
             &shaders::build_shader(shaders::DISSOLVE),
             src_gpu.wgpu_buffer(),
-            self.current_buf().wgpu_buffer(),
+            (if self.current_is_a {
+                &self.buf_a
+            } else {
+                &self.buf_b
+            })
+            .wgpu_buffer(),
             params_bytes,
             self.pixel_count.div_ceil(256),
         )?;
@@ -891,9 +872,9 @@ impl<'a> GpuChain<'a> {
     /// use ranga::gpu::{GpuContext, GpuChain};
     /// use ranga::pixel::{PixelBuffer, PixelFormat};
     ///
-    /// let ctx = GpuContext::new().unwrap();
+    /// let mut ctx = GpuContext::new().unwrap();
     /// let buf = PixelBuffer::new(vec![200; 64 * 64 * 4], 64, 64, PixelFormat::Rgba8).unwrap();
-    /// let result = GpuChain::new(&ctx, &buf).unwrap()
+    /// let result = GpuChain::new(&mut ctx, &buf).unwrap()
     ///     .fade(0.5).unwrap()
     ///     .finish().unwrap();
     /// ```
@@ -904,7 +885,12 @@ impl<'a> GpuChain<'a> {
             self.ctx,
             "fade",
             &shaders::build_shader(shaders::FADE),
-            self.current_buf().wgpu_buffer(),
+            (if self.current_is_a {
+                &self.buf_a
+            } else {
+                &self.buf_b
+            })
+            .wgpu_buffer(),
             params_bytes,
             self.pixel_count.div_ceil(256),
         )?;
@@ -928,10 +914,10 @@ impl<'a> GpuChain<'a> {
     /// use ranga::gpu::{GpuContext, GpuChain};
     /// use ranga::pixel::{PixelBuffer, PixelFormat};
     ///
-    /// let ctx = GpuContext::new().unwrap();
+    /// let mut ctx = GpuContext::new().unwrap();
     /// let buf = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
     /// let other = PixelBuffer::new(vec![255; 64 * 64 * 4], 64, 64, PixelFormat::Rgba8).unwrap();
-    /// let result = GpuChain::new(&ctx, &buf).unwrap()
+    /// let result = GpuChain::new(&mut ctx, &buf).unwrap()
     ///     .wipe(&other, 0.5).unwrap()
     ///     .finish().unwrap();
     /// ```
@@ -963,7 +949,12 @@ impl<'a> GpuChain<'a> {
             "wipe",
             &shaders::build_shader(shaders::WIPE),
             src_gpu.wgpu_buffer(),
-            self.current_buf().wgpu_buffer(),
+            (if self.current_is_a {
+                &self.buf_a
+            } else {
+                &self.buf_b
+            })
+            .wgpu_buffer(),
             params_bytes,
             self.pixel_count.div_ceil(256),
         )?;
@@ -989,9 +980,9 @@ impl<'a> GpuChain<'a> {
     /// use ranga::gpu::{GpuContext, GpuChain};
     /// use ranga::pixel::{PixelBuffer, PixelFormat};
     ///
-    /// let ctx = GpuContext::new().unwrap();
+    /// let mut ctx = GpuContext::new().unwrap();
     /// let buf = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
-    /// let result = GpuChain::new(&ctx, &buf).unwrap()
+    /// let result = GpuChain::new(&mut ctx, &buf).unwrap()
     ///     .gaussian_blur(3).unwrap()
     ///     .finish().unwrap();
     /// ```
@@ -1010,18 +1001,14 @@ impl<'a> GpuChain<'a> {
             )
         };
 
-        use wgpu::util::DeviceExt;
-        let kernel_gpu = self
-            .ctx
-            .device()
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("blur_kernel"),
-                contents: kernel_bytes,
-                usage: wgpu::BufferUsages::STORAGE,
-            });
+        let kernel_gpu = mabda::buffer::create_storage_buffer(
+            self.ctx.device(),
+            kernel_bytes,
+            "blur_kernel",
+            true,
+        );
 
         let params = [self.width, self.height, radius, 0u32];
-        // SAFETY: params is a contiguous array of u32, reinterpreted as bytes.
         let params_bytes: &[u8] = unsafe {
             std::slice::from_raw_parts(params.as_ptr().cast::<u8>(), std::mem::size_of_val(&params))
         };
@@ -1034,8 +1021,18 @@ impl<'a> GpuChain<'a> {
             self.ctx,
             "blur_horizontal",
             &shaders::build_shader(shaders::BLUR_HORIZONTAL),
-            self.current_buf().wgpu_buffer(),
-            self.other_buf().wgpu_buffer(),
+            (if self.current_is_a {
+                &self.buf_a
+            } else {
+                &self.buf_b
+            })
+            .wgpu_buffer(),
+            (if self.current_is_a {
+                &self.buf_b
+            } else {
+                &self.buf_a
+            })
+            .wgpu_buffer(),
             &kernel_gpu,
             params_bytes,
             workgroups_x,
@@ -1048,8 +1045,18 @@ impl<'a> GpuChain<'a> {
             self.ctx,
             "blur_vertical",
             &shaders::build_shader(shaders::BLUR_VERTICAL),
-            self.other_buf().wgpu_buffer(),
-            self.current_buf().wgpu_buffer(),
+            (if self.current_is_a {
+                &self.buf_b
+            } else {
+                &self.buf_a
+            })
+            .wgpu_buffer(),
+            (if self.current_is_a {
+                &self.buf_a
+            } else {
+                &self.buf_b
+            })
+            .wgpu_buffer(),
             &kernel_gpu,
             params_bytes,
             workgroups_x,
@@ -1077,10 +1084,10 @@ impl<'a> GpuChain<'a> {
     /// use ranga::pixel::{PixelBuffer, PixelFormat};
     /// use ranga::blend::BlendMode;
     ///
-    /// let ctx = GpuContext::new().unwrap();
+    /// let mut ctx = GpuContext::new().unwrap();
     /// let base = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
     /// let overlay = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
-    /// let result = GpuChain::new(&ctx, &base).unwrap()
+    /// let result = GpuChain::new(&mut ctx, &base).unwrap()
     ///     .blend(&overlay, BlendMode::Normal, 0.5).unwrap()
     ///     .finish().unwrap();
     /// ```
@@ -1103,20 +1110,7 @@ impl<'a> GpuChain<'a> {
             });
         }
 
-        let mode_id: u32 = match mode {
-            BlendMode::Normal => 0,
-            BlendMode::Multiply => 1,
-            BlendMode::Screen => 2,
-            BlendMode::Overlay => 3,
-            BlendMode::Darken => 4,
-            BlendMode::Lighten => 5,
-            BlendMode::ColorDodge => 6,
-            BlendMode::ColorBurn => 7,
-            BlendMode::SoftLight => 8,
-            BlendMode::HardLight => 9,
-            BlendMode::Difference => 10,
-            BlendMode::Exclusion => 11,
-        };
+        let mode_id: u32 = blend_mode_id(mode);
 
         let src_gpu = GpuBuffer::upload(self.ctx, other);
 
@@ -1130,7 +1124,12 @@ impl<'a> GpuChain<'a> {
             "blend_all",
             &shaders::build_shader(shaders::BLEND_ALL),
             src_gpu.wgpu_buffer(),
-            self.current_buf().wgpu_buffer(),
+            (if self.current_is_a {
+                &self.buf_a
+            } else {
+                &self.buf_b
+            })
+            .wgpu_buffer(),
             params_bytes,
             self.pixel_count.div_ceil(256),
         )?;
@@ -1153,16 +1152,21 @@ impl<'a> GpuChain<'a> {
     /// use ranga::gpu::{GpuContext, GpuChain};
     /// use ranga::pixel::{PixelBuffer, PixelFormat};
     ///
-    /// let ctx = GpuContext::new().unwrap();
+    /// let mut ctx = GpuContext::new().unwrap();
     /// let buf = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
-    /// let result = GpuChain::new(&ctx, &buf).unwrap()
+    /// let result = GpuChain::new(&mut ctx, &buf).unwrap()
     ///     .invert().unwrap()
     ///     .finish().unwrap();
-    /// assert_eq!(result.width, 64);
+    /// assert_eq!(result.width(), 64);
     /// ```
     #[must_use = "returns the final processed buffer"]
     pub fn finish(self) -> Result<PixelBuffer, RangaError> {
-        self.current_buf().download(self.ctx).map_err(Into::into)
+        let current = if self.current_is_a {
+            &self.buf_a
+        } else {
+            &self.buf_b
+        };
+        current.download(self.ctx).map_err(Into::into)
     }
 }
 
@@ -1181,42 +1185,94 @@ fn params_to_bytes(params: &[u32]) -> &[u8] {
     }
 }
 
+/// Convert a [`BlendMode`] to shader mode ID.
+#[inline]
+fn blend_mode_id(mode: BlendMode) -> u32 {
+    match mode {
+        BlendMode::Normal => 0,
+        BlendMode::Multiply => 1,
+        BlendMode::Screen => 2,
+        BlendMode::Overlay => 3,
+        BlendMode::Darken => 4,
+        BlendMode::Lighten => 5,
+        BlendMode::ColorDodge => 6,
+        BlendMode::ColorBurn => 7,
+        BlendMode::SoftLight => 8,
+        BlendMode::HardLight => 9,
+        BlendMode::Difference => 10,
+        BlendMode::Exclusion => 11,
+    }
+}
+
 // ── Internal dispatch helpers ──────────────────────────────────────────────
+
+/// Look up or create a 1-buffer pipeline, returning a raw pointer.
+///
+/// The raw pointer is valid for the lifetime of `ctx` because the cache
+/// owns the pipeline and entries are never removed during normal operation.
+fn ensure_pipeline_1buf(
+    ctx: &mut GpuContext,
+    name: &'static str,
+    shader_src: &str,
+) -> Result<*const mabda::compute::ComputePipeline, RangaError> {
+    let pipeline = ctx.get_or_create_pipeline_1buf(name, shader_src)?;
+    Ok(pipeline as *const _)
+}
+
+/// Look up or create a 3-buffer pipeline, returning a raw pointer.
+fn ensure_pipeline_3buf(
+    ctx: &mut GpuContext,
+    name: &'static str,
+    shader_src: &str,
+) -> Result<*const mabda::compute::ComputePipeline, RangaError> {
+    let pipeline = ctx.get_or_create_pipeline_3buf(name, shader_src)?;
+    Ok(pipeline as *const _)
+}
+
+/// Look up or create a 4-buffer pipeline, returning a raw pointer.
+fn ensure_pipeline_4buf(
+    ctx: &mut GpuContext,
+    name: &'static str,
+    shader_src: &str,
+) -> Result<*const mabda::compute::ComputePipeline, RangaError> {
+    let pipeline = ctx.get_or_create_pipeline_4buf(name, shader_src)?;
+    Ok(pipeline as *const _)
+}
 
 /// Dispatch a compute shader with 1 storage buffer + 1 uniform buffer.
 ///
 /// Uses the pipeline cache on [`GpuContext`] to avoid redundant compilation.
 /// The uniform buffer is padded to 16-byte alignment as required by wgpu.
 fn dispatch_1buf_shader(
-    ctx: &GpuContext,
+    ctx: &mut GpuContext,
     name: &'static str,
     shader_src: &str,
     storage_buf: &wgpu::Buffer,
     params_data: &[u8],
     workgroups: u32,
 ) -> Result<(), RangaError> {
-    // Get or create the cached pipeline (returns raw pointer to avoid holding borrow)
-    let pipeline_ptr = ctx.get_or_create_pipeline_1buf(name, shader_src)?;
+    // Get pipeline pointer (drops mutable borrow of cache after this line)
+    let pipeline_ptr = ensure_pipeline_1buf(ctx, name, shader_src)?;
+
+    // SAFETY: pipeline_ptr is valid for the lifetime of ctx.cache.
+    // The cache is only mutated during pipeline creation (above), not during dispatch.
+    let pipeline = unsafe { &*pipeline_ptr };
 
     // Pad uniform buffer to 16-byte alignment
     let aligned_size = params_data.len().div_ceil(16) * 16;
     let mut aligned_data = vec![0u8; aligned_size];
     aligned_data[..params_data.len()].copy_from_slice(params_data);
 
-    let params_buf = ctx.device().create_buffer(&wgpu::BufferDescriptor {
-        label: Some("params"),
-        size: aligned_size as u64,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    ctx.queue().write_buffer(&params_buf, 0, &aligned_data);
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let params_buf = mabda::buffer::create_uniform_buffer(device, &aligned_data, "params");
 
-    let bgl = ctx.bind_group_layout_1buf().ok_or_else(|| {
-        RangaError::Other("GPU 1-buffer bind group layout not initialized".into())
-    })?;
-    let bg = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+    let bgl = pipeline
+        .bind_group_layout(0)
+        .ok_or_else(|| RangaError::Other("bind group layout not found".into()))?;
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
-        layout: &bgl,
+        layout: bgl,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -1228,28 +1284,8 @@ fn dispatch_1buf_shader(
             },
         ],
     });
-    // Drop the Ref before submitting (not strictly required, but clean)
-    drop(bgl);
 
-    // SAFETY: The pipeline pointer remains valid because GpuContext owns the cache
-    // and we hold a shared reference to GpuContext for the duration of this function.
-    // SAFETY: pipeline_ptr is valid for the lifetime of ctx.cache (RefCell<PipelineCache>).
-    // The borrow is dropped before this point, so no aliasing conflict.
-    let pipeline = unsafe { &*pipeline_ptr };
-
-    let mut encoder = ctx
-        .device()
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-    {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: None,
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &bg, &[]);
-        pass.dispatch_workgroups(workgroups, 1, 1);
-    }
-    ctx.queue().submit(Some(encoder.finish()));
+    pipeline.dispatch(device, queue, &bg, workgroups, 1, 1);
     Ok(())
 }
 
@@ -1258,7 +1294,7 @@ fn dispatch_1buf_shader(
 /// Uses the pipeline cache on [`GpuContext`] to avoid redundant compilation.
 /// The uniform buffer is padded to 16-byte alignment as required by wgpu.
 fn dispatch_3buf_shader(
-    ctx: &GpuContext,
+    ctx: &mut GpuContext,
     name: &'static str,
     shader_src: &str,
     src_buf: &wgpu::Buffer,
@@ -1266,26 +1302,24 @@ fn dispatch_3buf_shader(
     params_data: &[u8],
     workgroups: u32,
 ) -> Result<(), RangaError> {
-    let pipeline_ptr = ctx.get_or_create_pipeline_3buf(name, shader_src)?;
+    let pipeline_ptr = ensure_pipeline_3buf(ctx, name, shader_src)?;
+    // SAFETY: pipeline_ptr valid for lifetime of ctx.cache — see ensure_pipeline_3buf.
+    let pipeline = unsafe { &*pipeline_ptr };
 
     let aligned_size = params_data.len().div_ceil(16) * 16;
     let mut aligned_data = vec![0u8; aligned_size];
     aligned_data[..params_data.len()].copy_from_slice(params_data);
 
-    let params_buf = ctx.device().create_buffer(&wgpu::BufferDescriptor {
-        label: Some("params"),
-        size: aligned_size as u64,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    ctx.queue().write_buffer(&params_buf, 0, &aligned_data);
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let params_buf = mabda::buffer::create_uniform_buffer(device, &aligned_data, "params");
 
-    let bgl = ctx.bind_group_layout_3buf().ok_or_else(|| {
-        RangaError::Other("GPU 3-buffer bind group layout not initialized".into())
-    })?;
-    let bg = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+    let bgl = pipeline
+        .bind_group_layout(0)
+        .ok_or_else(|| RangaError::Other("bind group layout not found".into()))?;
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
-        layout: &bgl,
+        layout: bgl,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -1301,27 +1335,122 @@ fn dispatch_3buf_shader(
             },
         ],
     });
-    drop(bgl);
 
-    // SAFETY: The pipeline pointer remains valid because GpuContext owns the cache
-    // and we hold a shared reference to GpuContext for the duration of this function.
-    // SAFETY: pipeline_ptr is valid for the lifetime of ctx.cache (RefCell<PipelineCache>).
-    // The borrow is dropped before this point, so no aliasing conflict.
+    pipeline.dispatch(device, queue, &bg, workgroups, 1, 1);
+    Ok(())
+}
+
+/// Dispatch a 2D compute shader with 3 bindings (input read, output write, params uniform).
+///
+/// Similar to [`dispatch_blur_shader`] but without the kernel buffer.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_2d_3buf_shader(
+    ctx: &mut GpuContext,
+    name: &'static str,
+    shader_src: &str,
+    input_buf: &wgpu::Buffer,
+    output_buf: &wgpu::Buffer,
+    params_data: &[u8],
+    workgroups_x: u32,
+    workgroups_y: u32,
+) -> Result<(), RangaError> {
+    let pipeline_ptr = ensure_pipeline_3buf(ctx, name, shader_src)?;
+    // SAFETY: pipeline_ptr valid for lifetime of ctx.cache — see ensure_pipeline_3buf.
     let pipeline = unsafe { &*pipeline_ptr };
 
-    let mut encoder = ctx
-        .device()
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-    {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: None,
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &bg, &[]);
-        pass.dispatch_workgroups(workgroups, 1, 1);
-    }
-    ctx.queue().submit(Some(encoder.finish()));
+    // Pad params to 16-byte alignment
+    let aligned_size = params_data.len().div_ceil(16) * 16;
+    let mut aligned_data = vec![0u8; aligned_size];
+    aligned_data[..params_data.len()].copy_from_slice(params_data);
+
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let params_buf =
+        mabda::buffer::create_uniform_buffer(device, &aligned_data, "transform_params");
+
+    let bgl = pipeline
+        .bind_group_layout(0)
+        .ok_or_else(|| RangaError::Other("bind group layout not found".into()))?;
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: input_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: output_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: params_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    pipeline.dispatch(device, queue, &bg, workgroups_x, workgroups_y, 1);
+    Ok(())
+}
+
+/// Dispatch a blur compute shader with 4 bindings (input, output, kernel, params).
+///
+/// Uses a dedicated bind group layout with read-only input, read-write output,
+/// read-only kernel storage, and a uniform params buffer. The pipeline is cached
+/// by name on the context.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_blur_shader(
+    ctx: &mut GpuContext,
+    name: &'static str,
+    shader_src: &str,
+    input_buf: &wgpu::Buffer,
+    output_buf: &wgpu::Buffer,
+    kernel_buf: &wgpu::Buffer,
+    params_data: &[u8],
+    workgroups_x: u32,
+    workgroups_y: u32,
+) -> Result<(), RangaError> {
+    let pipeline_ptr = ensure_pipeline_4buf(ctx, name, shader_src)?;
+    // SAFETY: pipeline_ptr valid for lifetime of ctx.cache — see ensure_pipeline_4buf.
+    let pipeline = unsafe { &*pipeline_ptr };
+
+    // Pad params to 16-byte alignment
+    let aligned_size = params_data.len().div_ceil(16) * 16;
+    let mut aligned_data = vec![0u8; aligned_size];
+    aligned_data[..params_data.len()].copy_from_slice(params_data);
+
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let params_buf = mabda::buffer::create_uniform_buffer(device, &aligned_data, "blur_params");
+
+    let bgl = pipeline
+        .bind_group_layout(0)
+        .ok_or_else(|| RangaError::Other("bind group layout not found".into()))?;
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: input_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: output_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: kernel_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: params_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    pipeline.dispatch(device, queue, &bg, workgroups_x, workgroups_y, 1);
     Ok(())
 }
 
@@ -1344,14 +1473,14 @@ fn dispatch_3buf_shader(
 /// use ranga::gpu::{GpuContext, gpu_gaussian_blur};
 /// use ranga::pixel::{PixelBuffer, PixelFormat};
 ///
-/// let ctx = GpuContext::new().unwrap();
+/// let mut ctx = GpuContext::new().unwrap();
 /// let buf = PixelBuffer::new(vec![128; 64 * 64 * 4], 64, 64, PixelFormat::Rgba8).unwrap();
-/// let blurred = gpu_gaussian_blur(&ctx, &buf, 3).unwrap();
-/// assert_eq!(blurred.width, 64);
+/// let blurred = gpu_gaussian_blur(&mut ctx, &buf, 3).unwrap();
+/// assert_eq!(blurred.width(), 64);
 /// ```
 #[must_use = "returns a new blurred buffer"]
 pub fn gpu_gaussian_blur(
-    ctx: &GpuContext,
+    ctx: &mut GpuContext,
     buf: &PixelBuffer,
     radius: u32,
 ) -> Result<PixelBuffer, RangaError> {
@@ -1389,14 +1518,8 @@ pub fn gpu_gaussian_blur(
         )
     };
 
-    use wgpu::util::DeviceExt;
-    let kernel_gpu = ctx
-        .device()
-        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("blur_kernel"),
-            contents: kernel_bytes,
-            usage: wgpu::BufferUsages::STORAGE,
-        });
+    let kernel_gpu =
+        mabda::buffer::create_storage_buffer(ctx.device(), kernel_bytes, "blur_kernel", true);
 
     // Params: width, height, radius, _pad
     let params = [w, h, radius, 0u32];
@@ -1478,15 +1601,15 @@ fn build_gaussian_kernel(radius: u32) -> Vec<f32> {
 /// use ranga::gpu::{GpuContext, gpu_crop};
 /// use ranga::pixel::{PixelBuffer, PixelFormat};
 ///
-/// let ctx = GpuContext::new().unwrap();
+/// let mut ctx = GpuContext::new().unwrap();
 /// let buf = PixelBuffer::zeroed(100, 100, PixelFormat::Rgba8);
-/// let cropped = gpu_crop(&ctx, &buf, 10, 20, 50, 60).unwrap();
-/// assert_eq!(cropped.width, 40);
-/// assert_eq!(cropped.height, 40);
+/// let cropped = gpu_crop(&mut ctx, &buf, 10, 20, 50, 60).unwrap();
+/// assert_eq!(cropped.width(), 40);
+/// assert_eq!(cropped.height(), 40);
 /// ```
 #[must_use = "returns a new cropped buffer"]
 pub fn gpu_crop(
-    ctx: &GpuContext,
+    ctx: &mut GpuContext,
     buf: &PixelBuffer,
     left: u32,
     top: u32,
@@ -1554,15 +1677,15 @@ pub fn gpu_crop(
 /// use ranga::pixel::{PixelBuffer, PixelFormat};
 /// use ranga::transform::ScaleFilter;
 ///
-/// let ctx = GpuContext::new().unwrap();
+/// let mut ctx = GpuContext::new().unwrap();
 /// let buf = PixelBuffer::zeroed(100, 100, PixelFormat::Rgba8);
-/// let resized = gpu_resize(&ctx, &buf, 200, 200, ScaleFilter::Bilinear).unwrap();
-/// assert_eq!(resized.width, 200);
-/// assert_eq!(resized.height, 200);
+/// let resized = gpu_resize(&mut ctx, &buf, 200, 200, ScaleFilter::Bilinear).unwrap();
+/// assert_eq!(resized.width(), 200);
+/// assert_eq!(resized.height(), 200);
 /// ```
 #[must_use = "returns a new resized buffer"]
 pub fn gpu_resize(
-    ctx: &GpuContext,
+    ctx: &mut GpuContext,
     buf: &PixelBuffer,
     new_w: u32,
     new_h: u32,
@@ -1628,15 +1751,18 @@ pub fn gpu_resize(
 /// use ranga::gpu::{GpuContext, gpu_flip_horizontal};
 /// use ranga::pixel::{PixelBuffer, PixelFormat};
 ///
-/// let ctx = GpuContext::new().unwrap();
+/// let mut ctx = GpuContext::new().unwrap();
 /// let buf = PixelBuffer::new(
 ///     vec![255, 0, 0, 255, 0, 255, 0, 255], 2, 1, PixelFormat::Rgba8,
 /// ).unwrap();
-/// let flipped = gpu_flip_horizontal(&ctx, &buf).unwrap();
-/// assert_eq!(flipped.data[0], 0); // green pixel now first
+/// let flipped = gpu_flip_horizontal(&mut ctx, &buf).unwrap();
+/// assert_eq!(flipped.data()[0], 0); // green pixel now first
 /// ```
 #[must_use = "returns a new flipped buffer"]
-pub fn gpu_flip_horizontal(ctx: &GpuContext, buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
+pub fn gpu_flip_horizontal(
+    ctx: &mut GpuContext,
+    buf: &PixelBuffer,
+) -> Result<PixelBuffer, RangaError> {
     if buf.format != PixelFormat::Rgba8 {
         return Err(RangaError::InvalidFormat(format!(
             "gpu_flip_horizontal: expected Rgba8, got {:?}",
@@ -1682,13 +1808,16 @@ pub fn gpu_flip_horizontal(ctx: &GpuContext, buf: &PixelBuffer) -> Result<PixelB
 /// use ranga::gpu::{GpuContext, gpu_flip_vertical};
 /// use ranga::pixel::{PixelBuffer, PixelFormat};
 ///
-/// let ctx = GpuContext::new().unwrap();
+/// let mut ctx = GpuContext::new().unwrap();
 /// let buf = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
-/// let flipped = gpu_flip_vertical(&ctx, &buf).unwrap();
-/// assert_eq!(flipped.width, 64);
+/// let flipped = gpu_flip_vertical(&mut ctx, &buf).unwrap();
+/// assert_eq!(flipped.width(), 64);
 /// ```
 #[must_use = "returns a new flipped buffer"]
-pub fn gpu_flip_vertical(ctx: &GpuContext, buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
+pub fn gpu_flip_vertical(
+    ctx: &mut GpuContext,
+    buf: &PixelBuffer,
+) -> Result<PixelBuffer, RangaError> {
     if buf.format != PixelFormat::Rgba8 {
         return Err(RangaError::InvalidFormat(format!(
             "gpu_flip_vertical: expected Rgba8, got {:?}",
@@ -1720,312 +1849,6 @@ pub fn gpu_flip_vertical(ctx: &GpuContext, buf: &PixelBuffer) -> Result<PixelBuf
     output_gpu.download(ctx).map_err(Into::into)
 }
 
-/// Dispatch a 2D compute shader with 3 bindings (input read, output write, params uniform).
-///
-/// Similar to [`dispatch_blur_shader`] but without the kernel buffer. Creates
-/// the bind group layout inline and caches the pipeline by name.
-#[allow(clippy::too_many_arguments)]
-fn dispatch_2d_3buf_shader(
-    ctx: &GpuContext,
-    name: &'static str,
-    shader_src: &str,
-    input_buf: &wgpu::Buffer,
-    output_buf: &wgpu::Buffer,
-    params_data: &[u8],
-    workgroups_x: u32,
-    workgroups_y: u32,
-) -> Result<(), RangaError> {
-    let cache = ctx.cache.borrow();
-    let cached = cache.pipelines.contains_key(name);
-    drop(cache);
-
-    if !cached {
-        let bgl = ctx
-            .device()
-            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("ranga_2d_3buf_bgl"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                ],
-            });
-
-        let pl = ctx
-            .device()
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("ranga_2d_3buf_pl"),
-                bind_group_layouts: &[Some(&bgl)],
-                immediate_size: 0,
-            });
-
-        let shader = ctx
-            .device()
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(name),
-                source: wgpu::ShaderSource::Wgsl(shader_src.into()),
-            });
-
-        let pipeline = ctx
-            .device()
-            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some(name),
-                layout: Some(&pl),
-                module: &shader,
-                entry_point: Some("main"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
-
-        let mut cache = ctx.cache.borrow_mut();
-        cache.pipelines.insert(name, pipeline);
-    }
-
-    // Pad params to 16-byte alignment
-    let aligned_size = params_data.len().div_ceil(16) * 16;
-    let mut aligned_data = vec![0u8; aligned_size];
-    aligned_data[..params_data.len()].copy_from_slice(params_data);
-
-    let params_buf = ctx.device().create_buffer(&wgpu::BufferDescriptor {
-        label: Some("transform_params"),
-        size: aligned_size as u64,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    ctx.queue().write_buffer(&params_buf, 0, &aligned_data);
-
-    let cache = ctx.cache.borrow();
-    let pipeline = cache.pipelines.get(name).ok_or_else(|| {
-        RangaError::Other(format!("GPU pipeline cache missing entry for '{name}'"))
-    })?;
-    let bgl = pipeline.get_bind_group_layout(0);
-
-    let bg = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
-        label: None,
-        layout: &bgl,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: input_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: output_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: params_buf.as_entire_binding(),
-            },
-        ],
-    });
-
-    let mut encoder = ctx
-        .device()
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-    {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: None,
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &bg, &[]);
-        pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
-    }
-    drop(cache);
-    ctx.queue().submit(Some(encoder.finish()));
-    Ok(())
-}
-
-/// Dispatch a blur compute shader with 4 bindings (input, output, kernel, params).
-///
-/// Uses a dedicated bind group layout with read-only input, read-write output,
-/// read-only kernel storage, and a uniform params buffer. The pipeline is cached
-/// by name on the context.
-#[allow(clippy::too_many_arguments)]
-fn dispatch_blur_shader(
-    ctx: &GpuContext,
-    name: &'static str,
-    shader_src: &str,
-    input_buf: &wgpu::Buffer,
-    output_buf: &wgpu::Buffer,
-    kernel_buf: &wgpu::Buffer,
-    params_data: &[u8],
-    workgroups_x: u32,
-    workgroups_y: u32,
-) -> Result<(), RangaError> {
-    // Blur pipelines need a 4-binding layout — we create them inline and cache
-    // via the pipeline name. Since the layout differs from 1buf/3buf, we build
-    // the pipeline directly when not cached.
-    let cache = ctx.cache.borrow();
-    let cached = cache.pipelines.contains_key(name);
-    drop(cache);
-
-    if !cached {
-        let bgl = ctx
-            .device()
-            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("ranga_blur_bgl"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 3,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                ],
-            });
-
-        let pl = ctx
-            .device()
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("ranga_blur_pl"),
-                bind_group_layouts: &[Some(&bgl)],
-                immediate_size: 0,
-            });
-
-        let shader = ctx
-            .device()
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(name),
-                source: wgpu::ShaderSource::Wgsl(shader_src.into()),
-            });
-
-        let pipeline = ctx
-            .device()
-            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some(name),
-                layout: Some(&pl),
-                module: &shader,
-                entry_point: Some("main"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
-
-        let mut cache = ctx.cache.borrow_mut();
-        cache.pipelines.insert(name, pipeline);
-    }
-
-    // Pad params to 16-byte alignment
-    let aligned_size = params_data.len().div_ceil(16) * 16;
-    let mut aligned_data = vec![0u8; aligned_size];
-    aligned_data[..params_data.len()].copy_from_slice(params_data);
-
-    let params_buf = ctx.device().create_buffer(&wgpu::BufferDescriptor {
-        label: Some("blur_params"),
-        size: aligned_size as u64,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    ctx.queue().write_buffer(&params_buf, 0, &aligned_data);
-
-    // Get the pipeline's bind group layout from the pipeline itself
-    let cache = ctx.cache.borrow();
-    let pipeline = cache.pipelines.get(name).ok_or_else(|| {
-        RangaError::Other(format!("GPU pipeline cache missing entry for '{name}'"))
-    })?;
-    let bgl = pipeline.get_bind_group_layout(0);
-
-    let bg = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
-        label: None,
-        layout: &bgl,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: input_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: output_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: kernel_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: params_buf.as_entire_binding(),
-            },
-        ],
-    });
-
-    let mut encoder = ctx
-        .device()
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-    {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: None,
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &bg, &[]);
-        pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
-    }
-    drop(cache);
-    ctx.queue().submit(Some(encoder.finish()));
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2038,7 +1861,7 @@ mod tests {
 
     #[test]
     fn gpu_invert_matches_cpu() {
-        let ctx = match try_gpu() {
+        let mut ctx = match try_gpu() {
             Some(ctx) => ctx,
             None => return, // Skip in headless CI
         };
@@ -2047,7 +1870,7 @@ mod tests {
         let mut gpu_buf = PixelBuffer::new(data.clone(), 8, 8, PixelFormat::Rgba8).unwrap();
         let mut cpu_buf = PixelBuffer::new(data, 8, 8, PixelFormat::Rgba8).unwrap();
 
-        gpu_invert(&ctx, &mut gpu_buf).unwrap();
+        gpu_invert(&mut ctx, &mut gpu_buf).unwrap();
         crate::filter::invert(&mut cpu_buf).unwrap();
 
         // GPU uses f32 rounding, CPU uses integer subtraction — allow +/-1 tolerance
@@ -2061,7 +1884,7 @@ mod tests {
 
     #[test]
     fn gpu_grayscale_produces_uniform_channels() {
-        let ctx = match try_gpu() {
+        let mut ctx = match try_gpu() {
             Some(ctx) => ctx,
             None => return,
         };
@@ -2077,7 +1900,7 @@ mod tests {
             })
             .collect();
         let mut buf = PixelBuffer::new(data, 4, 4, PixelFormat::Rgba8).unwrap();
-        gpu_grayscale(&ctx, &mut buf).unwrap();
+        gpu_grayscale(&mut ctx, &mut buf).unwrap();
 
         // After grayscale, R == G == B for each pixel
         for pixel in buf.data.chunks_exact(4) {
@@ -2089,7 +1912,7 @@ mod tests {
 
     #[test]
     fn gpu_brightness_contrast_identity() {
-        let ctx = match try_gpu() {
+        let mut ctx = match try_gpu() {
             Some(ctx) => ctx,
             None => return,
         };
@@ -2101,7 +1924,7 @@ mod tests {
         let mut buf = PixelBuffer::new(data, 4, 4, PixelFormat::Rgba8).unwrap();
 
         // brightness=0.0, contrast=1.0 should be identity
-        gpu_brightness_contrast(&ctx, &mut buf, 0.0, 1.0).unwrap();
+        gpu_brightness_contrast(&mut ctx, &mut buf, 0.0, 1.0).unwrap();
 
         for (g, o) in buf.data.iter().zip(original.iter()) {
             assert!(
@@ -2113,7 +1936,7 @@ mod tests {
 
     #[test]
     fn gpu_blend_normal_opaque() {
-        let ctx = match try_gpu() {
+        let mut ctx = match try_gpu() {
             Some(ctx) => ctx,
             None => return,
         };
@@ -2125,7 +1948,7 @@ mod tests {
         let src = PixelBuffer::new(src_data, 2, 1, PixelFormat::Rgba8).unwrap();
         let mut dst = PixelBuffer::new(dst_data, 2, 1, PixelFormat::Rgba8).unwrap();
 
-        gpu_blend(&ctx, &src, &mut dst, BlendMode::Normal, 1.0).unwrap();
+        gpu_blend(&mut ctx, &src, &mut dst, BlendMode::Normal, 1.0).unwrap();
 
         // With opacity 1.0 and src alpha 255, result should be the source color
         assert!(dst.data[0] > 250, "red channel: {}", dst.data[0]);
@@ -2135,7 +1958,7 @@ mod tests {
 
     #[test]
     fn gpu_blend_dimension_mismatch() {
-        let ctx = match try_gpu() {
+        let mut ctx = match try_gpu() {
             Some(ctx) => ctx,
             None => return,
         };
@@ -2143,32 +1966,32 @@ mod tests {
         let src = PixelBuffer::zeroed(4, 4, PixelFormat::Rgba8);
         let mut dst = PixelBuffer::zeroed(8, 8, PixelFormat::Rgba8);
 
-        let result = gpu_blend(&ctx, &src, &mut dst, BlendMode::Normal, 1.0);
+        let result = gpu_blend(&mut ctx, &src, &mut dst, BlendMode::Normal, 1.0);
         assert!(result.is_err());
     }
 
     #[test]
     fn gpu_invert_rejects_non_rgba8() {
-        let ctx = match try_gpu() {
+        let mut ctx = match try_gpu() {
             Some(ctx) => ctx,
             None => return,
         };
 
         let mut buf = PixelBuffer::zeroed(4, 4, PixelFormat::Rgb8);
-        let result = gpu_invert(&ctx, &mut buf);
+        let result = gpu_invert(&mut ctx, &mut buf);
         assert!(result.is_err());
     }
 
     #[test]
     fn gpu_gaussian_blur_uniform_unchanged() {
-        let ctx = match try_gpu() {
+        let mut ctx = match try_gpu() {
             Some(ctx) => ctx,
             None => return,
         };
 
         // Uniform buffer should be (nearly) unchanged by blur
         let buf = PixelBuffer::new(vec![128; 8 * 8 * 4], 8, 8, PixelFormat::Rgba8).unwrap();
-        let blurred = gpu_gaussian_blur(&ctx, &buf, 2).unwrap();
+        let blurred = gpu_gaussian_blur(&mut ctx, &buf, 2).unwrap();
         for (i, &v) in blurred.data.iter().enumerate() {
             assert!(
                 (v as i16 - 128).unsigned_abs() <= 1,
@@ -2179,7 +2002,7 @@ mod tests {
 
     #[test]
     fn gpu_gaussian_blur_radius_zero_is_identity() {
-        let ctx = match try_gpu() {
+        let mut ctx = match try_gpu() {
             Some(ctx) => ctx,
             None => return,
         };
@@ -2188,19 +2011,19 @@ mod tests {
             .flat_map(|i| [i * 16, i * 8, i * 4, 255])
             .collect();
         let buf = PixelBuffer::new(data.clone(), 4, 4, PixelFormat::Rgba8).unwrap();
-        let blurred = gpu_gaussian_blur(&ctx, &buf, 0).unwrap();
+        let blurred = gpu_gaussian_blur(&mut ctx, &buf, 0).unwrap();
         assert_eq!(blurred.data, data);
     }
 
     #[test]
     fn gpu_gaussian_blur_rejects_non_rgba8() {
-        let ctx = match try_gpu() {
+        let mut ctx = match try_gpu() {
             Some(ctx) => ctx,
             None => return,
         };
 
         let buf = PixelBuffer::zeroed(4, 4, PixelFormat::Rgb8);
-        let result = gpu_gaussian_blur(&ctx, &buf, 2);
+        let result = gpu_gaussian_blur(&mut ctx, &buf, 2);
         assert!(result.is_err());
     }
 
@@ -2214,27 +2037,25 @@ mod tests {
 
     #[test]
     fn pipeline_cache_reuses_pipelines() {
-        let ctx = match try_gpu() {
+        let mut ctx = match try_gpu() {
             Some(ctx) => ctx,
             None => return,
         };
 
         // Run invert twice — second call should reuse cached pipeline
         let mut buf1 = PixelBuffer::zeroed(4, 4, PixelFormat::Rgba8);
-        gpu_invert(&ctx, &mut buf1).unwrap();
+        gpu_invert(&mut ctx, &mut buf1).unwrap();
         let mut buf2 = PixelBuffer::zeroed(4, 4, PixelFormat::Rgba8);
-        gpu_invert(&ctx, &mut buf2).unwrap();
+        gpu_invert(&mut ctx, &mut buf2).unwrap();
 
-        // Verify cache has the entry
-        let cache = ctx.cache.borrow();
-        assert!(cache.pipelines.contains_key("invert"));
+        // Just verify it doesn't panic — cache is internal to mabda now
     }
 
     // ── GpuChain tests ────────────────────────────────────────────────────
 
     #[test]
     fn gpu_chain_invert_matches_single() {
-        let ctx = match try_gpu() {
+        let mut ctx = match try_gpu() {
             Some(ctx) => ctx,
             None => return,
         };
@@ -2243,7 +2064,7 @@ mod tests {
         let buf = PixelBuffer::new(data.clone(), 8, 8, PixelFormat::Rgba8).unwrap();
 
         // Chain with just invert
-        let chain_result = GpuChain::new(&ctx, &buf)
+        let chain_result = GpuChain::new(&mut ctx, &buf)
             .unwrap()
             .invert()
             .unwrap()
@@ -2252,7 +2073,7 @@ mod tests {
 
         // Single gpu_invert
         let mut single_buf = PixelBuffer::new(data, 8, 8, PixelFormat::Rgba8).unwrap();
-        gpu_invert(&ctx, &mut single_buf).unwrap();
+        gpu_invert(&mut ctx, &mut single_buf).unwrap();
 
         for (c, s) in chain_result.data.iter().zip(single_buf.data.iter()) {
             assert!(
@@ -2264,7 +2085,7 @@ mod tests {
 
     #[test]
     fn gpu_chain_multiple_ops() {
-        let ctx = match try_gpu() {
+        let mut ctx = match try_gpu() {
             Some(ctx) => ctx,
             None => return,
         };
@@ -2272,7 +2093,7 @@ mod tests {
         let data: Vec<u8> = (0..64u8).flat_map(|i| [i * 4, i * 3, i * 2, 255]).collect();
         let buf = PixelBuffer::new(data.clone(), 8, 8, PixelFormat::Rgba8).unwrap();
 
-        let result = GpuChain::new(&ctx, &buf)
+        let result = GpuChain::new(&mut ctx, &buf)
             .unwrap()
             .invert()
             .unwrap()
@@ -2290,7 +2111,7 @@ mod tests {
 
     #[test]
     fn gpu_chain_with_blur() {
-        let ctx = match try_gpu() {
+        let mut ctx = match try_gpu() {
             Some(ctx) => ctx,
             None => return,
         };
@@ -2298,7 +2119,7 @@ mod tests {
         let data: Vec<u8> = (0..64u8).flat_map(|i| [i * 4, i * 3, i * 2, 255]).collect();
         let buf = PixelBuffer::new(data, 8, 8, PixelFormat::Rgba8).unwrap();
 
-        let result = GpuChain::new(&ctx, &buf)
+        let result = GpuChain::new(&mut ctx, &buf)
             .unwrap()
             .invert()
             .unwrap()
@@ -2314,13 +2135,13 @@ mod tests {
 
     #[test]
     fn gpu_chain_rejects_non_rgba8() {
-        let ctx = match try_gpu() {
+        let mut ctx = match try_gpu() {
             Some(ctx) => ctx,
             None => return,
         };
 
         let buf = PixelBuffer::zeroed(4, 4, PixelFormat::Rgb8);
-        let result = GpuChain::new(&ctx, &buf);
+        let result = GpuChain::new(&mut ctx, &buf);
         assert!(result.is_err());
     }
 
@@ -2328,7 +2149,7 @@ mod tests {
 
     #[test]
     fn gpu_noise_gaussian_modifies_buffer() {
-        let ctx = match try_gpu() {
+        let mut ctx = match try_gpu() {
             Some(ctx) => ctx,
             None => return,
         };
@@ -2336,7 +2157,7 @@ mod tests {
         let data = vec![128u8; 8 * 8 * 4];
         let original = data.clone();
         let mut buf = PixelBuffer::new(data, 8, 8, PixelFormat::Rgba8).unwrap();
-        gpu_noise_gaussian(&ctx, &mut buf, 0.3, 42).unwrap();
+        gpu_noise_gaussian(&mut ctx, &mut buf, 0.3, 42).unwrap();
 
         // Noise with non-zero strength should change at least some pixels
         assert_ne!(buf.data, original, "noise should modify the buffer");
@@ -2344,7 +2165,7 @@ mod tests {
 
     #[test]
     fn gpu_noise_gaussian_deterministic() {
-        let ctx = match try_gpu() {
+        let mut ctx = match try_gpu() {
             Some(ctx) => ctx,
             None => return,
         };
@@ -2353,8 +2174,8 @@ mod tests {
         let mut buf1 = PixelBuffer::new(data.clone(), 8, 8, PixelFormat::Rgba8).unwrap();
         let mut buf2 = PixelBuffer::new(data, 8, 8, PixelFormat::Rgba8).unwrap();
 
-        gpu_noise_gaussian(&ctx, &mut buf1, 0.2, 123).unwrap();
-        gpu_noise_gaussian(&ctx, &mut buf2, 0.2, 123).unwrap();
+        gpu_noise_gaussian(&mut ctx, &mut buf1, 0.2, 123).unwrap();
+        gpu_noise_gaussian(&mut ctx, &mut buf2, 0.2, 123).unwrap();
 
         assert_eq!(
             buf1.data, buf2.data,
@@ -2364,7 +2185,7 @@ mod tests {
 
     #[test]
     fn gpu_dissolve_at_zero_is_src() {
-        let ctx = match try_gpu() {
+        let mut ctx = match try_gpu() {
             Some(ctx) => ctx,
             None => return,
         };
@@ -2376,7 +2197,7 @@ mod tests {
         let mut dst = PixelBuffer::new(dst_data, 4, 4, PixelFormat::Rgba8).unwrap();
 
         // factor=0.0 means all src
-        gpu_dissolve(&ctx, &src, &mut dst, 0.0).unwrap();
+        gpu_dissolve(&mut ctx, &src, &mut dst, 0.0).unwrap();
 
         for (g, s) in dst.data.iter().zip(src_data.iter()) {
             assert!(
@@ -2388,7 +2209,7 @@ mod tests {
 
     #[test]
     fn gpu_dissolve_at_one_is_dst() {
-        let ctx = match try_gpu() {
+        let mut ctx = match try_gpu() {
             Some(ctx) => ctx,
             None => return,
         };
@@ -2401,7 +2222,7 @@ mod tests {
         let mut dst = PixelBuffer::new(dst_data, 4, 4, PixelFormat::Rgba8).unwrap();
 
         // factor=1.0 means all dst (original)
-        gpu_dissolve(&ctx, &src, &mut dst, 1.0).unwrap();
+        gpu_dissolve(&mut ctx, &src, &mut dst, 1.0).unwrap();
 
         for (g, d) in dst.data.iter().zip(original_dst.iter()) {
             assert!(
@@ -2413,7 +2234,7 @@ mod tests {
 
     #[test]
     fn gpu_fade_zero_is_black() {
-        let ctx = match try_gpu() {
+        let mut ctx = match try_gpu() {
             Some(ctx) => ctx,
             None => return,
         };
@@ -2421,7 +2242,7 @@ mod tests {
         let data = vec![200u8; 4 * 4 * 4];
         let mut buf = PixelBuffer::new(data, 4, 4, PixelFormat::Rgba8).unwrap();
 
-        gpu_fade(&ctx, &mut buf, 0.0).unwrap();
+        gpu_fade(&mut ctx, &mut buf, 0.0).unwrap();
 
         // RGB should be zero, alpha preserved
         for pixel in buf.data.chunks_exact(4) {
@@ -2434,7 +2255,7 @@ mod tests {
 
     #[test]
     fn gpu_fade_one_is_identity() {
-        let ctx = match try_gpu() {
+        let mut ctx = match try_gpu() {
             Some(ctx) => ctx,
             None => return,
         };
@@ -2445,7 +2266,7 @@ mod tests {
         let original = data.clone();
         let mut buf = PixelBuffer::new(data, 4, 4, PixelFormat::Rgba8).unwrap();
 
-        gpu_fade(&ctx, &mut buf, 1.0).unwrap();
+        gpu_fade(&mut ctx, &mut buf, 1.0).unwrap();
 
         for (g, o) in buf.data.iter().zip(original.iter()) {
             assert!(
@@ -2457,7 +2278,7 @@ mod tests {
 
     #[test]
     fn gpu_wipe_zero_is_src() {
-        let ctx = match try_gpu() {
+        let mut ctx = match try_gpu() {
             Some(ctx) => ctx,
             None => return,
         };
@@ -2469,7 +2290,7 @@ mod tests {
         let mut dst = PixelBuffer::new(dst_data, 4, 4, PixelFormat::Rgba8).unwrap();
 
         // progress=0.0 means wipe_x=0, so all pixels come from src
-        gpu_wipe(&ctx, &src, &mut dst, 0.0).unwrap();
+        gpu_wipe(&mut ctx, &src, &mut dst, 0.0).unwrap();
 
         for (g, s) in dst.data.iter().zip(src_data.iter()) {
             assert!(
@@ -2481,7 +2302,7 @@ mod tests {
 
     #[test]
     fn gpu_wipe_one_is_dst() {
-        let ctx = match try_gpu() {
+        let mut ctx = match try_gpu() {
             Some(ctx) => ctx,
             None => return,
         };
@@ -2494,7 +2315,7 @@ mod tests {
         let mut dst = PixelBuffer::new(dst_data, 4, 4, PixelFormat::Rgba8).unwrap();
 
         // progress=1.0 means wipe_x=width, so all pixels stay as dst
-        gpu_wipe(&ctx, &src, &mut dst, 1.0).unwrap();
+        gpu_wipe(&mut ctx, &src, &mut dst, 1.0).unwrap();
 
         for (g, d) in dst.data.iter().zip(original_dst.iter()) {
             assert!(
@@ -2508,13 +2329,13 @@ mod tests {
 
     #[test]
     fn gpu_crop_basic() {
-        let ctx = match try_gpu() {
+        let mut ctx = match try_gpu() {
             Some(ctx) => ctx,
             None => return,
         };
 
         let buf = PixelBuffer::zeroed(8, 8, PixelFormat::Rgba8);
-        let cropped = gpu_crop(&ctx, &buf, 2, 2, 6, 6).unwrap();
+        let cropped = gpu_crop(&mut ctx, &buf, 2, 2, 6, 6).unwrap();
         assert_eq!(cropped.width, 4);
         assert_eq!(cropped.height, 4);
         assert_eq!(cropped.data.len(), 4 * 4 * 4);
@@ -2522,25 +2343,25 @@ mod tests {
 
     #[test]
     fn gpu_crop_rejects_non_rgba8() {
-        let ctx = match try_gpu() {
+        let mut ctx = match try_gpu() {
             Some(ctx) => ctx,
             None => return,
         };
 
         let buf = PixelBuffer::zeroed(8, 8, PixelFormat::Rgb8);
-        let result = gpu_crop(&ctx, &buf, 0, 0, 4, 4);
+        let result = gpu_crop(&mut ctx, &buf, 0, 0, 4, 4);
         assert!(result.is_err());
     }
 
     #[test]
     fn gpu_resize_nearest_doubles() {
-        let ctx = match try_gpu() {
+        let mut ctx = match try_gpu() {
             Some(ctx) => ctx,
             None => return,
         };
 
         let buf = PixelBuffer::zeroed(4, 4, PixelFormat::Rgba8);
-        let resized = gpu_resize(&ctx, &buf, 8, 8, ScaleFilter::Nearest).unwrap();
+        let resized = gpu_resize(&mut ctx, &buf, 8, 8, ScaleFilter::Nearest).unwrap();
         assert_eq!(resized.width, 8);
         assert_eq!(resized.height, 8);
         assert_eq!(resized.data.len(), 8 * 8 * 4);
@@ -2548,13 +2369,13 @@ mod tests {
 
     #[test]
     fn gpu_resize_bilinear_halves() {
-        let ctx = match try_gpu() {
+        let mut ctx = match try_gpu() {
             Some(ctx) => ctx,
             None => return,
         };
 
         let buf = PixelBuffer::new(vec![128; 8 * 8 * 4], 8, 8, PixelFormat::Rgba8).unwrap();
-        let resized = gpu_resize(&ctx, &buf, 4, 4, ScaleFilter::Bilinear).unwrap();
+        let resized = gpu_resize(&mut ctx, &buf, 4, 4, ScaleFilter::Bilinear).unwrap();
         assert_eq!(resized.width, 4);
         assert_eq!(resized.height, 4);
         assert_eq!(resized.data.len(), 4 * 4 * 4);
@@ -2562,7 +2383,7 @@ mod tests {
 
     #[test]
     fn gpu_flip_horizontal_roundtrip() {
-        let ctx = match try_gpu() {
+        let mut ctx = match try_gpu() {
             Some(ctx) => ctx,
             None => return,
         };
@@ -2571,14 +2392,14 @@ mod tests {
             .flat_map(|i| [i * 16, i * 8, i * 4, 255])
             .collect();
         let buf = PixelBuffer::new(data.clone(), 4, 4, PixelFormat::Rgba8).unwrap();
-        let f1 = gpu_flip_horizontal(&ctx, &buf).unwrap();
-        let f2 = gpu_flip_horizontal(&ctx, &f1).unwrap();
+        let f1 = gpu_flip_horizontal(&mut ctx, &buf).unwrap();
+        let f2 = gpu_flip_horizontal(&mut ctx, &f1).unwrap();
         assert_eq!(f2.data, data);
     }
 
     #[test]
     fn gpu_flip_vertical_roundtrip() {
-        let ctx = match try_gpu() {
+        let mut ctx = match try_gpu() {
             Some(ctx) => ctx,
             None => return,
         };
@@ -2587,8 +2408,8 @@ mod tests {
             .flat_map(|i| [i * 16, i * 8, i * 4, 255])
             .collect();
         let buf = PixelBuffer::new(data.clone(), 4, 4, PixelFormat::Rgba8).unwrap();
-        let f1 = gpu_flip_vertical(&ctx, &buf).unwrap();
-        let f2 = gpu_flip_vertical(&ctx, &f1).unwrap();
+        let f1 = gpu_flip_vertical(&mut ctx, &buf).unwrap();
+        let f2 = gpu_flip_vertical(&mut ctx, &f1).unwrap();
         assert_eq!(f2.data, data);
     }
 }

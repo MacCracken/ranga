@@ -40,7 +40,7 @@ for row in buf.rows_mut() {
 }
 
 // Raw data access
-let byte = buf.data[0];
+let byte = buf.data()[0];
 ```
 
 ## Zero-Copy Views

@@ -50,16 +50,16 @@ fn validate_same_size(a: &PixelBuffer, b: &PixelBuffer) -> Result<(), RangaError
 ///
 /// let mut buf = PixelBuffer::new(vec![255, 128, 64, 128], 1, 1, PixelFormat::Rgba8).unwrap();
 /// composite::premultiply_alpha(&mut buf).unwrap();
-/// assert_eq!(buf.data[0], 128); // 255 * 128 / 255 ≈ 128
+/// assert_eq!(buf.data()[0], 128); // 255 * 128 / 255 ≈ 128
 /// ```
 #[must_use = "this returns a Result that may contain an error"]
 pub fn premultiply_alpha(buf: &mut PixelBuffer) -> Result<(), RangaError> {
     validate_rgba8("premultiply_alpha", buf)?;
     for pixel in buf.data.chunks_exact_mut(4) {
         let a = pixel[3] as u16;
-        pixel[0] = ((pixel[0] as u16 * a) / 255) as u8;
-        pixel[1] = ((pixel[1] as u16 * a) / 255) as u8;
-        pixel[2] = ((pixel[2] as u16 * a) / 255) as u8;
+        pixel[0] = div255(pixel[0] as u16 * a) as u8;
+        pixel[1] = div255(pixel[1] as u16 * a) as u8;
+        pixel[2] = div255(pixel[2] as u16 * a) as u8;
     }
     Ok(())
 }
@@ -75,7 +75,7 @@ pub fn premultiply_alpha(buf: &mut PixelBuffer) -> Result<(), RangaError> {
 /// let mut buf = PixelBuffer::new(vec![128, 64, 32, 128], 1, 1, PixelFormat::Rgba8).unwrap();
 /// composite::unpremultiply_alpha(&mut buf).unwrap();
 /// // 128 / (128/255) ≈ 255
-/// assert!(buf.data[0] > 250);
+/// assert!(buf.data()[0] > 250);
 /// ```
 #[must_use = "this returns a Result that may contain an error"]
 pub fn unpremultiply_alpha(buf: &mut PixelBuffer) -> Result<(), RangaError> {
@@ -112,7 +112,7 @@ pub fn unpremultiply_alpha(buf: &mut PixelBuffer) -> Result<(), RangaError> {
 /// let mut buf = PixelBuffer::new(vec![255, 0, 0, 255], 1, 1, PixelFormat::Rgba8).unwrap();
 /// let mask = PixelBuffer::new(vec![128, 128, 128, 255], 1, 1, PixelFormat::Rgba8).unwrap();
 /// composite::apply_mask(&mut buf, &mask).unwrap();
-/// assert_eq!(buf.data[3], 128); // alpha halved by mask
+/// assert_eq!(buf.data()[3], 128); // alpha halved by mask
 /// ```
 #[must_use = "this returns a Result that may contain an error"]
 pub fn apply_mask(buf: &mut PixelBuffer, mask: &PixelBuffer) -> Result<(), RangaError> {
@@ -121,7 +121,7 @@ pub fn apply_mask(buf: &mut PixelBuffer, mask: &PixelBuffer) -> Result<(), Ranga
     validate_same_size(buf, mask)?;
     for (pixel, mask_pixel) in buf.data.chunks_exact_mut(4).zip(mask.data.chunks_exact(4)) {
         let mask_val = mask_pixel[0] as u16; // use red channel as mask
-        pixel[3] = ((pixel[3] as u16 * mask_val) / 255) as u8;
+        pixel[3] = div255(pixel[3] as u16 * mask_val) as u8;
     }
     Ok(())
 }
@@ -144,8 +144,8 @@ pub fn apply_mask(buf: &mut PixelBuffer, mask: &PixelBuffer) -> Result<(), Ranga
 /// let a = PixelBuffer::new(vec![255, 0, 0, 255], 1, 1, PixelFormat::Rgba8).unwrap();
 /// let b = PixelBuffer::new(vec![0, 0, 255, 255], 1, 1, PixelFormat::Rgba8).unwrap();
 /// let mid = composite::dissolve(&a, &b, 0.5).unwrap();
-/// assert!(mid.data[0] > 100 && mid.data[0] < 155); // ~128
-/// assert!(mid.data[2] > 100 && mid.data[2] < 155);
+/// assert!(mid.data()[0] > 100 && mid.data()[0] < 155); // ~128
+/// assert!(mid.data()[2] > 100 && mid.data()[2] < 155);
 /// ```
 #[must_use = "returns a new blended buffer"]
 pub fn dissolve(
@@ -177,7 +177,7 @@ pub fn dissolve(
 ///
 /// let mut buf = PixelBuffer::new(vec![200, 200, 200, 255], 1, 1, PixelFormat::Rgba8).unwrap();
 /// composite::fade(&mut buf, 0.5).unwrap();
-/// assert_eq!(buf.data[0], 100);
+/// assert_eq!(buf.data()[0], 100);
 /// ```
 #[must_use = "this returns a Result that may contain an error"]
 pub fn fade(buf: &mut PixelBuffer, progress: f32) -> Result<(), RangaError> {
@@ -205,8 +205,8 @@ pub fn fade(buf: &mut PixelBuffer, progress: f32) -> Result<(), RangaError> {
 /// let a = PixelBuffer::new(vec![255; 8 * 1 * 4], 8, 1, PixelFormat::Rgba8).unwrap();
 /// let b = PixelBuffer::new(vec![0; 8 * 1 * 4], 8, 1, PixelFormat::Rgba8).unwrap();
 /// let result = composite::wipe(&a, &b, 0.5).unwrap();
-/// assert_eq!(result.data[0], 0);    // left half is b (black)
-/// assert_eq!(result.data[7 * 4], 255); // right half is a (white)
+/// assert_eq!(result.data()[0], 0);    // left half is b (black)
+/// assert_eq!(result.data()[7 * 4], 255); // right half is a (white)
 /// ```
 #[must_use = "returns a new wiped buffer"]
 pub fn wipe(a: &PixelBuffer, b: &PixelBuffer, progress: f32) -> Result<PixelBuffer, RangaError> {
@@ -244,7 +244,7 @@ pub fn wipe(a: &PixelBuffer, b: &PixelBuffer, progress: f32) -> Result<PixelBuff
 ///
 /// let mut buf = PixelBuffer::zeroed(4, 4, PixelFormat::Rgba8);
 /// composite::fill_solid(&mut buf, [255, 0, 0, 255]).unwrap();
-/// assert_eq!(buf.data[0], 255);
+/// assert_eq!(buf.data()[0], 255);
 /// ```
 #[must_use = "this returns a Result that may contain an error"]
 pub fn fill_solid(buf: &mut PixelBuffer, color: [u8; 4]) -> Result<(), RangaError> {
@@ -267,8 +267,8 @@ pub fn fill_solid(buf: &mut PixelBuffer, color: [u8; 4]) -> Result<(), RangaErro
 ///
 /// let mut buf = PixelBuffer::zeroed(100, 1, PixelFormat::Rgba8);
 /// composite::gradient_linear(&mut buf, [255, 0, 0, 255], [0, 0, 255, 255]).unwrap();
-/// assert!(buf.data[0] > 200); // left = red
-/// assert!(buf.data[99 * 4 + 2] > 200); // right = blue
+/// assert!(buf.data()[0] > 200); // left = red
+/// assert!(buf.data()[99 * 4 + 2] > 200); // right = blue
 /// ```
 #[must_use = "this returns a Result that may contain an error"]
 pub fn gradient_linear(
@@ -374,7 +374,7 @@ pub fn gradient_linear_angled(
 ///
 /// let mut buf = PixelBuffer::zeroed(100, 100, PixelFormat::Rgba8);
 /// composite::gradient_radial(&mut buf, (50.0, 50.0), 40.0, [255, 0, 0, 255], [0, 0, 255, 255]).unwrap();
-/// assert!(buf.data[(50 * 100 + 50) * 4] > 200); // center = red
+/// assert!(buf.data()[(50 * 100 + 50) * 4] > 200); // center = red
 /// ```
 #[must_use = "this returns a Result that may contain an error"]
 pub fn gradient_radial(
@@ -423,7 +423,7 @@ pub fn gradient_radial(
 /// let src = PixelBuffer::new(vec![255, 0, 0, 200].repeat(16), 4, 4, PixelFormat::Rgba8).unwrap();
 /// composite::composite_at(&src, &mut dst, 10, 10, 1.0).unwrap();
 /// // Pixel at (10,10) should now have red content
-/// assert!(dst.data[(10 * 100 + 10) * 4] > 0);
+/// assert!(dst.data()[(10 * 100 + 10) * 4] > 0);
 /// ```
 #[must_use = "this returns a Result that may contain an error"]
 pub fn composite_at(
@@ -584,7 +584,7 @@ pub fn composite_at_argb(
 ///
 /// let mut buf = PixelBuffer::zeroed(16, 16, PixelFormat::Rgba8);
 /// composite::fill_checkerboard(&mut buf, 8, [200, 200, 200, 255], [255, 255, 255, 255]).unwrap();
-/// assert_ne!(buf.data[0..4], buf.data[8 * 4..8 * 4 + 4]); // alternating
+/// assert_ne!(buf.data()[0..4], buf.data()[8 * 4..8 * 4 + 4]); // alternating
 /// ```
 #[must_use = "this returns a Result that may contain an error"]
 pub fn fill_checkerboard(

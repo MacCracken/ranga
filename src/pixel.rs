@@ -121,22 +121,22 @@ impl PixelFormat {
 /// // Create a zeroed 64x64 RGBA buffer
 /// let buf = PixelBuffer::zeroed(64, 64, PixelFormat::Rgba8);
 /// assert_eq!(buf.pixel_count(), 64 * 64);
-/// assert_eq!(buf.data.len(), 64 * 64 * 4);
+/// assert_eq!(buf.data().len(), 64 * 64 * 4);
 ///
 /// // Create from existing data
 /// let buf = PixelBuffer::new(vec![255; 4], 1, 1, PixelFormat::Rgba8).unwrap();
-/// assert_eq!(buf.data[0], 255);
+/// assert_eq!(buf.data()[0], 255);
 /// ```
 #[derive(Debug, Clone)]
 pub struct PixelBuffer {
     /// Raw pixel data.
-    pub data: Vec<u8>,
+    pub(crate) data: Vec<u8>,
     /// Image width in pixels.
-    pub width: u32,
+    pub(crate) width: u32,
     /// Image height in pixels.
-    pub height: u32,
+    pub(crate) height: u32,
     /// Pixel format of the buffer.
-    pub format: PixelFormat,
+    pub(crate) format: PixelFormat,
 }
 
 impl PixelBuffer {
@@ -151,7 +151,7 @@ impl PixelBuffer {
     /// use ranga::pixel::{PixelBuffer, PixelFormat};
     ///
     /// let buf = PixelBuffer::new(vec![0; 400], 10, 10, PixelFormat::Rgba8).unwrap();
-    /// assert_eq!(buf.width, 10);
+    /// assert_eq!(buf.width(), 10);
     ///
     /// // Wrong size is rejected
     /// assert!(PixelBuffer::new(vec![0; 100], 10, 10, PixelFormat::Rgba8).is_err());
@@ -197,7 +197,7 @@ impl PixelBuffer {
     /// use ranga::pixel::{PixelBuffer, PixelFormat};
     ///
     /// let buf = PixelBuffer::zeroed(8, 8, PixelFormat::Rgba8);
-    /// assert!(buf.data.iter().all(|&b| b == 0));
+    /// assert!(buf.data().iter().all(|&b| b == 0));
     /// ```
     #[must_use]
     pub fn zeroed(width: u32, height: u32, format: PixelFormat) -> Self {
@@ -208,6 +208,47 @@ impl PixelBuffer {
             height,
             format,
         }
+    }
+
+    /// Raw pixel data as a byte slice.
+    #[must_use]
+    #[inline]
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    /// Raw pixel data as a mutable byte slice.
+    #[inline]
+    pub fn data_mut(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
+
+    /// Consume the buffer and return the raw pixel data.
+    #[must_use]
+    #[inline]
+    pub fn into_data(self) -> Vec<u8> {
+        self.data
+    }
+
+    /// Image width in pixels.
+    #[must_use]
+    #[inline]
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Image height in pixels.
+    #[must_use]
+    #[inline]
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Pixel format of the buffer.
+    #[must_use]
+    #[inline]
+    pub fn format(&self) -> PixelFormat {
+        self.format
     }
 
     /// Number of pixels.
@@ -221,6 +262,7 @@ impl PixelBuffer {
     /// assert_eq!(buf.pixel_count(), 1920 * 1080);
     /// ```
     #[must_use]
+    #[inline]
     pub fn pixel_count(&self) -> usize {
         self.width as usize * self.height as usize
     }
@@ -261,8 +303,8 @@ impl PixelBuffer {
     /// for row in buf.rows_mut() {
     ///     row[0] = 255; // set first byte of each row
     /// }
-    /// assert_eq!(buf.data[0], 255);
-    /// assert_eq!(buf.data[16], 255);
+    /// assert_eq!(buf.data()[0], 255);
+    /// assert_eq!(buf.data()[16], 255);
     /// ```
     #[must_use = "returns a mutable row iterator"]
     pub fn rows_mut(&mut self) -> impl Iterator<Item = &mut [u8]> {
@@ -287,6 +329,7 @@ impl PixelBuffer {
     /// assert_eq!(buf.get_rgba(99, 99), None); // out of bounds
     /// ```
     #[must_use]
+    #[inline]
     pub fn get_rgba(&self, x: u32, y: u32) -> Option<[u8; 4]> {
         if self.format != PixelFormat::Rgba8 || x >= self.width || y >= self.height {
             return None;
@@ -311,9 +354,11 @@ impl PixelBuffer {
     ///
     /// let mut buf = PixelBuffer::zeroed(2, 2, PixelFormat::Rgba8);
     /// assert!(buf.set_rgba(0, 0, [255, 0, 0, 255]));
-    /// assert_eq!(buf.data[0], 255);
+    /// assert_eq!(buf.data()[0], 255);
     /// assert!(!buf.set_rgba(99, 99, [0; 4])); // out of bounds
     /// ```
+    #[must_use = "returns whether the pixel was set successfully"]
+    #[inline]
     pub fn set_rgba(&mut self, x: u32, y: u32, pixel: [u8; 4]) -> bool {
         if self.format != PixelFormat::Rgba8 || x >= self.width || y >= self.height {
             return false;
@@ -333,7 +378,7 @@ impl PixelBuffer {
     /// let data = vec![128u8; 4 * 4 * 4];
     /// let view = PixelView::new(&data, 4, 4, PixelFormat::Rgba8).unwrap();
     /// let buf = PixelBuffer::from_view(&view);
-    /// assert_eq!(buf.data, data);
+    /// assert_eq!(buf.data(), data);
     /// ```
     #[must_use]
     pub fn from_view(view: &PixelView<'_>) -> Self {
@@ -381,7 +426,7 @@ impl PixelBuffer {
     /// let mut buf = PixelBuffer::zeroed(8, 8, PixelFormat::Rgba8);
     /// let mut view = buf.as_view_mut();
     /// view.data_mut()[0] = 255;
-    /// assert_eq!(buf.data[0], 255);
+    /// assert_eq!(buf.data()[0], 255);
     /// ```
     #[must_use]
     pub fn as_view_mut(&mut self) -> PixelViewMut<'_> {
@@ -442,22 +487,27 @@ impl<'a> PixelView<'a> {
     }
 
     #[must_use]
+    #[inline]
     pub fn data(&self) -> &[u8] {
         self.data
     }
     #[must_use]
+    #[inline]
     pub fn width(&self) -> u32 {
         self.width
     }
     #[must_use]
+    #[inline]
     pub fn height(&self) -> u32 {
         self.height
     }
     #[must_use]
+    #[inline]
     pub fn format(&self) -> PixelFormat {
         self.format
     }
     #[must_use]
+    #[inline]
     pub fn pixel_count(&self) -> usize {
         self.width as usize * self.height as usize
     }
@@ -510,25 +560,31 @@ impl<'a> PixelViewMut<'a> {
     }
 
     #[must_use]
+    #[inline]
     pub fn data(&self) -> &[u8] {
         self.data
     }
+    #[inline]
     pub fn data_mut(&mut self) -> &mut [u8] {
         self.data
     }
     #[must_use]
+    #[inline]
     pub fn width(&self) -> u32 {
         self.width
     }
     #[must_use]
+    #[inline]
     pub fn height(&self) -> u32 {
         self.height
     }
     #[must_use]
+    #[inline]
     pub fn format(&self) -> PixelFormat {
         self.format
     }
     #[must_use]
+    #[inline]
     pub fn pixel_count(&self) -> usize {
         self.width as usize * self.height as usize
     }

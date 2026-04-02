@@ -188,6 +188,7 @@ fn sample_clamped(data: &[u8], x: isize, y: isize, w: usize, h: usize, c: usize)
     data[(cy * w + cx) * 4 + c] as f64
 }
 
+#[inline]
 fn validate_rgba8(op: &str, buf: &PixelBuffer) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
         return Err(RangaError::InvalidFormat(format!(
@@ -211,8 +212,8 @@ fn validate_rgba8(op: &str, buf: &PixelBuffer) -> Result<(), RangaError> {
 ///
 /// let buf = PixelBuffer::zeroed(100, 100, PixelFormat::Rgba8);
 /// let cropped = transform::crop(&buf, 10, 20, 50, 60).unwrap();
-/// assert_eq!(cropped.width, 40);
-/// assert_eq!(cropped.height, 40);
+/// assert_eq!(cropped.width(), 40);
+/// assert_eq!(cropped.height(), 40);
 /// ```
 #[must_use = "returns a new cropped buffer"]
 pub fn crop(
@@ -253,7 +254,7 @@ pub fn crop(
 ///
 /// let buf = PixelBuffer::zeroed(100, 100, PixelFormat::Rgba8);
 /// let small = transform::resize(&buf, 50, 50, ScaleFilter::Bilinear).unwrap();
-/// assert_eq!(small.width, 50);
+/// assert_eq!(small.width(), 50);
 /// ```
 #[must_use = "returns a new resized buffer"]
 pub fn resize(
@@ -368,7 +369,7 @@ pub fn resize(
 ///
 /// let buf = PixelBuffer::new(vec![255, 0, 0, 255, 0, 255, 0, 255], 2, 1, PixelFormat::Rgba8).unwrap();
 /// let flipped = transform::flip_horizontal(&buf).unwrap();
-/// assert_eq!(flipped.data[0], 0); // green pixel now first
+/// assert_eq!(flipped.data()[0], 0); // green pixel now first
 /// ```
 #[must_use = "returns a new flipped buffer"]
 pub fn flip_horizontal(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
@@ -398,7 +399,7 @@ pub fn flip_horizontal(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
 /// data[0] = 255; // top-left red
 /// let buf = PixelBuffer::new(data, 2, 2, PixelFormat::Rgba8).unwrap();
 /// let flipped = transform::flip_vertical(&buf).unwrap();
-/// assert_eq!(flipped.data[2 * 4], 255); // now bottom-left
+/// assert_eq!(flipped.data()[2 * 4], 255); // now bottom-left
 /// ```
 #[must_use = "returns a new flipped buffer"]
 pub fn flip_vertical(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
@@ -428,7 +429,7 @@ pub fn flip_vertical(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
 ///
 /// let buf = PixelBuffer::zeroed(100, 100, PixelFormat::Rgba8);
 /// let rotated = transform::affine_transform(&buf, &Affine::rotate(0.5), 100, 100, ScaleFilter::Bilinear).unwrap();
-/// assert_eq!(rotated.width, 100);
+/// assert_eq!(rotated.width(), 100);
 /// ```
 #[must_use = "returns a new transformed buffer"]
 pub fn affine_transform(
@@ -690,7 +691,7 @@ fn solve_8x8(mut a: [[f64; 8]; 8], mut b: [f64; 8]) -> Option<[f64; 8]> {
 /// let buf = PixelBuffer::zeroed(100, 100, PixelFormat::Rgba8);
 /// let p = Perspective::identity();
 /// let result = transform::perspective_transform(&buf, &p, 100, 100).unwrap();
-/// assert_eq!(result.width, 100);
+/// assert_eq!(result.width(), 100);
 /// ```
 #[must_use = "returns a new transformed buffer"]
 pub fn perspective_transform(

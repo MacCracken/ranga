@@ -97,7 +97,11 @@ pub fn rgb_histograms(buf: &PixelBuffer) -> Result<[Vec<f64>; 3], RangaError> {
 /// Chi-squared distance between two histograms.
 ///
 /// Returns 0.0 for identical distributions and positive values for
-/// different distributions. Both slices should have equal length.
+/// different distributions. Both slices must have equal length.
+///
+/// # Errors
+///
+/// Returns [`RangaError::DimensionMismatch`] if the slices differ in length.
 ///
 /// # Examples
 ///
@@ -106,15 +110,20 @@ pub fn rgb_histograms(buf: &PixelBuffer) -> Result<[Vec<f64>; 3], RangaError> {
 ///
 /// let a = vec![0.25, 0.25, 0.25, 0.25];
 /// let b = vec![0.25, 0.25, 0.25, 0.25];
-/// assert!(chi_squared(&a, &b).abs() < 1e-10);
+/// assert!(chi_squared(&a, &b).unwrap().abs() < 1e-10);
 ///
 /// let c = vec![1.0, 0.0, 0.0, 0.0];
 /// let d = vec![0.0, 0.0, 0.0, 1.0];
-/// assert!(chi_squared(&c, &d) > 0.0);
+/// assert!(chi_squared(&c, &d).unwrap() > 0.0);
 /// ```
-#[must_use]
-pub fn chi_squared(a: &[f64], b: &[f64]) -> f64 {
-    a.iter()
+pub fn chi_squared(a: &[f64], b: &[f64]) -> Result<f64, RangaError> {
+    if a.len() != b.len() {
+        return Err(RangaError::DimensionMismatch {
+            expected: a.len(),
+            actual: b.len(),
+        });
+    }
+    Ok(a.iter()
         .zip(b.iter())
         .map(|(&ai, &bi)| {
             let sum = ai + bi;
@@ -125,7 +134,7 @@ pub fn chi_squared(a: &[f64], b: &[f64]) -> f64 {
             }
         })
         .sum::<f64>()
-        * 0.5
+        * 0.5)
 }
 
 /// Equalize the luminance histogram of an RGBA8 buffer in-place.
@@ -218,8 +227,8 @@ pub fn equalize(buf: &mut PixelBuffer) -> Result<(), RangaError> {
 /// let mut buf = PixelBuffer::new(vec![100, 100, 100, 255, 150, 150, 150, 255], 2, 1, PixelFormat::Rgba8).unwrap();
 /// histogram::auto_levels(&mut buf).unwrap();
 /// // The darker pixel should be pulled toward 0, the brighter toward 255
-/// assert!(buf.data[0] < 100);
-/// assert!(buf.data[4] > 150);
+/// assert!(buf.data()[0] < 100);
+/// assert!(buf.data()[4] > 150);
 /// ```
 pub fn auto_levels(buf: &mut PixelBuffer) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
@@ -285,14 +294,14 @@ mod tests {
     fn chi_squared_identical_is_zero() {
         let a = vec![0.25, 0.25, 0.25, 0.25];
         let b = vec![0.25, 0.25, 0.25, 0.25];
-        assert!((chi_squared(&a, &b)).abs() < 1e-10);
+        assert!((chi_squared(&a, &b).unwrap()).abs() < 1e-10);
     }
 
     #[test]
     fn chi_squared_different_is_positive() {
         let a = vec![1.0, 0.0, 0.0, 0.0];
         let b = vec![0.0, 0.0, 0.0, 1.0];
-        assert!(chi_squared(&a, &b) > 0.0);
+        assert!(chi_squared(&a, &b).unwrap() > 0.0);
     }
 
     #[test]

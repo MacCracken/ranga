@@ -173,7 +173,7 @@ proptest! {
         let buf = PixelBuffer::new(data.clone(), w, 1, PixelFormat::Rgb8).unwrap();
         let rgba = convert::rgb8_to_rgba8(&buf).unwrap();
         let back = convert::rgba8_to_rgb8(&rgba).unwrap();
-        prop_assert_eq!(&back.data, &data);
+        prop_assert_eq!(back.data(), &data[..]);
     }
 
     #[test]
@@ -185,7 +185,7 @@ proptest! {
         let buf = PixelBuffer::new(data.clone(), w, 1, PixelFormat::Argb8).unwrap();
         let rgba = convert::argb8_to_rgba8(&buf).unwrap();
         let back = convert::rgba8_to_argb8(&rgba).unwrap();
-        prop_assert_eq!(&back.data, &data);
+        prop_assert_eq!(back.data(), &data[..]);
     }
 
     #[test]
@@ -195,8 +195,8 @@ proptest! {
         let buf = PixelBuffer::new(data, 4, 4, PixelFormat::Rgba8).unwrap();
         let yuv = convert::rgba_to_yuv420p(&buf).unwrap();
         let back = convert::yuv420p_to_rgba(&yuv).unwrap();
-        prop_assert!((back.data[0] as i16 - v as i16).unsigned_abs() < 3,
-            "in={} out={}", v, back.data[0]);
+        prop_assert!((back.data()[0] as i16 - v as i16).unsigned_abs() < 3,
+            "in={} out={}", v, back.data()[0]);
     }
 }
 
@@ -227,8 +227,8 @@ proptest! {
     ) {
         let buf = PixelBuffer::zeroed(w, h, PixelFormat::Rgba8);
         let cropped = ranga::transform::crop(&buf, l, t, r, b).unwrap();
-        prop_assert!(cropped.width <= w);
-        prop_assert!(cropped.height <= h);
+        prop_assert!(cropped.width() <= w);
+        prop_assert!(cropped.height() <= h);
     }
 
     #[test]
@@ -238,8 +238,8 @@ proptest! {
     ) {
         let buf = PixelBuffer::zeroed(w, h, PixelFormat::Rgba8);
         let resized = ranga::transform::resize(&buf, nw, nh, ranga::transform::ScaleFilter::Nearest).unwrap();
-        prop_assert_eq!(resized.width, nw);
-        prop_assert_eq!(resized.height, nh);
+        prop_assert_eq!(resized.width(), nw);
+        prop_assert_eq!(resized.height(), nh);
     }
 
     #[test]
@@ -250,7 +250,7 @@ proptest! {
         if let Ok(buf) = PixelBuffer::new(data.clone(), w, h, PixelFormat::Rgba8) {
             let f1 = ranga::transform::flip_horizontal(&buf).unwrap();
             let f2 = ranga::transform::flip_horizontal(&f1).unwrap();
-            prop_assert_eq!(&f2.data, &data);
+            prop_assert_eq!(f2.data(), &data[..]);
         }
     }
 
@@ -274,9 +274,9 @@ proptest! {
         let a = PixelBuffer::new(vec![r, g, b, 255], 1, 1, PixelFormat::Rgba8).unwrap();
         let b_buf = PixelBuffer::new(vec![0, 0, 0, 255], 1, 1, PixelFormat::Rgba8).unwrap();
         let result = ranga::composite::dissolve(&a, &b_buf, 0.0).unwrap();
-        prop_assert_eq!(result.data[0], r);
-        prop_assert_eq!(result.data[1], g);
-        prop_assert_eq!(result.data[2], b);
+        prop_assert_eq!(result.data()[0], r);
+        prop_assert_eq!(result.data()[1], g);
+        prop_assert_eq!(result.data()[2], b);
     }
 
     #[test]
@@ -286,9 +286,9 @@ proptest! {
         let a_buf = PixelBuffer::new(vec![0, 0, 0, 255], 1, 1, PixelFormat::Rgba8).unwrap();
         let b_buf = PixelBuffer::new(vec![rv, gv, bv, 255], 1, 1, PixelFormat::Rgba8).unwrap();
         let result = ranga::composite::dissolve(&a_buf, &b_buf, 1.0).unwrap();
-        prop_assert_eq!(result.data[0], rv);
-        prop_assert_eq!(result.data[1], gv);
-        prop_assert_eq!(result.data[2], bv);
+        prop_assert_eq!(result.data()[0], rv);
+        prop_assert_eq!(result.data()[1], gv);
+        prop_assert_eq!(result.data()[2], bv);
     }
 
     #[test]
@@ -297,9 +297,9 @@ proptest! {
     ) {
         let mut buf = PixelBuffer::new(vec![r, g, b, 255], 1, 1, PixelFormat::Rgba8).unwrap();
         ranga::composite::premultiply_alpha(&mut buf).unwrap();
-        prop_assert_eq!(buf.data[0], r);
-        prop_assert_eq!(buf.data[1], g);
-        prop_assert_eq!(buf.data[2], b);
+        prop_assert_eq!(buf.data()[0], r);
+        prop_assert_eq!(buf.data()[1], g);
+        prop_assert_eq!(buf.data()[2], b);
     }
 
     #[test]
@@ -309,10 +309,10 @@ proptest! {
         let mut buf = PixelBuffer::new(vec![r, g, b, 255], 1, 1, PixelFormat::Rgba8).unwrap();
         ranga::filter::threshold(&mut buf, t).unwrap();
         // Result must be either 0 or 255
-        prop_assert!(buf.data[0] == 0 || buf.data[0] == 255);
+        prop_assert!(buf.data()[0] == 0 || buf.data()[0] == 255);
         // R == G == B (grayscale output)
-        prop_assert_eq!(buf.data[0], buf.data[1]);
-        prop_assert_eq!(buf.data[1], buf.data[2]);
+        prop_assert_eq!(buf.data()[0], buf.data()[1]);
+        prop_assert_eq!(buf.data()[1], buf.data()[2]);
     }
 
     #[test]
@@ -324,9 +324,9 @@ proptest! {
             &mut buf,
             [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
         ).unwrap();
-        prop_assert_eq!(buf.data[0], r);
-        prop_assert_eq!(buf.data[1], g);
-        prop_assert_eq!(buf.data[2], b);
+        prop_assert_eq!(buf.data()[0], r);
+        prop_assert_eq!(buf.data()[1], g);
+        prop_assert_eq!(buf.data()[2], b);
     }
 }
 
@@ -397,8 +397,8 @@ proptest! {
         let buf = PixelBuffer::new(data, 4, 4, PixelFormat::Rgba8).unwrap();
         let yuv = convert::rgba_to_yuv420p_bt2020(&buf).unwrap();
         let back = convert::yuv420p_to_rgba_bt2020(&yuv).unwrap();
-        prop_assert!((back.data[0] as i16 - v as i16).unsigned_abs() < 3,
-            "in={} out={}", v, back.data[0]);
+        prop_assert!((back.data()[0] as i16 - v as i16).unsigned_abs() < 3,
+            "in={} out={}", v, back.data()[0]);
     }
 }
 
@@ -411,9 +411,9 @@ proptest! {
     fn fade_one_is_identity(r in 0u8..=255, g in 0u8..=255, b in 0u8..=255) {
         let mut buf = PixelBuffer::new(vec![r, g, b, 255], 1, 1, PixelFormat::Rgba8).unwrap();
         ranga::composite::fade(&mut buf, 1.0).unwrap();
-        prop_assert_eq!(buf.data[0], r);
-        prop_assert_eq!(buf.data[1], g);
-        prop_assert_eq!(buf.data[2], b);
+        prop_assert_eq!(buf.data()[0], r);
+        prop_assert_eq!(buf.data()[1], g);
+        prop_assert_eq!(buf.data()[2], b);
     }
 
     #[test]
@@ -421,6 +421,6 @@ proptest! {
         let a = PixelBuffer::new([r, g, b, 255].repeat(4), 2, 2, PixelFormat::Rgba8).unwrap();
         let b_buf = PixelBuffer::new([0, 0, 0, 255].repeat(4), 2, 2, PixelFormat::Rgba8).unwrap();
         let result = ranga::composite::wipe(&a, &b_buf, 0.0).unwrap();
-        prop_assert_eq!(result.data[0], r);
+        prop_assert_eq!(result.data()[0], r);
     }
 }

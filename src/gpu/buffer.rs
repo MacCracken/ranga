@@ -4,7 +4,7 @@
 //! It provides upload and download helpers that work directly with [`PixelBuffer`].
 
 use super::context::{GpuContext, GpuError};
-use crate::pixel::PixelBuffer;
+use crate::pixel::{PixelBuffer, PixelFormat};
 
 /// A GPU-side pixel buffer for compute operations.
 ///
@@ -22,21 +22,23 @@ use crate::pixel::PixelBuffer;
 /// let buf = PixelBuffer::zeroed(256, 256, PixelFormat::Rgba8);
 /// let gpu_buf = GpuBuffer::upload(&ctx, &buf);
 /// let result = gpu_buf.download(&ctx).unwrap();
-/// assert_eq!(result.width, 256);
+/// assert_eq!(result.width(), 256);
 /// ```
 pub struct GpuBuffer {
     buffer: wgpu::Buffer,
     size: u64,
     width: u32,
     height: u32,
+    format: PixelFormat,
 }
 
 impl GpuBuffer {
     /// Upload a [`PixelBuffer`] to GPU storage.
     ///
-    /// Creates a new GPU buffer initialized with the pixel data. The buffer
-    /// is usable as both a storage buffer (for compute shaders) and as a
-    /// copy source/destination (for readback).
+    /// Creates a new GPU buffer initialized with the pixel data using
+    /// [`mabda::buffer::create_storage_buffer`]. The buffer is usable as
+    /// both a storage buffer (for compute shaders) and as a copy
+    /// source/destination (for readback).
     ///
     /// # Examples
     ///
@@ -51,28 +53,21 @@ impl GpuBuffer {
     /// ```
     #[must_use]
     pub fn upload(ctx: &GpuContext, buf: &PixelBuffer) -> Self {
-        use wgpu::util::DeviceExt;
-        let buffer = ctx
-            .device()
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("ranga_pixel_buf"),
-                contents: &buf.data,
-                usage: wgpu::BufferUsages::STORAGE
-                    | wgpu::BufferUsages::COPY_SRC
-                    | wgpu::BufferUsages::COPY_DST,
-            });
+        let buffer =
+            mabda::buffer::create_storage_buffer(ctx.device(), &buf.data, "ranga_pixel_buf", false);
         Self {
             size: buf.data.len() as u64,
             width: buf.width,
             height: buf.height,
+            format: buf.format,
             buffer,
         }
     }
 
     /// Download GPU buffer back to a [`PixelBuffer`].
     ///
-    /// Creates a staging buffer, copies the GPU data into it, maps it for
-    /// reading, and constructs a new [`PixelBuffer`] with the result.
+    /// Uses [`mabda::buffer::read_buffer`] for synchronous GPU readback,
+    /// then constructs a new [`PixelBuffer`] with the result.
     ///
     /// # Errors
     ///
@@ -88,44 +83,15 @@ impl GpuBuffer {
     /// let buf = PixelBuffer::zeroed(32, 32, PixelFormat::Rgba8);
     /// let gpu_buf = GpuBuffer::upload(&ctx, &buf);
     /// let result = gpu_buf.download(&ctx).unwrap();
-    /// assert_eq!(result.data.len(), 32 * 32 * 4);
+    /// assert_eq!(result.data().len(), 32 * 32 * 4);
     /// ```
     #[must_use = "returns the downloaded pixel buffer"]
     pub fn download(&self, ctx: &GpuContext) -> Result<PixelBuffer, GpuError> {
-        let staging = ctx.device().create_buffer(&wgpu::BufferDescriptor {
-            label: Some("staging_readback"),
-            size: self.size,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let mut encoder = ctx
-            .device()
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        encoder.copy_buffer_to_buffer(&self.buffer, 0, &staging, 0, self.size);
-        ctx.queue().submit(Some(encoder.finish()));
-
-        let slice = staging.slice(..);
-        let (sender, receiver) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = sender.send(result);
-        });
-        ctx.device().poll(wgpu::PollType::wait_indefinitely()).ok();
-        receiver
-            .recv()
-            .map_err(|e| GpuError::BufferOp(e.to_string()))?
+        let data = mabda::buffer::read_buffer(ctx.device(), ctx.queue(), &self.buffer, self.size)
             .map_err(|e| GpuError::BufferOp(e.to_string()))?;
 
-        let data = slice.get_mapped_range().to_vec();
-        drop(staging);
-
-        PixelBuffer::new(
-            data,
-            self.width,
-            self.height,
-            crate::pixel::PixelFormat::Rgba8,
-        )
-        .map_err(|e| GpuError::BufferOp(e.to_string()))
+        PixelBuffer::new(data, self.width, self.height, self.format)
+            .map_err(|e| GpuError::BufferOp(e.to_string()))
     }
 
     /// Start an asynchronous download of this GPU buffer.
@@ -135,9 +101,6 @@ impl GpuBuffer {
     /// perform other work while the GPU readback is in progress, then call
     /// [`Receiver::recv`](std::sync::mpsc::Receiver::recv) to block until
     /// the result is ready.
-    ///
-    /// You must call [`GpuContext::device().poll()`](wgpu::Device::poll) at
-    /// some point to drive the GPU work to completion (or use a polling loop).
     ///
     /// # Examples
     ///
@@ -150,15 +113,22 @@ impl GpuBuffer {
     /// let gpu_buf = GpuBuffer::upload(&ctx, &buf);
     /// let receiver = gpu_buf.download_async(&ctx);
     /// // ... do other work ...
-    /// ctx.device().poll(wgpu::PollType::wait_indefinitely()).ok();
     /// let result = receiver.recv().unwrap().unwrap();
-    /// assert_eq!(result.width, 64);
+    /// assert_eq!(result.width(), 64);
     /// ```
     #[must_use = "returns a receiver for the downloaded pixel buffer"]
     pub fn download_async(
         &self,
         ctx: &GpuContext,
     ) -> std::sync::mpsc::Receiver<Result<PixelBuffer, GpuError>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let width = self.width;
+        let height = self.height;
+        let format = self.format;
+
+        // mabda::PendingReadback::finish() requires &Device, which is not Send.
+        // Use manual staging buffer approach so the map callback thread can
+        // complete independently without needing the device.
         let staging = ctx.device().create_buffer(&wgpu::BufferDescriptor {
             label: Some("staging_readback_async"),
             size: self.size,
@@ -172,19 +142,13 @@ impl GpuBuffer {
         encoder.copy_buffer_to_buffer(&self.buffer, 0, &staging, 0, self.size);
         ctx.queue().submit(Some(encoder.finish()));
 
-        let (tx, rx) = std::sync::mpsc::channel();
-        let width = self.width;
-        let height = self.height;
         let size = self.size as usize;
-
         let slice = staging.slice(..);
         let (map_tx, map_rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = map_tx.send(result);
         });
 
-        // Spawn a thread that waits for the map callback and sends the result.
-        // This avoids blocking the caller; they just recv() on the returned channel.
         std::thread::spawn(move || {
             let map_result = map_rx.recv();
             let result = (|| -> Result<PixelBuffer, GpuError> {
@@ -197,7 +161,7 @@ impl GpuBuffer {
                     mapped[..size].to_vec()
                 };
                 drop(staging);
-                PixelBuffer::new(data, width, height, crate::pixel::PixelFormat::Rgba8)
+                PixelBuffer::new(data, width, height, format)
                     .map_err(|e| GpuError::BufferOp(e.to_string()))
             })();
             let _ = tx.send(result);
@@ -208,25 +172,36 @@ impl GpuBuffer {
 
     /// Access the underlying [`wgpu::Buffer`].
     #[must_use]
+    #[inline]
     pub fn wgpu_buffer(&self) -> &wgpu::Buffer {
         &self.buffer
     }
 
     /// Size of the buffer in bytes.
     #[must_use]
+    #[inline]
     pub fn size(&self) -> u64 {
         self.size
     }
 
     /// Width of the pixel buffer in pixels.
     #[must_use]
+    #[inline]
     pub fn width(&self) -> u32 {
         self.width
     }
 
     /// Height of the pixel buffer in pixels.
     #[must_use]
+    #[inline]
     pub fn height(&self) -> u32 {
         self.height
+    }
+
+    /// Pixel format of the buffer.
+    #[must_use]
+    #[inline]
+    pub fn format(&self) -> PixelFormat {
+        self.format
     }
 }

@@ -25,7 +25,7 @@ use rayon::prelude::*;
 ///
 /// let mut buf = PixelBuffer::new(vec![100, 100, 100, 255], 1, 1, PixelFormat::Rgba8).unwrap();
 /// filter::brightness(&mut buf, 0.5).unwrap();
-/// assert!(buf.data[0] > 200);
+/// assert!(buf.data()[0] > 200);
 /// ```
 pub fn brightness(buf: &mut PixelBuffer, offset: f32) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
@@ -57,6 +57,7 @@ pub fn brightness(buf: &mut PixelBuffer, offset: f32) -> Result<(), RangaError> 
     }
 }
 
+#[inline]
 fn brightness_scalar(data: &mut [u8], shift: i16) {
     for pixel in data.chunks_exact_mut(4) {
         pixel[0] = (pixel[0] as i16 + shift).clamp(0, 255) as u8;
@@ -163,7 +164,7 @@ unsafe fn brightness_neon(data: &mut [u8], shift: i16) {
 /// let mut buf = PixelBuffer::new(vec![128, 128, 128, 255], 1, 1, PixelFormat::Rgba8).unwrap();
 /// filter::contrast(&mut buf, 2.0).unwrap();
 /// // 128 is the center point, so it stays at 128
-/// assert_eq!(buf.data[0], 128);
+/// assert_eq!(buf.data()[0], 128);
 /// ```
 pub fn contrast(buf: &mut PixelBuffer, factor: f32) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
@@ -194,8 +195,8 @@ pub fn contrast(buf: &mut PixelBuffer, factor: f32) -> Result<(), RangaError> {
 /// let mut buf = PixelBuffer::new(vec![255, 0, 0, 255], 1, 1, PixelFormat::Rgba8).unwrap();
 /// filter::saturation(&mut buf, 0.0).unwrap();
 /// // At zero saturation, all channels equal (grayscale)
-/// assert_eq!(buf.data[0], buf.data[1]);
-/// assert_eq!(buf.data[1], buf.data[2]);
+/// assert_eq!(buf.data()[0], buf.data()[1]);
+/// assert_eq!(buf.data()[1], buf.data()[2]);
 /// ```
 pub fn saturation(buf: &mut PixelBuffer, factor: f32) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
@@ -229,9 +230,9 @@ pub fn saturation(buf: &mut PixelBuffer, factor: f32) -> Result<(), RangaError> 
 ///
 /// let mut buf = PixelBuffer::new(vec![128, 128, 128, 255], 1, 1, PixelFormat::Rgba8).unwrap();
 /// // Identity transform: black=0, white=1, gamma=1
-/// let original = buf.data.clone();
+/// let original = buf.data().to_vec();
 /// filter::levels(&mut buf, 0.0, 1.0, 1.0).unwrap();
-/// assert_eq!(buf.data, original);
+/// assert_eq!(buf.data(), &original[..]);
 /// ```
 pub fn levels(buf: &mut PixelBuffer, black: f32, white: f32, gamma: f32) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
@@ -239,6 +240,9 @@ pub fn levels(buf: &mut PixelBuffer, black: f32, white: f32, gamma: f32) -> Resu
             "levels: expected Rgba8, got {:?}",
             buf.format
         )));
+    }
+    if gamma <= 0.0 {
+        return Err(RangaError::Other("levels gamma must be > 0".into()));
     }
     let range = (white - black).max(1e-6);
     // Build LUT for speed
@@ -275,7 +279,7 @@ pub fn levels(buf: &mut PixelBuffer, black: f32, white: f32, gamma: f32) -> Resu
 /// }
 /// let mut buf = PixelBuffer::new(vec![100, 150, 200, 255], 1, 1, PixelFormat::Rgba8).unwrap();
 /// filter::curves(&mut buf, &lut).unwrap();
-/// assert_eq!(buf.data[0], 155);
+/// assert_eq!(buf.data()[0], 155);
 /// ```
 pub fn curves(buf: &mut PixelBuffer, lut: &[u8; 256]) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
@@ -304,9 +308,9 @@ pub fn curves(buf: &mut PixelBuffer, lut: &[u8; 256]) -> Result<(), RangaError> 
 ///
 /// let mut buf = PixelBuffer::new(vec![200, 100, 50, 255], 1, 1, PixelFormat::Rgba8).unwrap();
 /// filter::grayscale(&mut buf).unwrap();
-/// assert_eq!(buf.data[0], buf.data[1]); // all channels equal
-/// assert_eq!(buf.data[1], buf.data[2]);
-/// assert_eq!(buf.data[3], 255); // alpha preserved
+/// assert_eq!(buf.data()[0], buf.data()[1]); // all channels equal
+/// assert_eq!(buf.data()[1], buf.data()[2]);
+/// assert_eq!(buf.data()[3], 255); // alpha preserved
 /// ```
 pub fn grayscale(buf: &mut PixelBuffer) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
@@ -336,6 +340,7 @@ pub fn grayscale(buf: &mut PixelBuffer) -> Result<(), RangaError> {
     }
 }
 
+#[inline]
 fn grayscale_scalar(data: &mut [u8]) {
     for pixel in data.chunks_exact_mut(4) {
         let gray =
@@ -399,9 +404,9 @@ unsafe fn grayscale_neon(data: &mut [u8]) {
 ///
 /// let mut buf = PixelBuffer::new(vec![100, 150, 200, 255], 1, 1, PixelFormat::Rgba8).unwrap();
 /// filter::invert(&mut buf).unwrap();
-/// assert_eq!(buf.data[0], 155);
-/// assert_eq!(buf.data[1], 105);
-/// assert_eq!(buf.data[2], 55);
+/// assert_eq!(buf.data()[0], 155);
+/// assert_eq!(buf.data()[1], 105);
+/// assert_eq!(buf.data()[2], 55);
 /// ```
 pub fn invert(buf: &mut PixelBuffer) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
@@ -531,7 +536,7 @@ fn blur_pass_vertical(src: &[u8], dst: &mut [u8], w: usize, h: usize, kernel: &[
 ///
 /// let buf = PixelBuffer::new(vec![128; 8 * 8 * 4], 8, 8, PixelFormat::Rgba8).unwrap();
 /// let blurred = filter::gaussian_blur(&buf, 2).unwrap();
-/// assert_eq!(blurred.width, 8);
+/// assert_eq!(blurred.width(), 8);
 /// ```
 #[must_use = "returns a new blurred buffer"]
 pub fn gaussian_blur(buf: &PixelBuffer, radius: u32) -> Result<PixelBuffer, RangaError> {
@@ -570,7 +575,7 @@ pub fn gaussian_blur(buf: &PixelBuffer, radius: u32) -> Result<PixelBuffer, Rang
 ///
 /// let buf = PixelBuffer::new(vec![128; 8 * 8 * 4], 8, 8, PixelFormat::Rgba8).unwrap();
 /// let blurred = filter::box_blur(&buf, 2).unwrap();
-/// assert_eq!(blurred.width, 8);
+/// assert_eq!(blurred.width(), 8);
 /// ```
 #[must_use = "returns a new blurred buffer"]
 pub fn box_blur(buf: &PixelBuffer, radius: u32) -> Result<PixelBuffer, RangaError> {
@@ -611,7 +616,7 @@ pub fn box_blur(buf: &PixelBuffer, radius: u32) -> Result<PixelBuffer, RangaErro
 ///
 /// let buf = PixelBuffer::new(vec![128; 8 * 8 * 4], 8, 8, PixelFormat::Rgba8).unwrap();
 /// let sharp = filter::unsharp_mask(&buf, 2, 1.0).unwrap();
-/// assert_eq!(sharp.width, 8);
+/// assert_eq!(sharp.width(), 8);
 /// ```
 #[must_use = "returns a new sharpened buffer"]
 pub fn unsharp_mask(
@@ -649,7 +654,7 @@ pub fn unsharp_mask(
 /// let mut buf = PixelBuffer::new(vec![255, 0, 0, 255], 1, 1, PixelFormat::Rgba8).unwrap();
 /// filter::hue_shift(&mut buf, 120.0).unwrap();
 /// // Red shifted by 120° → approximately green
-/// assert!(buf.data[1] > buf.data[0]); // G > R
+/// assert!(buf.data()[1] > buf.data()[0]); // G > R
 /// ```
 pub fn hue_shift(buf: &mut PixelBuffer, degrees: f32) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
@@ -694,7 +699,7 @@ pub fn hue_shift(buf: &mut PixelBuffer, degrees: f32) -> Result<(), RangaError> 
 ///     [0.1, 0.0, -0.1],   // midtones: warm shift
 ///     [0.0, 0.0, 0.0],   // highlights: neutral
 /// ).unwrap();
-/// assert!(buf.data[0] > 128); // red increased in midtones
+/// assert!(buf.data()[0] > 128); // red increased in midtones
 /// ```
 pub fn color_balance(
     buf: &mut PixelBuffer,
@@ -736,8 +741,8 @@ pub fn color_balance(
 /// let mut buf = PixelBuffer::new(vec![200; 8 * 8 * 4], 8, 8, PixelFormat::Rgba8).unwrap();
 /// filter::vignette(&mut buf, 0.5).unwrap();
 /// // Center pixel should be brighter than corner
-/// let center = buf.data[(4 * 8 + 4) * 4] as u16;
-/// let corner = buf.data[0] as u16;
+/// let center = buf.data()[(4 * 8 + 4) * 4] as u16;
+/// let corner = buf.data()[0] as u16;
 /// assert!(center > corner);
 /// ```
 pub fn vignette(buf: &mut PixelBuffer, strength: f32) -> Result<(), RangaError> {
@@ -945,6 +950,7 @@ impl Xorshift64 {
             seed
         })
     }
+    #[inline]
     fn next_u64(&mut self) -> u64 {
         let mut x = self.0;
         x ^= x << 13;
@@ -954,6 +960,7 @@ impl Xorshift64 {
         x
     }
     /// Approximate Gaussian via Box-Muller-like: sum of 6 uniform - 3.
+    #[inline]
     fn next_gaussian(&mut self) -> f32 {
         let mut sum = 0.0f32;
         for _ in 0..6 {
@@ -961,6 +968,7 @@ impl Xorshift64 {
         }
         sum - 3.0 // approximate N(0,1) range roughly -3..3
     }
+    #[inline]
     fn next_f32(&mut self) -> f32 {
         (self.next_u64() & 0xFFFF_FFFF) as f32 / 4_294_967_295.0
     }
@@ -980,7 +988,7 @@ impl Xorshift64 {
 /// let mut buf = PixelBuffer::new(vec![128; 4 * 4 * 4], 4, 4, PixelFormat::Rgba8).unwrap();
 /// filter::noise_gaussian(&mut buf, 0.1, 42).unwrap();
 /// // Some pixels should have changed
-/// assert!(buf.data.iter().any(|&v| v != 128));
+/// assert!(buf.data().iter().any(|&v| v != 128));
 /// ```
 pub fn noise_gaussian(buf: &mut PixelBuffer, amount: f32, seed: u64) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
@@ -1055,7 +1063,7 @@ pub fn noise_salt_pepper(buf: &mut PixelBuffer, density: f32, seed: u64) -> Resu
 ///
 /// let buf = PixelBuffer::new(vec![128; 8 * 8 * 4], 8, 8, PixelFormat::Rgba8).unwrap();
 /// let filtered = filter::median(&buf, 1).unwrap();
-/// assert_eq!(filtered.data[0], 128); // uniform → unchanged
+/// assert_eq!(filtered.data()[0], 128); // uniform → unchanged
 /// ```
 #[must_use = "returns a new filtered buffer"]
 pub fn median(buf: &PixelBuffer, radius: u32) -> Result<PixelBuffer, RangaError> {
@@ -1109,7 +1117,7 @@ pub fn median(buf: &PixelBuffer, radius: u32) -> Result<PixelBuffer, RangaError>
 ///
 /// let buf = PixelBuffer::new(vec![128; 8 * 8 * 4], 8, 8, PixelFormat::Rgba8).unwrap();
 /// let filtered = filter::bilateral(&buf, 2, 10.0, 30.0).unwrap();
-/// assert_eq!(filtered.data[0], 128);
+/// assert_eq!(filtered.data()[0], 128);
 /// ```
 #[must_use = "returns a new filtered buffer"]
 pub fn bilateral(
@@ -1123,6 +1131,11 @@ pub fn bilateral(
             "bilateral: expected Rgba8, got {:?}",
             buf.format
         )));
+    }
+    if sigma_space <= 0.0 || sigma_color <= 0.0 {
+        return Err(RangaError::Other(
+            "bilateral filter requires sigma_space > 0 and sigma_color > 0".into(),
+        ));
     }
     if radius == 0 {
         return Ok(buf.clone());
@@ -1238,8 +1251,8 @@ pub fn vibrance(buf: &mut PixelBuffer, amount: f32) -> Result<(), RangaError> {
 /// let mut buf = PixelBuffer::new(vec![200, 100, 50, 255], 1, 1, PixelFormat::Rgba8).unwrap();
 /// // Swap red and blue channels
 /// filter::channel_mixer(&mut buf, [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]]).unwrap();
-/// assert_eq!(buf.data[0], 50);  // was blue
-/// assert_eq!(buf.data[2], 200); // was red
+/// assert_eq!(buf.data()[0], 50);  // was blue
+/// assert_eq!(buf.data()[2], 200); // was red
 /// ```
 pub fn channel_mixer(buf: &mut PixelBuffer, matrix: [[f32; 3]; 3]) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
@@ -1271,8 +1284,8 @@ pub fn channel_mixer(buf: &mut PixelBuffer, matrix: [[f32; 3]; 3]) -> Result<(),
 ///
 /// let mut buf = PixelBuffer::new(vec![100, 100, 100, 255, 200, 200, 200, 255], 2, 1, PixelFormat::Rgba8).unwrap();
 /// filter::threshold(&mut buf, 128).unwrap();
-/// assert_eq!(buf.data[0], 0);   // dark pixel → black
-/// assert_eq!(buf.data[4], 255); // bright pixel → white
+/// assert_eq!(buf.data()[0], 0);   // dark pixel → black
+/// assert_eq!(buf.data()[4], 255); // bright pixel → white
 /// ```
 pub fn threshold(buf: &mut PixelBuffer, level: u8) -> Result<(), RangaError> {
     if buf.format != PixelFormat::Rgba8 {
@@ -1306,7 +1319,7 @@ pub fn threshold(buf: &mut PixelBuffer, level: u8) -> Result<(), RangaError> {
 ///
 /// let mut buf = PixelBuffer::new(vec![128; 4 * 4 * 4], 4, 4, PixelFormat::Rgba8).unwrap();
 /// filter::flood_fill(&mut buf, 0, 0, [255, 0, 0, 255], 10).unwrap();
-/// assert_eq!(buf.data[0], 255); // filled with red
+/// assert_eq!(buf.data()[0], 255); // filled with red
 /// ```
 pub fn flood_fill(
     buf: &mut PixelBuffer,

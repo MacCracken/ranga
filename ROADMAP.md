@@ -14,9 +14,7 @@ Ordered by priority within each category.
 - [ ] **filter.rs:249** — Levels `gamma=0` causes `powf(infinity)`. Validate gamma > 0.
 - [ ] **blend.rs:27** — Doc comment says "premultiplied alpha" but `blend_pixel` operates on straight alpha. Fix docs.
 - [ ] **blend.rs:429-430** — SIMD slice validation uses `debug_assert` only — could OOB in release with bad input. Add runtime check.
-- [ ] **gpu/buffer.rs:127,200** — Hardcoded `PixelFormat::Rgba8` on download — `GpuBuffer` should store format.
 - [ ] **gpu/shaders.rs:22-23** — `pack_rgba` rounding bias (`floor(x+0.5)`) may differ from CPU rounding.
-- [ ] **gpu/context.rs:198-262** — Raw pointer from `RefCell` borrow relies on HashMap insertion stability. Replace with stable-index collection.
 
 ## MEDIUM — Performance
 
@@ -27,7 +25,7 @@ Ordered by priority within each category.
 - [ ] **filter.rs:1187-1231** — Bilateral filter spatial Gaussian weights recomputed per pixel. Precompute into table.
 - [ ] **convert.rs:all YUV-to-RGBA** — All inverse conversions are scalar per-pixel, no SIMD.
 - [ ] **blend.rs:102** — Non-Normal blend modes all scalar f32 per-pixel, no SIMD row variants.
-- [ ] **gpu/pipeline.rs:build_shader** — Shader string allocated on every dispatch even on cache hits. Move inside cache-miss path.
+- [x] ~~**gpu/pipeline.rs:build_shader** — Shader string allocated on every dispatch even on cache hits.~~ Fixed by mabda migration (ShaderCache).
 
 ## LOW — Annotations & Docs
 
@@ -49,8 +47,6 @@ Ordered by priority within each category.
 
 - [ ] **icc.rs:806** — Only ICC `para` curve types 0 and 3 supported. Add types 1, 2, 4.
 - [ ] **transform.rs:696** — `perspective_transform` hardcodes bilinear. Add `ScaleFilter` parameter.
-- [ ] **gpu/context.rs:83** — `RefCell<PipelineCache>` prevents `GpuContext` from being `Sync`. Consider `Mutex` for multi-threaded GPU dispatch.
-- [ ] **gpu/context.rs:416-435** — Spin-loop `block_on` with no timeout. Add timeout mechanism.
 
 ## Real SSE2 SIMD (deferred)
 

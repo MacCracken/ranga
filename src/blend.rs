@@ -23,7 +23,7 @@ fn div255(val: u16) -> u16 {
 /// Supported blend modes.
 ///
 /// Implements standard Photoshop-style compositing modes. All modes operate
-/// on sRGB byte values (0–255) with premultiplied alpha.
+/// on sRGB byte values (0–255) with straight (non-premultiplied) alpha.
 ///
 /// # Examples
 ///

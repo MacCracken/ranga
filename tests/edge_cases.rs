@@ -130,10 +130,10 @@ fn composite_at_argb_basic() -> Result<(), RangaError> {
 
     // Check pixel at (3,3) — should be opaque red
     let idx = (3 * 10 + 3) * 4;
-    assert_eq!(dst.data[idx], 255, "alpha should be 255");
-    assert_eq!(dst.data[idx + 1], 255, "red should be 255");
-    assert_eq!(dst.data[idx + 2], 0, "green should be 0");
-    assert_eq!(dst.data[idx + 3], 0, "blue should be 0");
+    assert_eq!(dst.data()[idx], 255, "alpha should be 255");
+    assert_eq!(dst.data()[idx + 1], 255, "red should be 255");
+    assert_eq!(dst.data()[idx + 2], 0, "green should be 0");
+    assert_eq!(dst.data()[idx + 3], 0, "blue should be 0");
     Ok(())
 }
 
@@ -147,12 +147,12 @@ fn composite_at_argb_clipping() -> Result<(), RangaError> {
     // Pixel at (2,2) should be composited
     let idx = (2 * 4 + 2) * 4;
     assert!(
-        dst.data[idx] > 0,
+        dst.data()[idx] > 0,
         "overlapping pixel should be non-zero alpha"
     );
 
     // Pixel at (0,0) should still be zero
-    assert_eq!(dst.data[0], 0, "non-overlapping pixel should remain zero");
+    assert_eq!(dst.data()[0], 0, "non-overlapping pixel should remain zero");
     Ok(())
 }
 
@@ -182,13 +182,13 @@ fn equalize_gradient_expands_range() -> Result<(), RangaError> {
     let mut buf = PixelBuffer::new(data, 256, 1, PixelFormat::Rgba8)?;
 
     let min_before = buf
-        .data
+        .data()
         .chunks_exact(4)
         .map(|p| p[0])
         .min()
         .expect("non-empty");
     let max_before = buf
-        .data
+        .data()
         .chunks_exact(4)
         .map(|p| p[0])
         .max()
@@ -197,13 +197,13 @@ fn equalize_gradient_expands_range() -> Result<(), RangaError> {
     histogram::equalize(&mut buf)?;
 
     let min_after = buf
-        .data
+        .data()
         .chunks_exact(4)
         .map(|p| p[0])
         .min()
         .expect("non-empty");
     let max_after = buf
-        .data
+        .data()
         .chunks_exact(4)
         .map(|p| p[0])
         .max()
@@ -221,11 +221,12 @@ fn equalize_gradient_expands_range() -> Result<(), RangaError> {
 #[test]
 fn auto_levels_single_value_unchanged() -> Result<(), RangaError> {
     let mut buf = PixelBuffer::new([100, 100, 100, 255].repeat(16), 4, 4, PixelFormat::Rgba8)?;
-    let original = buf.data.clone();
+    let original = buf.data().to_vec();
     histogram::auto_levels(&mut buf)?;
     // Single value image: range is 0, so stretch does (0.0, 1.0) — identity
     assert_eq!(
-        buf.data, original,
+        buf.data(),
+        original,
         "single-value image should be unchanged by auto_levels"
     );
     Ok(())
@@ -260,8 +261,8 @@ fn luminance_histogram_various_bin_counts() -> Result<(), RangaError> {
 fn gaussian_blur_large_radius_small_image_no_panic() -> Result<(), RangaError> {
     let buf = PixelBuffer::new(vec![128; 2 * 2 * 4], 2, 2, PixelFormat::Rgba8)?;
     let result = filter::gaussian_blur(&buf, 50)?;
-    assert_eq!(result.width, 2);
-    assert_eq!(result.height, 2);
+    assert_eq!(result.width(), 2);
+    assert_eq!(result.height(), 2);
     Ok(())
 }
 
@@ -269,7 +270,7 @@ fn gaussian_blur_large_radius_small_image_no_panic() -> Result<(), RangaError> {
 fn box_blur_radius_zero_identity() -> Result<(), RangaError> {
     let buf = PixelBuffer::new([100, 150, 200, 255].repeat(16), 4, 4, PixelFormat::Rgba8)?;
     let result = filter::box_blur(&buf, 0)?;
-    assert_eq!(result.data, buf.data, "radius 0 should be identity");
+    assert_eq!(result.data(), buf.data(), "radius 0 should be identity");
     Ok(())
 }
 
@@ -277,10 +278,10 @@ fn box_blur_radius_zero_identity() -> Result<(), RangaError> {
 fn auto_white_balance_balanced_is_near_identity() -> Result<(), RangaError> {
     // Already balanced: all channels have same average (128)
     let mut buf = PixelBuffer::new([128, 128, 128, 255].repeat(64), 8, 8, PixelFormat::Rgba8)?;
-    let original = buf.data.clone();
+    let original = buf.data().to_vec();
     filter::auto_white_balance(&mut buf)?;
     // Each channel should remain very close to the original
-    for (i, (&orig, &new)) in original.iter().zip(buf.data.iter()).enumerate() {
+    for (i, (&orig, &new)) in original.iter().zip(buf.data().iter()).enumerate() {
         if i % 4 != 3 {
             // skip alpha
             assert!(
@@ -297,7 +298,7 @@ fn bilateral_single_color_identity() -> Result<(), RangaError> {
     let buf = PixelBuffer::new([100, 100, 100, 255].repeat(16), 4, 4, PixelFormat::Rgba8)?;
     let result = filter::bilateral(&buf, 2, 10.0, 30.0)?;
     // All pixels are the same color, so bilateral should not change them
-    for (i, (&orig, &filtered)) in buf.data.iter().zip(result.data.iter()).enumerate() {
+    for (i, (&orig, &filtered)) in buf.data().iter().zip(result.data().iter()).enumerate() {
         assert_eq!(orig, filtered, "byte {i} changed from {orig} to {filtered}");
     }
     Ok(())
@@ -308,18 +309,18 @@ fn vibrance_negative_reduces_saturation() -> Result<(), RangaError> {
     // Use a partially saturated pixel so vibrance has room to act.
     // Vibrance scales by (1.0 - sat), so fully saturated pixels (sat=1.0) are unchanged.
     let mut buf = PixelBuffer::new(vec![200, 100, 150, 255], 1, 1, PixelFormat::Rgba8)?;
-    let orig_r = buf.data[0] as i16;
-    let orig_g = buf.data[1] as i16;
-    let orig_b = buf.data[2] as i16;
+    let orig_r = buf.data()[0] as i16;
+    let orig_g = buf.data()[1] as i16;
+    let orig_b = buf.data()[2] as i16;
     let orig_spread = (orig_r - orig_g).unsigned_abs()
         + (orig_r - orig_b).unsigned_abs()
         + (orig_g - orig_b).unsigned_abs();
 
     filter::vibrance(&mut buf, -0.8)?;
 
-    let r = buf.data[0] as i16;
-    let g = buf.data[1] as i16;
-    let b = buf.data[2] as i16;
+    let r = buf.data()[0] as i16;
+    let g = buf.data()[1] as i16;
+    let b = buf.data()[2] as i16;
     let spread = (r - g).unsigned_abs() + (r - b).unsigned_abs() + (g - b).unsigned_abs();
     assert!(
         spread < orig_spread,
@@ -374,9 +375,9 @@ fn crop_zero_size_region() -> Result<(), RangaError> {
     let buf = PixelBuffer::zeroed(10, 10, PixelFormat::Rgba8);
     // left == right => zero width
     let cropped = transform::crop(&buf, 5, 5, 5, 5)?;
-    assert_eq!(cropped.width, 0);
-    assert_eq!(cropped.height, 0);
-    assert!(cropped.data.is_empty());
+    assert_eq!(cropped.width(), 0);
+    assert_eq!(cropped.height(), 0);
+    assert!(cropped.data().is_empty());
     Ok(())
 }
 
@@ -385,14 +386,14 @@ fn resize_to_1x1() -> Result<(), RangaError> {
     // Fill with a solid color
     let buf = PixelBuffer::new([100, 150, 200, 255].repeat(64), 8, 8, PixelFormat::Rgba8)?;
     let small = transform::resize(&buf, 1, 1, ScaleFilter::Bilinear)?;
-    assert_eq!(small.width, 1);
-    assert_eq!(small.height, 1);
-    assert_eq!(small.data.len(), 4);
+    assert_eq!(small.width(), 1);
+    assert_eq!(small.height(), 1);
+    assert_eq!(small.data().len(), 4);
     // Should sample somewhere near the original color
     assert!(
-        (small.data[0] as i16 - 100).unsigned_abs() < 20,
+        (small.data()[0] as i16 - 100).unsigned_abs() < 20,
         "red channel unexpected: {}",
-        small.data[0]
+        small.data()[0]
     );
     Ok(())
 }
@@ -403,10 +404,10 @@ fn perspective_identity_preserves_image() -> Result<(), RangaError> {
     let buf = PixelBuffer::new([100, 150, 200, 255].repeat(64), 8, 8, PixelFormat::Rgba8)?;
     let p = Perspective::identity();
     let result = transform::perspective_transform(&buf, &p, 8, 8)?;
-    assert_eq!(result.width, 8);
-    assert_eq!(result.height, 8);
+    assert_eq!(result.width(), 8);
+    assert_eq!(result.height(), 8);
     // Solid color should be preserved everywhere
-    for (i, (&orig, &out)) in buf.data.iter().zip(result.data.iter()).enumerate() {
+    for (i, (&orig, &out)) in buf.data().iter().zip(result.data().iter()).enumerate() {
         assert!(
             (orig as i16 - out as i16).unsigned_abs() <= 1,
             "byte {i}: expected {orig}, got {out}"
@@ -423,11 +424,11 @@ fn perspective_identity_preserves_image() -> Result<(), RangaError> {
 fn rgba_to_yuv420p_bt2020_roundtrip() -> Result<(), RangaError> {
     let buf = PixelBuffer::new([128, 128, 128, 255].repeat(16), 4, 4, PixelFormat::Rgba8)?;
     let yuv = convert::rgba_to_yuv420p_bt2020(&buf)?;
-    assert_eq!(yuv.format, PixelFormat::Yuv420p);
+    assert_eq!(yuv.format(), PixelFormat::Yuv420p);
     let back = convert::yuv420p_to_rgba_bt2020(&yuv)?;
-    assert_eq!(back.format, PixelFormat::Rgba8);
+    assert_eq!(back.format(), PixelFormat::Rgba8);
     // Roundtrip for gray should be close
-    for (i, pixel) in back.data.chunks_exact(4).enumerate() {
+    for (i, pixel) in back.data().chunks_exact(4).enumerate() {
         for (c, &val) in pixel.iter().enumerate().take(3) {
             assert!(
                 (val as i16 - 128).unsigned_abs() < 10,
@@ -448,11 +449,12 @@ fn rgba8_to_argb8_roundtrip() -> Result<(), RangaError> {
         PixelFormat::Rgba8,
     )?;
     let argb = convert::rgba8_to_argb8(&original)?;
-    assert_eq!(argb.format, PixelFormat::Argb8);
+    assert_eq!(argb.format(), PixelFormat::Argb8);
     let back = convert::argb8_to_rgba8(&argb)?;
-    assert_eq!(back.format, PixelFormat::Rgba8);
+    assert_eq!(back.format(), PixelFormat::Rgba8);
     assert_eq!(
-        back.data, original.data,
+        back.data(),
+        original.data(),
         "RGBA -> ARGB -> RGBA should be identity"
     );
     Ok(())
@@ -467,14 +469,14 @@ fn rgba8_to_rgb8_then_back_sets_alpha_255() -> Result<(), RangaError> {
         PixelFormat::Rgba8,
     )?;
     let rgb = convert::rgba8_to_rgb8(&original)?;
-    assert_eq!(rgb.format, PixelFormat::Rgb8);
+    assert_eq!(rgb.format(), PixelFormat::Rgb8);
     let back = convert::rgb8_to_rgba8(&rgb)?;
-    assert_eq!(back.format, PixelFormat::Rgba8);
+    assert_eq!(back.format(), PixelFormat::Rgba8);
     // RGB channels should match, alpha should be 255
     for (i, (orig_px, back_px)) in original
-        .data
+        .data()
         .chunks_exact(4)
-        .zip(back.data.chunks_exact(4))
+        .zip(back.data().chunks_exact(4))
         .enumerate()
     {
         assert_eq!(orig_px[0], back_px[0], "pixel {i} R mismatch");

@@ -18,7 +18,7 @@ fn main() {
 
     // Print before
     println!("Before filters:");
-    for (i, pixel) in buf.data.chunks_exact(4).enumerate().take(4) {
+    for (i, pixel) in buf.data().chunks_exact(4).enumerate().take(4) {
         println!(
             "  pixel[{i}]: R={:>3} G={:>3} B={:>3} A={:>3}",
             pixel[0], pixel[1], pixel[2], pixel[3]
@@ -32,7 +32,7 @@ fn main() {
 
     // Print after
     println!("\nAfter brightness(+0.1) -> contrast(1.5) -> grayscale:");
-    for (i, pixel) in buf.data.chunks_exact(4).enumerate().take(4) {
+    for (i, pixel) in buf.data().chunks_exact(4).enumerate().take(4) {
         println!(
             "  pixel[{i}]: R={:>3} G={:>3} B={:>3} A={:>3}",
             pixel[0], pixel[1], pixel[2], pixel[3]
@@ -41,7 +41,7 @@ fn main() {
 
     // Verify grayscale: R == G == B for every pixel
     let all_gray = buf
-        .data
+        .data()
         .chunks_exact(4)
         .all(|p| p[0] == p[1] && p[1] == p[2]);
     println!("\nAll pixels are grayscale: {all_gray}");

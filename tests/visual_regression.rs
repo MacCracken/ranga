@@ -18,8 +18,12 @@ fn make_buf(w: u32, h: u32, data: Vec<u8>) -> PixelBuffer {
 
 /// Helper: assert max per-channel difference between two equal-size buffers.
 fn assert_max_diff(a: &PixelBuffer, b: &PixelBuffer, max_diff: u8, label: &str) {
-    assert_eq!(a.data.len(), b.data.len(), "{label}: buffer size mismatch");
-    for (i, (&av, &bv)) in a.data.iter().zip(b.data.iter()).enumerate() {
+    assert_eq!(
+        a.data().len(),
+        b.data().len(),
+        "{label}: buffer size mismatch"
+    );
+    for (i, (&av, &bv)) in a.data().iter().zip(b.data().iter()).enumerate() {
         let diff = (av as i16 - bv as i16).unsigned_abs() as u8;
         assert!(
             diff <= max_diff,
@@ -52,7 +56,7 @@ fn gradient_blur_smoothness() {
     // Verify the red channel is monotonically non-decreasing (no banding dips).
     let mut prev = 0u8;
     for x in 0..w as usize {
-        let r = blurred.data[x * 4];
+        let r = blurred.data()[x * 4];
         assert!(
             r >= prev || (prev - r) <= 1,
             "banding artifact at x={x}: prev={prev}, current={r}"
@@ -75,8 +79,8 @@ fn checkerboard_resize_bilinear() {
     ];
     let buf = make_buf(2, 2, data);
     let resized = transform::resize(&buf, 4, 4, ScaleFilter::Bilinear).unwrap();
-    assert_eq!(resized.width, 4);
-    assert_eq!(resized.height, 4);
+    assert_eq!(resized.width(), 4);
+    assert_eq!(resized.height(), 4);
 
     // Corner pixels should preserve original values (they map exactly to src corners).
     // Top-left corner = black
@@ -123,10 +127,14 @@ fn invert_idempotency_large() {
     // invert twice = original
     filter::invert(&mut buf).unwrap();
     // Verify it actually changed
-    assert_ne!(buf.data, original, "first invert should change data");
+    assert_ne!(buf.data(), original, "first invert should change data");
 
     filter::invert(&mut buf).unwrap();
-    assert_eq!(buf.data, original, "double invert should restore original");
+    assert_eq!(
+        buf.data(),
+        original,
+        "double invert should restore original"
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -194,8 +202,8 @@ fn gaussian_blur_symmetry() {
                 let ri = (y * w as usize + mirror_x) * 4;
                 for c in 0..3 {
                     assert_eq!(
-                        blurred.data[li + c],
-                        blurred.data[ri + c],
+                        blurred.data()[li + c],
+                        blurred.data()[ri + c],
                         "horizontal symmetry failed at ({x},{y}) vs ({mirror_x},{y}), channel {c}"
                     );
                 }
@@ -212,8 +220,8 @@ fn gaussian_blur_symmetry() {
                 let bi = (mirror_y * w as usize + x) * 4;
                 for c in 0..3 {
                     assert_eq!(
-                        blurred.data[ti + c],
-                        blurred.data[bi + c],
+                        blurred.data()[ti + c],
+                        blurred.data()[bi + c],
                         "vertical symmetry failed at ({x},{y}) vs ({x},{mirror_y}), channel {c}"
                     );
                 }
@@ -244,7 +252,7 @@ fn hsl_hue_shift_360_identity() {
 
     // Hue shift by 360 should produce exact original
     // Allow +/- 1 for floating-point rounding through HSL conversion
-    for (i, (&orig, &shifted)) in original.iter().zip(buf.data.iter()).enumerate() {
+    for (i, (&orig, &shifted)) in original.iter().zip(buf.data().iter()).enumerate() {
         let diff = (orig as i16 - shifted as i16).unsigned_abs();
         assert!(
             diff <= 1,
@@ -275,7 +283,8 @@ fn color_balance_neutral_identity() {
     filter::color_balance(&mut buf, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]).unwrap();
 
     assert_eq!(
-        buf.data, original,
+        buf.data(),
+        original,
         "color balance with all zeros should produce exact original"
     );
 }
@@ -301,15 +310,15 @@ fn crop_resize_composition() {
 
     // Crop center quarter: (8, 8) to (24, 24) = 16x16
     let cropped = transform::crop(&buf, 8, 8, 24, 24).unwrap();
-    assert_eq!(cropped.width, 16, "cropped width");
-    assert_eq!(cropped.height, 16, "cropped height");
+    assert_eq!(cropped.width(), 16, "cropped width");
+    assert_eq!(cropped.height(), 16, "cropped height");
 
     // Resize back to original size
     let resized = transform::resize(&cropped, w, h, ScaleFilter::Bilinear).unwrap();
-    assert_eq!(resized.width, w, "resized width");
-    assert_eq!(resized.height, h, "resized height");
+    assert_eq!(resized.width(), w, "resized width");
+    assert_eq!(resized.height(), h, "resized height");
     assert_eq!(
-        resized.data.len(),
+        resized.data().len(),
         (w * h * 4) as usize,
         "resized data length"
     );

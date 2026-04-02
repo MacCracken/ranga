@@ -1,11 +1,10 @@
 //! GPU device/queue management.
 //!
-//! [`GpuContext`] wraps a wgpu device and queue, providing the foundation for
+//! [`GpuContext`] wraps a [`mabda::GpuContext`] to provide the foundation for
 //! all GPU compute operations. Create one context and reuse it across multiple
 //! operations to amortize initialization cost.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crate::RangaError;
 
@@ -30,38 +29,17 @@ impl From<GpuError> for RangaError {
     }
 }
 
-/// Cached compute pipelines and their associated bind group / pipeline layouts.
-///
-/// Stores compiled pipelines keyed by shader name so they can be reused across
-/// multiple dispatches, avoiding the expensive per-call pipeline compilation.
-///
-/// # Examples
-///
-/// ```no_run
-/// use ranga::gpu::GpuContext;
-///
-/// let ctx = GpuContext::new().expect("GPU required");
-/// // Pipelines are cached automatically when using gpu_* functions.
-/// ```
-pub struct PipelineCache {
-    pub(super) pipelines: HashMap<&'static str, wgpu::ComputePipeline>,
-    /// Cached bind group layout + pipeline layout for 1-buffer (storage + uniform) shaders.
-    layouts_1buf: Option<(wgpu::BindGroupLayout, wgpu::PipelineLayout)>,
-    /// Cached bind group layout + pipeline layout for 3-buffer (src + dst + uniform) shaders.
-    layouts_3buf: Option<(wgpu::BindGroupLayout, wgpu::PipelineLayout)>,
-}
-
-impl PipelineCache {
-    fn new() -> Self {
-        Self {
-            pipelines: HashMap::new(),
-            layouts_1buf: None,
-            layouts_3buf: None,
+impl From<mabda::GpuError> for GpuError {
+    fn from(e: mabda::GpuError) -> Self {
+        match e {
+            mabda::GpuError::AdapterNotFound => GpuError::NoAdapter,
+            mabda::GpuError::DeviceRequest(inner) => GpuError::DeviceRequest(inner.to_string()),
+            other => GpuError::BufferOp(other.to_string()),
         }
     }
 }
 
-/// GPU compute context — manages wgpu device and queue.
+/// GPU compute context — wraps [`mabda::GpuContext`] with pipeline and shader caches.
 ///
 /// Create once and reuse for multiple operations to amortize initialization cost.
 /// Includes a pipeline cache that stores compiled compute pipelines so
@@ -76,11 +54,12 @@ impl PipelineCache {
 /// println!("Using GPU: {} ({})", ctx.adapter_name(), ctx.backend_name());
 /// ```
 pub struct GpuContext {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    pub(super) inner: mabda::GpuContext,
+    pub(super) cache: mabda::PipelineCache,
+    #[allow(dead_code)]
+    pub(super) shader_cache: mabda::ShaderCache,
     adapter_name: String,
     backend: String,
-    pub(super) cache: RefCell<PipelineCache>,
 }
 
 impl GpuContext {
@@ -97,35 +76,18 @@ impl GpuContext {
     /// let ctx = GpuContext::new().expect("GPU required");
     /// ```
     pub fn new() -> Result<Self, GpuError> {
-        let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
-        desc.backends = wgpu::Backends::VULKAN | wgpu::Backends::METAL;
-        let instance = wgpu::Instance::new(desc);
+        let inner = pollster::block_on(mabda::GpuContext::new())?;
 
-        let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        }))
-        .map_err(|_| GpuError::NoAdapter)?;
-
-        let info = adapter.get_info();
+        let info = inner.adapter.get_info();
         let adapter_name = info.name.clone();
         let backend = format!("{:?}", info.backend);
 
-        let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("ranga-gpu"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::default(),
-            ..Default::default()
-        }))
-        .map_err(|e: wgpu::RequestDeviceError| GpuError::DeviceRequest(e.to_string()))?;
-
         Ok(Self {
-            device,
-            queue,
+            inner,
+            cache: mabda::PipelineCache::new(),
+            shader_cache: mabda::ShaderCache::new(),
             adapter_name,
             backend,
-            cache: RefCell::new(PipelineCache::new()),
         })
     }
 
@@ -161,14 +123,16 @@ impl GpuContext {
 
     /// Access the underlying wgpu device.
     #[must_use]
+    #[inline]
     pub fn device(&self) -> &wgpu::Device {
-        &self.device
+        &self.inner.device
     }
 
     /// Access the underlying wgpu queue.
     #[must_use]
+    #[inline]
     pub fn queue(&self) -> &wgpu::Queue {
-        &self.queue
+        &self.inner.queue
     }
 
     /// Return a cached 1-buffer compute pipeline, creating it on first use.
@@ -179,89 +143,49 @@ impl GpuContext {
     /// `name` must be a unique `&'static str` key (typically the shader constant
     /// name). `shader_src` is the full WGSL source including pack helpers.
     ///
-    /// Uses interior mutability ([`RefCell`]) so the context can be shared
-    /// with `&self`.
-    ///
     /// # Examples
     ///
     /// ```no_run
     /// use ranga::gpu::GpuContext;
     ///
-    /// let ctx = GpuContext::new().unwrap();
+    /// let mut ctx = GpuContext::new().unwrap();
     /// let pipeline = ctx.get_or_create_pipeline_1buf("invert", "/* wgsl */");
-    /// // `pipeline` is a raw pointer valid for the lifetime of `ctx`.
     /// ```
     pub fn get_or_create_pipeline_1buf(
-        &self,
+        &mut self,
         name: &'static str,
         shader_src: &str,
-    ) -> Result<*const wgpu::ComputePipeline, RangaError> {
-        let mut cache = self.cache.borrow_mut();
+    ) -> Result<&mabda::compute::ComputePipeline, RangaError> {
+        let key = hash_name(name);
+        let device = &self.inner.device;
 
-        if !cache.pipelines.contains_key(name) {
-            let (_bgl, pl) = cache.layouts_1buf.get_or_insert_with(|| {
-                let bgl = self
-                    .device
-                    .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                        label: Some("ranga_1buf_bgl"),
-                        entries: &[
-                            wgpu::BindGroupLayoutEntry {
-                                binding: 0,
-                                visibility: wgpu::ShaderStages::COMPUTE,
-                                ty: wgpu::BindingType::Buffer {
-                                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                                    has_dynamic_offset: false,
-                                    min_binding_size: None,
-                                },
-                                count: None,
-                            },
-                            wgpu::BindGroupLayoutEntry {
-                                binding: 1,
-                                visibility: wgpu::ShaderStages::COMPUTE,
-                                ty: wgpu::BindingType::Buffer {
-                                    ty: wgpu::BufferBindingType::Uniform,
-                                    has_dynamic_offset: false,
-                                    min_binding_size: None,
-                                },
-                                count: None,
-                            },
-                        ],
-                    });
-                let pl = self
-                    .device
-                    .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                        label: Some("ranga_1buf_pl"),
-                        bind_group_layouts: &[Some(&bgl)],
-                        immediate_size: 0,
-                    });
-                (bgl, pl)
-            });
+        let pipeline = self.cache.get_or_insert_compute(key, || {
+            let entries: &[wgpu::BindGroupLayoutEntry] = &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ];
+            mabda::compute::ComputePipeline::with_layout(device, shader_src, "main", entries)
+        });
 
-            let shader = self
-                .device
-                .create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some(name),
-                    source: wgpu::ShaderSource::Wgsl(shader_src.into()),
-                });
-
-            let pipeline = self
-                .device
-                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some(name),
-                    layout: Some(pl),
-                    module: &shader,
-                    entry_point: Some("main"),
-                    compilation_options: Default::default(),
-                    cache: None,
-                });
-
-            cache.pipelines.insert(name, pipeline);
-        }
-
-        let pipeline = cache.pipelines.get(name).ok_or_else(|| {
-            RangaError::Other(format!("GPU pipeline cache missing entry for '{name}'"))
-        })?;
-        Ok(pipeline as *const wgpu::ComputePipeline)
+        Ok(pipeline)
     }
 
     /// Return a cached 3-buffer compute pipeline, creating it on first use.
@@ -278,152 +202,124 @@ impl GpuContext {
     /// ```no_run
     /// use ranga::gpu::GpuContext;
     ///
-    /// let ctx = GpuContext::new().unwrap();
+    /// let mut ctx = GpuContext::new().unwrap();
     /// let pipeline = ctx.get_or_create_pipeline_3buf("blend", "/* wgsl */");
     /// ```
     pub fn get_or_create_pipeline_3buf(
-        &self,
+        &mut self,
         name: &'static str,
         shader_src: &str,
-    ) -> Result<*const wgpu::ComputePipeline, RangaError> {
-        let mut cache = self.cache.borrow_mut();
+    ) -> Result<&mabda::compute::ComputePipeline, RangaError> {
+        let key = hash_name(name);
+        let device = &self.inner.device;
 
-        if !cache.pipelines.contains_key(name) {
-            let (_bgl, pl) = cache.layouts_3buf.get_or_insert_with(|| {
-                let bgl = self
-                    .device
-                    .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                        label: Some("ranga_3buf_bgl"),
-                        entries: &[
-                            wgpu::BindGroupLayoutEntry {
-                                binding: 0,
-                                visibility: wgpu::ShaderStages::COMPUTE,
-                                ty: wgpu::BindingType::Buffer {
-                                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                                    has_dynamic_offset: false,
-                                    min_binding_size: None,
-                                },
-                                count: None,
-                            },
-                            wgpu::BindGroupLayoutEntry {
-                                binding: 1,
-                                visibility: wgpu::ShaderStages::COMPUTE,
-                                ty: wgpu::BindingType::Buffer {
-                                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                                    has_dynamic_offset: false,
-                                    min_binding_size: None,
-                                },
-                                count: None,
-                            },
-                            wgpu::BindGroupLayoutEntry {
-                                binding: 2,
-                                visibility: wgpu::ShaderStages::COMPUTE,
-                                ty: wgpu::BindingType::Buffer {
-                                    ty: wgpu::BufferBindingType::Uniform,
-                                    has_dynamic_offset: false,
-                                    min_binding_size: None,
-                                },
-                                count: None,
-                            },
-                        ],
-                    });
-                let pl = self
-                    .device
-                    .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                        label: Some("ranga_3buf_pl"),
-                        bind_group_layouts: &[Some(&bgl)],
-                        immediate_size: 0,
-                    });
-                (bgl, pl)
-            });
+        let pipeline = self.cache.get_or_insert_compute(key, || {
+            let entries: &[wgpu::BindGroupLayoutEntry] = &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ];
+            mabda::compute::ComputePipeline::with_layout(device, shader_src, "main", entries)
+        });
 
-            let shader = self
-                .device
-                .create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some(name),
-                    source: wgpu::ShaderSource::Wgsl(shader_src.into()),
-                });
-
-            let pipeline = self
-                .device
-                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some(name),
-                    layout: Some(pl),
-                    module: &shader,
-                    entry_point: Some("main"),
-                    compilation_options: Default::default(),
-                    cache: None,
-                });
-
-            cache.pipelines.insert(name, pipeline);
-        }
-
-        let pipeline = cache.pipelines.get(name).ok_or_else(|| {
-            RangaError::Other(format!("GPU pipeline cache missing entry for '{name}'"))
-        })?;
-        Ok(pipeline as *const wgpu::ComputePipeline)
+        Ok(pipeline)
     }
 
-    /// Access the bind group layout for 1-buffer pipelines.
+    /// Return a cached 4-binding compute pipeline (for blur shaders), creating it on first use.
     ///
-    /// Returns `None` if no 1-buffer pipeline has been created yet.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use ranga::gpu::GpuContext;
-    ///
-    /// let ctx = GpuContext::new().unwrap();
-    /// // After creating a 1-buffer pipeline, the layout is available:
-    /// // let bgl = ctx.bind_group_layout_1buf().unwrap();
-    /// ```
-    pub fn bind_group_layout_1buf(&self) -> Option<std::cell::Ref<'_, wgpu::BindGroupLayout>> {
-        let cache = self.cache.borrow();
-        std::cell::Ref::filter_map(cache, |c| c.layouts_1buf.as_ref().map(|pair| &pair.0)).ok()
-    }
+    /// Layout: input (read-only storage), output (read-write storage), kernel (read-only storage),
+    /// params (uniform).
+    pub(super) fn get_or_create_pipeline_4buf(
+        &mut self,
+        name: &'static str,
+        shader_src: &str,
+    ) -> Result<&mabda::compute::ComputePipeline, RangaError> {
+        let key = hash_name(name);
+        let device = &self.inner.device;
 
-    /// Access the bind group layout for 3-buffer pipelines.
-    ///
-    /// Returns `None` if no 3-buffer pipeline has been created yet.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use ranga::gpu::GpuContext;
-    ///
-    /// let ctx = GpuContext::new().unwrap();
-    /// // After creating a 3-buffer pipeline, the layout is available:
-    /// // let bgl = ctx.bind_group_layout_3buf().unwrap();
-    /// ```
-    pub fn bind_group_layout_3buf(&self) -> Option<std::cell::Ref<'_, wgpu::BindGroupLayout>> {
-        let cache = self.cache.borrow();
-        std::cell::Ref::filter_map(cache, |c| c.layouts_3buf.as_ref().map(|pair| &pair.0)).ok()
+        let pipeline = self.cache.get_or_insert_compute(key, || {
+            let entries: &[wgpu::BindGroupLayoutEntry] = &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ];
+            mabda::compute::ComputePipeline::with_layout(device, shader_src, "main", entries)
+        });
+
+        Ok(pipeline)
     }
 }
 
-/// Simple block_on implementation that avoids an async runtime dependency.
-///
-/// Uses a spin-yield loop with a no-op waker. Suitable for the short-lived
-/// futures returned by wgpu (adapter request, device request).
-fn block_on<F: std::future::Future>(f: F) -> F::Output {
-    use std::pin::pin;
-    use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
-
-    struct NoopWaker;
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-    }
-
-    let waker = Waker::from(Arc::new(NoopWaker));
-    let mut cx = Context::from_waker(&waker);
-    let mut future = pin!(f);
-    loop {
-        match future.as_mut().poll(&mut cx) {
-            Poll::Ready(result) => return result,
-            Poll::Pending => std::thread::yield_now(),
-        }
-    }
+/// Hash a pipeline name to a `u64` cache key.
+#[inline]
+fn hash_name(name: &str) -> u64 {
+    let mut h = DefaultHasher::new();
+    name.hash(&mut h);
+    h.finish()
 }
 
 #[cfg(test)]
@@ -447,5 +343,12 @@ mod tests {
     fn gpu_error_buffer_op_message() {
         let gpu_err = GpuError::BufferOp("map failed".into());
         assert!(gpu_err.to_string().contains("map failed"));
+    }
+
+    #[test]
+    fn mabda_error_converts_to_gpu_error() {
+        let mabda_err = mabda::GpuError::AdapterNotFound;
+        let gpu_err: GpuError = mabda_err.into();
+        assert!(matches!(gpu_err, GpuError::NoAdapter));
     }
 }

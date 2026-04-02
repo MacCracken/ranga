@@ -51,6 +51,7 @@ impl From<CieXyz> for prakash::spectral::Xyz {
 /// Integrates the spectral power distribution against the CIE 1931
 /// standard observer to produce XYZ tristimulus values.
 #[must_use]
+#[inline]
 pub fn spd_to_xyz(spd: &Spd) -> CieXyz {
     spd.to_xyz().into()
 }
@@ -59,6 +60,7 @@ pub fn spd_to_xyz(spd: &Spd) -> CieXyz {
 ///
 /// Uses McCamy's approximation. Valid for ~3000-50000 K.
 #[must_use]
+#[inline]
 pub fn xyz_to_cct(xyz: &CieXyz) -> f64 {
     let pk_xyz = prakash::spectral::Xyz::new(xyz.x, xyz.y, xyz.z);
     let (cx, cy, _) = pk_xyz.to_xyy();
@@ -70,6 +72,7 @@ pub fn xyz_to_cct(xyz: &CieXyz) -> f64 {
 /// Returns the XYZ tristimulus values for a monochromatic light source
 /// at the given wavelength. Returns zero outside 380-780 nm.
 #[must_use]
+#[inline]
 pub fn wavelength_to_xyz(wavelength_nm: f64) -> CieXyz {
     let (x, y, z) = cie_cmf_at(wavelength_nm);
     CieXyz { x, y, z }
@@ -77,12 +80,14 @@ pub fn wavelength_to_xyz(wavelength_nm: f64) -> CieXyz {
 
 /// Get the D65 illuminant white point as a ranga CieXyz.
 #[must_use]
+#[inline]
 pub fn d65_white() -> CieXyz {
     prakash::spectral::Xyz::D65_WHITE.into()
 }
 
 /// Get the D50 illuminant white point as a ranga CieXyz.
 #[must_use]
+#[inline]
 pub fn d50_white() -> CieXyz {
     prakash::spectral::Xyz::D50_WHITE.into()
 }
@@ -91,6 +96,7 @@ pub fn d50_white() -> CieXyz {
 ///
 /// Wraps [`Spd::blackbody`] for convenience.
 #[must_use]
+#[inline]
 pub fn blackbody_spd(temperature_k: f64) -> Spd {
     Spd::blackbody(temperature_k)
 }

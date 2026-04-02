@@ -92,6 +92,7 @@ impl ToneCurve {
     /// assert!((tc.apply(0.5) - 0.5_f64.powf(2.2)).abs() < 1e-10);
     /// ```
     #[must_use]
+    #[inline]
     pub fn apply(&self, v: f64) -> f64 {
         let v = v.clamp(0.0, 1.0);
         match self {
@@ -636,6 +637,7 @@ struct TagEntry {
     size: usize,
 }
 
+#[inline]
 fn read_u32_be(data: &[u8], offset: usize) -> Result<u32, RangaError> {
     let bytes: [u8; 4] = data
         .get(offset..offset + 4)
@@ -644,6 +646,7 @@ fn read_u32_be(data: &[u8], offset: usize) -> Result<u32, RangaError> {
     Ok(u32::from_be_bytes(bytes))
 }
 
+#[inline]
 fn read_u16_be(data: &[u8], offset: usize) -> Result<u16, RangaError> {
     let bytes: [u8; 2] = data
         .get(offset..offset + 2)
@@ -652,6 +655,7 @@ fn read_u16_be(data: &[u8], offset: usize) -> Result<u16, RangaError> {
     Ok(u16::from_be_bytes(bytes))
 }
 
+#[inline]
 fn read_i32_be(data: &[u8], offset: usize) -> Result<i32, RangaError> {
     let bytes: [u8; 4] = data
         .get(offset..offset + 4)
@@ -660,6 +664,7 @@ fn read_i32_be(data: &[u8], offset: usize) -> Result<i32, RangaError> {
     Ok(i32::from_be_bytes(bytes))
 }
 
+#[inline]
 fn read_s15fixed16(data: &[u8], offset: usize) -> Result<f64, RangaError> {
     Ok(read_i32_be(data, offset)? as f64 / 65536.0)
 }

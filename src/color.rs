@@ -330,6 +330,7 @@ pub fn linear_to_srgb(c: f32) -> u8 {
 }
 
 impl From<Srgba> for LinRgba {
+    #[inline]
     fn from(c: Srgba) -> Self {
         Self {
             r: srgb_to_linear(c.r),
@@ -341,6 +342,7 @@ impl From<Srgba> for LinRgba {
 }
 
 impl From<LinRgba> for Srgba {
+    #[inline]
     fn from(c: LinRgba) -> Self {
         Self {
             r: linear_to_srgb(c.r),
@@ -356,6 +358,7 @@ impl From<LinRgba> for Srgba {
 // ---------------------------------------------------------------------------
 
 impl From<Srgba> for Hsl {
+    #[inline]
     fn from(c: Srgba) -> Self {
         let r = c.r as f32 / 255.0;
         let g = c.g as f32 / 255.0;
@@ -410,6 +413,7 @@ fn hue_to_rgb(p: f32, q: f32, mut t: f32) -> f32 {
 }
 
 impl From<Hsl> for Srgba {
+    #[inline]
     fn from(c: Hsl) -> Self {
         if c.s < 1e-6 {
             let v = (c.l * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
@@ -458,6 +462,7 @@ const XYZ_TO_SRGB: [[f64; 3]; 3] = [
 ];
 
 impl From<LinRgba> for CieXyz {
+    #[inline]
     fn from(c: LinRgba) -> Self {
         let r = c.r as f64;
         let g = c.g as f64;
@@ -470,7 +475,9 @@ impl From<LinRgba> for CieXyz {
     }
 }
 
+/// Alpha is set to 1.0 (fully opaque) since [`CieXyz`] does not carry alpha.
 impl From<CieXyz> for LinRgba {
+    #[inline]
     fn from(c: CieXyz) -> Self {
         LinRgba {
             r: (XYZ_TO_SRGB[0][0] * c.x + XYZ_TO_SRGB[0][1] * c.y + XYZ_TO_SRGB[0][2] * c.z) as f32,
@@ -512,6 +519,7 @@ fn lab_f_inv(t: f64) -> f64 {
 }
 
 impl From<CieXyz> for CieLab {
+    #[inline]
     fn from(c: CieXyz) -> Self {
         let fx = lab_f(c.x / D65_XN);
         let fy = lab_f(c.y / D65_YN);
@@ -525,6 +533,7 @@ impl From<CieXyz> for CieLab {
 }
 
 impl From<CieLab> for CieXyz {
+    #[inline]
     fn from(c: CieLab) -> Self {
         let fy = (c.l + 16.0) / 116.0;
         let fx = c.a / 500.0 + fy;
@@ -539,6 +548,7 @@ impl From<CieLab> for CieXyz {
 
 /// Convenience: sRGB byte → Lab in one step.
 impl From<Srgba> for CieLab {
+    #[inline]
     fn from(c: Srgba) -> Self {
         let lin: LinRgba = c.into();
         let xyz: CieXyz = lin.into();
@@ -578,6 +588,7 @@ const SRGB_TO_P3: [[f64; 3]; 3] = [
 /// let (r, g, b) = p3_to_linear_srgb(1.0, 0.0, 0.0);
 /// assert!(r > 1.0); // P3 red is outside sRGB gamut
 /// ```
+#[inline]
 #[must_use]
 pub fn p3_to_linear_srgb(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
     (
@@ -597,6 +608,7 @@ pub fn p3_to_linear_srgb(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
 /// let (r, g, b) = linear_srgb_to_p3(1.0, 0.0, 0.0);
 /// assert!(r < 1.0); // sRGB red fits within P3
 /// ```
+#[inline]
 #[must_use]
 pub fn linear_srgb_to_p3(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
     (
@@ -625,6 +637,7 @@ pub fn linear_srgb_to_p3(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
 /// assert_eq!(srgb.g, 255);
 /// assert_eq!(srgb.b, 255);
 /// ```
+#[inline]
 #[must_use]
 pub fn cmyk_to_srgb(c: &Cmyk) -> Srgba {
     let r = (255.0 * (1.0 - c.c) * (1.0 - c.k) + 0.5).clamp(0.0, 255.0) as u8;
@@ -644,6 +657,7 @@ pub fn cmyk_to_srgb(c: &Cmyk) -> Srgba {
 /// let cmyk = srgb_to_cmyk(&white);
 /// assert!((cmyk.k - 0.0).abs() < 0.01);
 /// ```
+#[inline]
 #[must_use]
 pub fn srgb_to_cmyk(c: &Srgba) -> Cmyk {
     let r = c.r as f32 / 255.0;
@@ -687,6 +701,7 @@ pub fn srgb_to_cmyk(c: &Srgba) -> Cmyk {
 /// ```
 #[allow(clippy::excessive_precision)]
 impl From<LinRgba> for Oklab {
+    #[inline]
     fn from(c: LinRgba) -> Self {
         // M1: linear sRGB → LMS
         let l = 0.4122214708_f32 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b;
@@ -710,6 +725,7 @@ impl From<LinRgba> for Oklab {
 /// Convert Oklab back to linear sRGB.
 ///
 /// Inverts the M2 and M1 matrices, cubing the intermediate LMS channels.
+/// Alpha is set to 1.0 (fully opaque) since [`Oklab`] does not carry alpha.
 ///
 /// # Examples
 ///
@@ -722,6 +738,7 @@ impl From<LinRgba> for Oklab {
 /// ```
 #[allow(clippy::excessive_precision)]
 impl From<Oklab> for LinRgba {
+    #[inline]
     fn from(c: Oklab) -> Self {
         // Inverse M2: Oklab → cube-rooted LMS
         let l_ = c.l + 0.3963377774 * c.a + 0.2158037573 * c.b;
@@ -757,6 +774,7 @@ impl From<Oklab> for LinRgba {
 /// assert!(lch.c < 1e-5); // achromatic
 /// ```
 impl From<Oklab> for Oklch {
+    #[inline]
     fn from(c: Oklab) -> Self {
         let chroma = (c.a * c.a + c.b * c.b).sqrt();
         let hue = if chroma < 1e-8 {
@@ -785,6 +803,7 @@ impl From<Oklab> for Oklch {
 /// assert!(lab.b.abs() < 1e-5);
 /// ```
 impl From<Oklch> for Oklab {
+    #[inline]
     fn from(c: Oklch) -> Self {
         let h_rad = c.h.to_radians();
         Oklab {
@@ -809,6 +828,7 @@ impl From<Oklch> for Oklab {
 /// assert!(lab.l > 0.0);
 /// ```
 impl From<Srgba> for Oklab {
+    #[inline]
     fn from(c: Srgba) -> Self {
         let lin: LinRgba = c.into();
         lin.into()
@@ -840,6 +860,9 @@ impl From<Srgba> for Oklab {
 /// ```
 #[must_use]
 pub fn color_temperature(kelvin: f32) -> [f32; 3] {
+    if kelvin.is_nan() {
+        return [1.0, 1.0, 1.0]; // neutral for invalid input
+    }
     let temp = kelvin.clamp(1000.0, 40000.0) / 100.0;
 
     let r = if temp <= 66.0 {
@@ -882,6 +905,7 @@ pub fn color_temperature(kelvin: f32) -> [f32; 3] {
 /// let b = CieLab { l: 50.0, a: 0.0, b: 0.0 };
 /// assert!(delta_e_cie76(&a, &b) < 1e-10);
 /// ```
+#[inline]
 #[must_use]
 pub fn delta_e_cie76(a: &CieLab, b: &CieLab) -> f64 {
     let dl = a.l - b.l;
@@ -903,6 +927,7 @@ pub fn delta_e_cie76(a: &CieLab, b: &CieLab) -> f64 {
 /// let b = CieLab { l: 50.0, a: 0.0, b: 0.0 };
 /// assert!(delta_e_cie94(&a, &b) > 0.0);
 /// ```
+#[inline]
 #[must_use]
 pub fn delta_e_cie94(a: &CieLab, b: &CieLab) -> f64 {
     let dl = a.l - b.l;
@@ -937,6 +962,7 @@ pub fn delta_e_cie94(a: &CieLab, b: &CieLab) -> f64 {
 /// let de = delta_e_ciede2000(&a, &b);
 /// assert!(de > 2.0 && de < 3.0);
 /// ```
+#[inline]
 #[must_use]
 pub fn delta_e_ciede2000(lab1: &CieLab, lab2: &CieLab) -> f64 {
     use std::f64::consts::PI;

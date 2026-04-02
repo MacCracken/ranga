@@ -13,22 +13,22 @@ use ranga::pixel::{PixelBuffer, PixelFormat};
 fn pixel_buffer_new_and_access() {
     let data = vec![10, 20, 30, 255, 40, 50, 60, 128];
     let buf = PixelBuffer::new(data.clone(), 2, 1, PixelFormat::Rgba8).unwrap();
-    assert_eq!(buf.width, 2);
-    assert_eq!(buf.height, 1);
-    assert_eq!(buf.format, PixelFormat::Rgba8);
-    assert_eq!(buf.data, data);
+    assert_eq!(buf.width(), 2);
+    assert_eq!(buf.height(), 1);
+    assert_eq!(buf.format(), PixelFormat::Rgba8);
+    assert_eq!(buf.data(), data);
     assert_eq!(buf.pixel_count(), 2);
 }
 
 #[test]
 fn pixel_buffer_zeroed_roundtrip() {
     let buf = PixelBuffer::zeroed(8, 8, PixelFormat::Rgba8);
-    assert_eq!(buf.data.len(), 8 * 8 * 4);
-    assert!(buf.data.iter().all(|&b| b == 0));
+    assert_eq!(buf.data().len(), 8 * 8 * 4);
+    assert!(buf.data().iter().all(|&b| b == 0));
 
     // Re-wrap via new to validate size consistency
-    let buf2 = PixelBuffer::new(buf.data.clone(), 8, 8, PixelFormat::Rgba8).unwrap();
-    assert_eq!(buf2.data, buf.data);
+    let buf2 = PixelBuffer::new(buf.data().to_vec(), 8, 8, PixelFormat::Rgba8).unwrap();
+    assert_eq!(buf2.data(), buf.data());
 }
 
 // ---------------------------------------------------------------------------
@@ -118,7 +118,7 @@ fn filter_pipeline_brightness_contrast_grayscale() {
     filter::grayscale(&mut buf).unwrap();
 
     // After grayscale, R == G == B for every pixel
-    for pixel in buf.data.chunks_exact(4) {
+    for pixel in buf.data().chunks_exact(4) {
         assert_eq!(pixel[0], pixel[1], "R != G after grayscale");
         assert_eq!(pixel[1], pixel[2], "G != B after grayscale");
         assert_eq!(pixel[3], 255, "alpha should be preserved");
@@ -131,7 +131,7 @@ fn filter_invert_double_is_identity() {
     let mut buf = PixelBuffer::new(original_data.clone(), 2, 1, PixelFormat::Rgba8).unwrap();
     filter::invert(&mut buf).unwrap();
     filter::invert(&mut buf).unwrap();
-    assert_eq!(buf.data, original_data);
+    assert_eq!(buf.data(), original_data);
 }
 
 // ---------------------------------------------------------------------------
@@ -156,16 +156,16 @@ fn rgba_yuv420p_roundtrip_within_tolerance() {
     let original = data.clone();
     let buf = PixelBuffer::new(data, w, h, PixelFormat::Rgba8).unwrap();
     let yuv = rgba_to_yuv420p(&buf).unwrap();
-    assert_eq!(yuv.format, PixelFormat::Yuv420p);
+    assert_eq!(yuv.format(), PixelFormat::Yuv420p);
 
     let back = yuv420p_to_rgba(&yuv).unwrap();
-    assert_eq!(back.format, PixelFormat::Rgba8);
-    assert_eq!(back.data.len(), original.len());
+    assert_eq!(back.format(), PixelFormat::Rgba8);
+    assert_eq!(back.data().len(), original.len());
 
     // YUV conversion is lossy; check per-channel tolerance
     let max_diff = original
         .chunks_exact(4)
-        .zip(back.data.chunks_exact(4))
+        .zip(back.data().chunks_exact(4))
         .flat_map(|(o, r)| (0..3).map(move |c| (o[c] as i16 - r[c] as i16).unsigned_abs()))
         .max()
         .unwrap_or(0);
@@ -210,7 +210,7 @@ fn rgb_histograms_pure_red_buffer() {
 fn chi_squared_identical_histograms() {
     let a = vec![0.25, 0.25, 0.25, 0.25];
     let b = vec![0.25, 0.25, 0.25, 0.25];
-    let d = chi_squared(&a, &b);
+    let d = chi_squared(&a, &b).unwrap();
     assert!(
         d.abs() < 1e-10,
         "identical histograms should have chi^2 ~ 0"
@@ -268,11 +268,11 @@ fn crop_and_resize_pipeline() {
 
     let buf = PixelBuffer::zeroed(100, 100, PixelFormat::Rgba8);
     let cropped = transform::crop(&buf, 10, 10, 60, 60).unwrap();
-    assert_eq!(cropped.width, 50);
-    assert_eq!(cropped.height, 50);
+    assert_eq!(cropped.width(), 50);
+    assert_eq!(cropped.height(), 50);
     let resized = transform::resize(&cropped, 200, 200, ScaleFilter::Bilinear).unwrap();
-    assert_eq!(resized.width, 200);
-    assert_eq!(resized.height, 200);
+    assert_eq!(resized.width(), 200);
+    assert_eq!(resized.height(), 200);
 }
 
 #[test]
@@ -280,12 +280,12 @@ fn affine_rotate_and_back() {
     use ranga::transform::{self, Affine, ScaleFilter};
 
     let mut buf = PixelBuffer::zeroed(32, 32, PixelFormat::Rgba8);
-    buf.set_rgba(16, 16, [255, 0, 0, 255]);
+    let _ = buf.set_rgba(16, 16, [255, 0, 0, 255]);
 
     let rotated =
         transform::affine_transform(&buf, &Affine::rotate(0.1), 32, 32, ScaleFilter::Bilinear)
             .unwrap();
-    assert_eq!(rotated.width, 32);
+    assert_eq!(rotated.width(), 32);
     // The red pixel should have moved slightly
 }
 
@@ -295,8 +295,8 @@ fn flip_preserves_pixel_count() {
     let buf = PixelBuffer::new(data, 8, 8, PixelFormat::Rgba8).unwrap();
     let fh = ranga::transform::flip_horizontal(&buf).unwrap();
     let fv = ranga::transform::flip_vertical(&buf).unwrap();
-    assert_eq!(fh.data.len(), buf.data.len());
-    assert_eq!(fv.data.len(), buf.data.len());
+    assert_eq!(fh.data().len(), buf.data().len());
+    assert_eq!(fv.data().len(), buf.data().len());
 }
 
 // ---------------------------------------------------------------------------
@@ -328,10 +328,10 @@ fn dissolve_then_fade_pipeline() {
     let b = PixelBuffer::new(vec![50; 4 * 4 * 4], 4, 4, PixelFormat::Rgba8).unwrap();
 
     let mut mid = composite::dissolve(&a, &b, 0.5).unwrap();
-    assert!(mid.data[0] > 100 && mid.data[0] < 150);
+    assert!(mid.data()[0] > 100 && mid.data()[0] < 150);
 
     composite::fade(&mut mid, 0.5).unwrap();
-    assert!(mid.data[0] < 80); // faded to half
+    assert!(mid.data()[0] < 80); // faded to half
 }
 
 #[test]
@@ -340,10 +340,10 @@ fn premultiply_composite_unpremultiply() {
 
     let mut layer = PixelBuffer::new(vec![255, 0, 0, 128], 1, 1, PixelFormat::Rgba8).unwrap();
     composite::premultiply_alpha(&mut layer).unwrap();
-    assert_eq!(layer.data[0], 128); // 255 * 128 / 255
+    assert_eq!(layer.data()[0], 128); // 255 * 128 / 255
 
     composite::unpremultiply_alpha(&mut layer).unwrap();
-    assert!(layer.data[0] > 250); // back to ~255
+    assert!(layer.data()[0] > 250); // back to ~255
 }
 
 // ---------------------------------------------------------------------------
@@ -356,7 +356,7 @@ fn median_removes_salt_pepper() {
     filter::noise_salt_pepper(&mut buf, 0.3, 42).unwrap();
 
     let noisy_extremes = buf
-        .data
+        .data()
         .chunks_exact(4)
         .filter(|p| p[0] == 0 || p[0] == 255)
         .count();
@@ -364,7 +364,7 @@ fn median_removes_salt_pepper() {
 
     let filtered = filter::median(&buf, 1).unwrap();
     let clean_extremes = filtered
-        .data
+        .data()
         .chunks_exact(4)
         .filter(|p| p[0] == 0 || p[0] == 255)
         .count();
@@ -378,8 +378,8 @@ fn median_removes_salt_pepper() {
 fn flood_fill_then_threshold() {
     let mut buf = PixelBuffer::new(vec![100; 8 * 8 * 4], 8, 8, PixelFormat::Rgba8).unwrap();
     filter::flood_fill(&mut buf, 0, 0, [200, 200, 200, 255], 10).unwrap();
-    assert_eq!(buf.data[0], 200);
+    assert_eq!(buf.data()[0], 200);
 
     filter::threshold(&mut buf, 150).unwrap();
-    assert_eq!(buf.data[0], 255); // 200 > 150 → white
+    assert_eq!(buf.data()[0], 255); // 200 > 150 → white
 }

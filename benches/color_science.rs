@@ -128,7 +128,7 @@ fn bench_pixel_view(c: &mut Criterion) {
     let buf = PixelBuffer::zeroed(1920, 1080, PixelFormat::Rgba8);
     c.bench_function("pixel_view_create", |b| {
         b.iter(|| {
-            let view = PixelView::new(black_box(&buf.data), 1920, 1080, PixelFormat::Rgba8);
+            let view = PixelView::new(black_box(buf.data()), 1920, 1080, PixelFormat::Rgba8);
             let _ = view;
         })
     });

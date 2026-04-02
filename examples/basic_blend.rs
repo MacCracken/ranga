@@ -21,16 +21,16 @@ fn main() {
     for i in 0..pixel_count {
         let si = i * 4;
         let src = [
-            red_buf.data[si],
-            red_buf.data[si + 1],
-            red_buf.data[si + 2],
-            red_buf.data[si + 3],
+            red_buf.data()[si],
+            red_buf.data()[si + 1],
+            red_buf.data()[si + 2],
+            red_buf.data()[si + 3],
         ];
         let dst = [
-            blue_buf.data[si],
-            blue_buf.data[si + 1],
-            blue_buf.data[si + 2],
-            blue_buf.data[si + 3],
+            blue_buf.data()[si],
+            blue_buf.data()[si + 1],
+            blue_buf.data()[si + 2],
+            blue_buf.data()[si + 3],
         ];
         let blended = blend_pixel(src, dst, BlendMode::Normal, opacity);
         result_data.extend_from_slice(&blended);

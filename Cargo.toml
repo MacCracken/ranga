@@ -15,7 +15,7 @@ categories = ["graphics", "multimedia::images"]
 [features]
 default = ["simd"]
 simd = []
-gpu = ["dep:wgpu"]
+gpu = ["dep:wgpu", "dep:mabda", "dep:pollster"]
 hwaccel = ["dep:ai-hwaccel"]
 parallel = ["dep:rayon"]
 spectral = ["dep:prakash"]
@@ -29,6 +29,8 @@ serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
 prakash = { version = "1.2", features = ["spectral"], optional = true }
+mabda = { version = "1", default-features = false, features = ["compute"], optional = true }
+pollster = { version = "0.4", optional = true }
 wgpu = { version = "29", optional = true }
 
 [dev-dependencies]

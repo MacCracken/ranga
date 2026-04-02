@@ -197,7 +197,7 @@ fn bench_flood_fill(c: &mut Criterion) {
     c.bench_function("flood_fill_1080p_uniform", |b| {
         b.iter(|| {
             // Reset to uniform before each fill
-            buf.data.fill(128);
+            buf.data_mut().fill(128);
             filter::flood_fill(black_box(&mut buf), 0, 0, [255, 0, 0, 255], 10).unwrap()
         })
     });

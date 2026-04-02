@@ -118,8 +118,8 @@ unsafe fn compute_y_row_simd_neon(rgba: &[u8], y_out: &mut [u8], cr: u16, cg: u1
 ///
 /// let rgba = PixelBuffer::new(vec![255; 4 * 4 * 4], 4, 4, PixelFormat::Rgba8).unwrap();
 /// let yuv = convert::rgba_to_yuv420p(&rgba).unwrap();
-/// assert_eq!(yuv.format, PixelFormat::Yuv420p);
-/// assert!(yuv.data[0] > 250);
+/// assert_eq!(yuv.format(), PixelFormat::Yuv420p);
+/// assert!(yuv.data()[0] > 250);
 /// ```
 #[must_use = "returns a new YUV420p buffer"]
 pub fn rgba_to_yuv420p(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
@@ -172,7 +172,7 @@ pub fn rgba_to_yuv420p(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
 /// let rgba = PixelBuffer::new(vec![128; 8 * 8 * 4], 8, 8, PixelFormat::Rgba8).unwrap();
 /// let yuv = convert::rgba_to_yuv420p(&rgba).unwrap();
 /// let back = convert::yuv420p_to_rgba(&yuv).unwrap();
-/// assert!((back.data[0] as i16 - 128).unsigned_abs() < 10);
+/// assert!((back.data()[0] as i16 - 128).unsigned_abs() < 10);
 /// ```
 #[must_use = "returns a new RGBA buffer"]
 pub fn yuv420p_to_rgba(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
@@ -216,7 +216,7 @@ pub fn yuv420p_to_rgba(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
 ///
 /// let argb = PixelBuffer::new(vec![255; 4 * 4 * 4], 4, 4, PixelFormat::Argb8).unwrap();
 /// let nv12 = convert::argb_to_nv12(&argb).unwrap();
-/// assert_eq!(nv12.format, PixelFormat::Nv12);
+/// assert_eq!(nv12.format(), PixelFormat::Nv12);
 /// ```
 #[must_use = "returns a new NV12 buffer"]
 pub fn argb_to_nv12(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
@@ -273,7 +273,7 @@ pub fn argb_to_nv12(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
 ///
 /// let rgba = PixelBuffer::new(vec![255; 4 * 4 * 4], 4, 4, PixelFormat::Rgba8).unwrap();
 /// let yuv = convert::rgba_to_yuv420p_bt709(&rgba).unwrap();
-/// assert!(yuv.data[0] > 250);
+/// assert!(yuv.data()[0] > 250);
 /// ```
 #[must_use = "returns a new YUV420p BT.709 buffer"]
 pub fn rgba_to_yuv420p_bt709(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
@@ -323,7 +323,7 @@ pub fn rgba_to_yuv420p_bt709(buf: &PixelBuffer) -> Result<PixelBuffer, RangaErro
 /// let rgba = PixelBuffer::new(vec![128; 8 * 8 * 4], 8, 8, PixelFormat::Rgba8).unwrap();
 /// let yuv = convert::rgba_to_yuv420p_bt709(&rgba).unwrap();
 /// let back = convert::yuv420p_to_rgba_bt709(&yuv).unwrap();
-/// assert!((back.data[0] as i16 - 128).unsigned_abs() < 10);
+/// assert!((back.data()[0] as i16 - 128).unsigned_abs() < 10);
 /// ```
 #[must_use = "returns a new RGBA BT.709 buffer"]
 pub fn yuv420p_to_rgba_bt709(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
@@ -382,7 +382,7 @@ fn compute_y_row_bt2020(rgba: &[u8], y_out: &mut [u8]) {
 ///
 /// let rgba = PixelBuffer::new(vec![255; 4 * 4 * 4], 4, 4, PixelFormat::Rgba8).unwrap();
 /// let yuv = convert::rgba_to_yuv420p_bt2020(&rgba).unwrap();
-/// assert!(yuv.data[0] > 250);
+/// assert!(yuv.data()[0] > 250);
 /// ```
 #[must_use = "returns a new YUV420p BT.2020 buffer"]
 pub fn rgba_to_yuv420p_bt2020(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
@@ -435,7 +435,7 @@ pub fn rgba_to_yuv420p_bt2020(buf: &PixelBuffer) -> Result<PixelBuffer, RangaErr
 /// let rgba = PixelBuffer::new(vec![128; 8 * 8 * 4], 8, 8, PixelFormat::Rgba8).unwrap();
 /// let yuv = convert::rgba_to_yuv420p_bt2020(&rgba).unwrap();
 /// let back = convert::yuv420p_to_rgba_bt2020(&yuv).unwrap();
-/// assert!((back.data[0] as i16 - 128).unsigned_abs() < 10);
+/// assert!((back.data()[0] as i16 - 128).unsigned_abs() < 10);
 /// ```
 #[must_use = "returns a new RGBA BT.2020 buffer"]
 pub fn yuv420p_to_rgba_bt2020(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
@@ -490,7 +490,7 @@ pub fn yuv420p_to_rgba_bt2020(buf: &PixelBuffer) -> Result<PixelBuffer, RangaErr
 /// let argb = PixelBuffer::new(vec![255, 128, 128, 128].repeat(16), 4, 4, PixelFormat::Argb8).unwrap();
 /// let nv12 = convert::argb_to_nv12(&argb).unwrap();
 /// let rgba = convert::nv12_to_rgba(&nv12).unwrap();
-/// assert_eq!(rgba.format, PixelFormat::Rgba8);
+/// assert_eq!(rgba.format(), PixelFormat::Rgba8);
 /// ```
 #[must_use = "returns a new RGBA buffer"]
 pub fn nv12_to_rgba(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
@@ -539,7 +539,7 @@ pub fn nv12_to_rgba(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
 ///
 /// let rgb = PixelBuffer::new(vec![255, 0, 0, 0, 255, 0], 2, 1, PixelFormat::Rgb8).unwrap();
 /// let rgba = convert::rgb8_to_rgba8(&rgb).unwrap();
-/// assert_eq!(rgba.data, vec![255, 0, 0, 255, 0, 255, 0, 255]);
+/// assert_eq!(rgba.data(), vec![255, 0, 0, 255, 0, 255, 0, 255]);
 /// ```
 #[must_use = "returns a new RGBA8 buffer"]
 pub fn rgb8_to_rgba8(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
@@ -570,7 +570,7 @@ pub fn rgb8_to_rgba8(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
 ///
 /// let rgba = PixelBuffer::new(vec![255, 0, 0, 128, 0, 255, 0, 64], 2, 1, PixelFormat::Rgba8).unwrap();
 /// let rgb = convert::rgba8_to_rgb8(&rgba).unwrap();
-/// assert_eq!(rgb.data, vec![255, 0, 0, 0, 255, 0]);
+/// assert_eq!(rgb.data(), vec![255, 0, 0, 0, 255, 0]);
 /// ```
 #[must_use = "returns a new RGB8 buffer"]
 pub fn rgba8_to_rgb8(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
@@ -600,7 +600,7 @@ pub fn rgba8_to_rgb8(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
 ///
 /// let argb = PixelBuffer::new(vec![255, 128, 64, 32], 1, 1, PixelFormat::Argb8).unwrap();
 /// let rgba = convert::argb8_to_rgba8(&argb).unwrap();
-/// assert_eq!(rgba.data, vec![128, 64, 32, 255]);
+/// assert_eq!(rgba.data(), vec![128, 64, 32, 255]);
 /// ```
 #[must_use = "returns a new RGBA8 buffer"]
 pub fn argb8_to_rgba8(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
@@ -630,7 +630,7 @@ pub fn argb8_to_rgba8(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
 ///
 /// let rgba = PixelBuffer::new(vec![128, 64, 32, 255], 1, 1, PixelFormat::Rgba8).unwrap();
 /// let argb = convert::rgba8_to_argb8(&rgba).unwrap();
-/// assert_eq!(argb.data, vec![255, 128, 64, 32]);
+/// assert_eq!(argb.data(), vec![255, 128, 64, 32]);
 /// ```
 #[must_use = "returns a new ARGB8 buffer"]
 pub fn rgba8_to_argb8(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
@@ -666,8 +666,8 @@ pub fn rgba8_to_argb8(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
 ///     .collect();
 /// let buf = PixelBuffer::new(f32_data, 1, 1, PixelFormat::RgbaF32).unwrap();
 /// let rgba = convert::rgbaf32_to_rgba8(&buf).unwrap();
-/// assert_eq!(rgba.data[0], 128);
-/// assert_eq!(rgba.data[2], 255);
+/// assert_eq!(rgba.data()[0], 128);
+/// assert_eq!(rgba.data()[2], 255);
 /// ```
 #[must_use = "returns a new RGBA8 buffer"]
 pub fn rgbaf32_to_rgba8(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
@@ -705,7 +705,7 @@ pub fn rgbaf32_to_rgba8(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
 ///
 /// let buf = PixelBuffer::new(vec![128, 0, 255, 255], 1, 1, PixelFormat::Rgba8).unwrap();
 /// let f32buf = convert::rgba8_to_rgbaf32(&buf).unwrap();
-/// let r = f32::from_ne_bytes([f32buf.data[0], f32buf.data[1], f32buf.data[2], f32buf.data[3]]);
+/// let r = f32::from_ne_bytes([f32buf.data()[0], f32buf.data()[1], f32buf.data()[2], f32buf.data()[3]]);
 /// assert!((r - 128.0 / 255.0).abs() < 0.01);
 /// ```
 #[must_use = "returns a new RgbaF32 buffer"]

@@ -16,7 +16,7 @@ fuzz_target!(|data: &[u8]| {
         // If it parses, apply it to a small test buffer
         let mut buf = PixelBuffer::zeroed(4, 4, PixelFormat::Rgba8);
         // Fill with some non-zero data
-        for pixel in buf.data.chunks_exact_mut(4) {
+        for pixel in buf.data_mut().chunks_exact_mut(4) {
             pixel[0] = 128;
             pixel[1] = 64;
             pixel[2] = 200;
@@ -44,7 +44,7 @@ fuzz_target!(|data: &[u8]| {
 
         if let Ok(lut) = Lut3d::from_cube(&cube_str) {
             let mut buf = PixelBuffer::zeroed(4, 4, PixelFormat::Rgba8);
-            for (i, pixel) in buf.data.chunks_exact_mut(4).enumerate() {
+            for (i, pixel) in buf.data_mut().chunks_exact_mut(4).enumerate() {
                 let idx = i % float_bytes.len().max(1);
                 pixel[0] = float_bytes[idx];
                 pixel[1] = float_bytes[(idx + 1) % float_bytes.len()];
