@@ -541,8 +541,8 @@ fn blur_pass_vertical(src: &[u8], dst: &mut [u8], w: usize, h: usize, kernel: &[
     // stay within L2 cache.
     let tile_w = BLUR_TILE_WIDTH;
 
-    let process_tile = |x_start: usize, tile_dst: &mut [u8]| {
-        let x_end = (x_start + tile_w).min(w);
+    let process_tile = |x_start: usize, tw: usize, tile_dst: &mut [u8]| {
+        let x_end = (x_start + tw).min(w);
         for y in 0..h {
             for x in x_start..x_end {
                 let mut rv = 0.0f32;
@@ -555,7 +555,7 @@ fn blur_pass_vertical(src: &[u8], dst: &mut [u8], w: usize, h: usize, kernel: &[
                     gv += src[idx + 1] as f32 * kv;
                     bv += src[idx + 2] as f32 * kv;
                 }
-                let oi = (y * w + x - x_start) * 4;
+                let oi = (y * tw + (x - x_start)) * 4;
                 tile_dst[oi] = rv.clamp(0.0, 255.0) as u8;
                 tile_dst[oi + 1] = gv.clamp(0.0, 255.0) as u8;
                 tile_dst[oi + 2] = bv.clamp(0.0, 255.0) as u8;
@@ -580,7 +580,7 @@ fn blur_pass_vertical(src: &[u8], dst: &mut [u8], w: usize, h: usize, kernel: &[
             .par_iter()
             .map(|&(x_start, tw)| {
                 let mut tile_buf = vec![0u8; tw * h * 4];
-                process_tile(x_start, &mut tile_buf);
+                process_tile(x_start, tw, &mut tile_buf);
                 tile_buf
             })
             .collect();
@@ -599,7 +599,7 @@ fn blur_pass_vertical(src: &[u8], dst: &mut [u8], w: usize, h: usize, kernel: &[
     {
         for &(x_start, tw) in &tiles {
             let mut tile_buf = vec![0u8; tw * h * 4];
-            process_tile(x_start, &mut tile_buf);
+            process_tile(x_start, tw, &mut tile_buf);
             for y in 0..h {
                 for x in 0..tw {
                     let si = (y * tw + x) * 4;
