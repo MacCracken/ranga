@@ -3,14 +3,5 @@
 [cargo-vet]
 version = "0.9"
 
-[imports.mozilla]
-url = "https://raw.githubusercontent.com/nickel-org/nickel.rs/master/nickel/supply-chain/audits.toml"
-
-[imports.google]
-url = "https://chromium.googlesource.com/chromiumos/third_party/rust_crates/+/main/cargo-vet/audits.toml?format=TEXT"
-
-[imports.isrg]
-url = "https://raw.githubusercontent.com/nickel-org/nickel.rs/master/nickel/supply-chain/audits.toml"
-
 [policy.ranga]
 audit-as-crates-io = false

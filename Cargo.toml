@@ -3,7 +3,7 @@ name = "ranga"
 version = "0.29.4"
 edition = "2024"
 rust-version = "1.89"
-license = "AGPL-3.0-only"
+license = "GPL-3.0-only"
 description = "Core image processing library — color spaces, blend modes, pixel buffers, filters, and GPU compute for Rust"
 documentation = "https://docs.rs/ranga"
 homepage = "https://github.com/MacCracken/ranga"
@@ -28,7 +28,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
-prakash = { version = "1.1.1", features = ["spectral"], optional = true }
+prakash = { version = "1.2", features = ["spectral"], optional = true }
 wgpu = { version = "29", optional = true }
 
 [dev-dependencies]

@@ -150,7 +150,7 @@ impl GpuBuffer {
     /// let gpu_buf = GpuBuffer::upload(&ctx, &buf);
     /// let receiver = gpu_buf.download_async(&ctx);
     /// // ... do other work ...
-    /// ctx.device().poll(wgpu::Maintain::Wait);
+    /// ctx.device().poll(wgpu::PollType::wait_indefinitely()).ok();
     /// let result = receiver.recv().unwrap().unwrap();
     /// assert_eq!(result.width, 64);
     /// ```

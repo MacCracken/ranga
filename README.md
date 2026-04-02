@@ -142,4 +142,4 @@ Rust **1.89** (edition 2024).
 
 ## License
 
-[AGPL-3.0-only](LICENSE)
+[GPL-3.0-only](LICENSE)

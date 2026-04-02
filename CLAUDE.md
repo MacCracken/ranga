@@ -5,7 +5,7 @@
 **Ranga** (Sanskrit: color) — Core image processing — color spaces, blend modes, pixel buffers, filters, GPU compute
 
 - **Type**: Flat library crate
-- **License**: AGPL-3.0-only
+- **License**: GPL-3.0-only
 - **MSRV**: 1.89
 - **Version**: SemVer 0.D.M pre-1.0
 
