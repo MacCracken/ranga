@@ -164,7 +164,12 @@ impl IccProfile {
         color_space.copy_from_slice(&data[16..20]);
 
         // Read tag table.
-        let tag_count = read_u32_be(data, 128) as usize;
+        let tag_count = read_u32_be(data, 128)? as usize;
+        if tag_count > 1024 {
+            return Err(RangaError::InvalidFormat(
+                "ICC tag count exceeds limit".into(),
+            ));
+        }
         let tag_table_end = 132 + tag_count * 12;
         if data.len() < tag_table_end {
             return Err(RangaError::InvalidFormat(
@@ -280,7 +285,12 @@ impl IccLutProfile {
         let mut color_space = [0u8; 4];
         color_space.copy_from_slice(&data[16..20]);
 
-        let tag_count = read_u32_be(data, 128) as usize;
+        let tag_count = read_u32_be(data, 128)? as usize;
+        if tag_count > 1024 {
+            return Err(RangaError::InvalidFormat(
+                "ICC tag count exceeds limit".into(),
+            ));
+        }
         let tags = parse_tag_table(data, tag_count)?;
 
         // Look for A2B0 tag (primary LUT transform).
@@ -401,8 +411,8 @@ fn parse_mft2_lut(
         ));
     }
 
-    let input_entries = read_u16_be(data, off + 48) as usize;
-    let output_entries = read_u16_be(data, off + 50) as usize;
+    let input_entries = read_u16_be(data, off + 48)? as usize;
+    let output_entries = read_u16_be(data, off + 50)? as usize;
 
     let input_table_start = off + 52;
     let input_table_bytes = input_channels * input_entries * 2;
@@ -425,7 +435,7 @@ fn parse_mft2_lut(
         let curve_off = input_table_start + ch * input_entries * 2;
         let mut curve = Vec::with_capacity(input_entries);
         for i in 0..input_entries {
-            curve.push(read_u16_be(data, curve_off + i * 2) as f64 / 65535.0);
+            curve.push(read_u16_be(data, curve_off + i * 2)? as f64 / 65535.0);
         }
         input_curves[ch] = curve;
     }
@@ -436,7 +446,7 @@ fn parse_mft2_lut(
     for i in 0..grid_size.pow(3) {
         for ch in 0..3 {
             let idx = lut_start + (i * 3 + ch) * 2;
-            lut.push(read_u16_be(data, idx) as f64 / 65535.0);
+            lut.push(read_u16_be(data, idx)? as f64 / 65535.0);
         }
     }
 
@@ -626,30 +636,32 @@ struct TagEntry {
     size: usize,
 }
 
-fn read_u32_be(data: &[u8], offset: usize) -> u32 {
-    u32::from_be_bytes([
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-    ])
+fn read_u32_be(data: &[u8], offset: usize) -> Result<u32, RangaError> {
+    let bytes: [u8; 4] = data
+        .get(offset..offset + 4)
+        .and_then(|s| s.try_into().ok())
+        .ok_or_else(|| RangaError::InvalidFormat("ICC read out of bounds".into()))?;
+    Ok(u32::from_be_bytes(bytes))
 }
 
-fn read_u16_be(data: &[u8], offset: usize) -> u16 {
-    u16::from_be_bytes([data[offset], data[offset + 1]])
+fn read_u16_be(data: &[u8], offset: usize) -> Result<u16, RangaError> {
+    let bytes: [u8; 2] = data
+        .get(offset..offset + 2)
+        .and_then(|s| s.try_into().ok())
+        .ok_or_else(|| RangaError::InvalidFormat("ICC read out of bounds".into()))?;
+    Ok(u16::from_be_bytes(bytes))
 }
 
-fn read_i32_be(data: &[u8], offset: usize) -> i32 {
-    i32::from_be_bytes([
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-    ])
+fn read_i32_be(data: &[u8], offset: usize) -> Result<i32, RangaError> {
+    let bytes: [u8; 4] = data
+        .get(offset..offset + 4)
+        .and_then(|s| s.try_into().ok())
+        .ok_or_else(|| RangaError::InvalidFormat("ICC read out of bounds".into()))?;
+    Ok(i32::from_be_bytes(bytes))
 }
 
-fn read_s15fixed16(data: &[u8], offset: usize) -> f64 {
-    read_i32_be(data, offset) as f64 / 65536.0
+fn read_s15fixed16(data: &[u8], offset: usize) -> Result<f64, RangaError> {
+    Ok(read_i32_be(data, offset)? as f64 / 65536.0)
 }
 
 fn parse_tag_table(data: &[u8], count: usize) -> Result<Vec<TagEntry>, RangaError> {
@@ -663,8 +675,8 @@ fn parse_tag_table(data: &[u8], count: usize) -> Result<Vec<TagEntry>, RangaErro
         }
         let mut signature = [0u8; 4];
         signature.copy_from_slice(&data[base..base + 4]);
-        let offset = read_u32_be(data, base + 4) as usize;
-        let size = read_u32_be(data, base + 8) as usize;
+        let offset = read_u32_be(data, base + 4)? as usize;
+        let size = read_u32_be(data, base + 8)? as usize;
         if offset.checked_add(size).is_none_or(|end| end > data.len()) {
             return Err(RangaError::InvalidFormat(
                 "ICC tag offset+size exceeds profile data".to_string(),
@@ -701,9 +713,9 @@ fn parse_xyz_tag(data: &[u8], tag: &TagEntry) -> Result<[f64; 3], RangaError> {
         ));
     }
     Ok([
-        read_s15fixed16(data, off + 8),
-        read_s15fixed16(data, off + 12),
-        read_s15fixed16(data, off + 16),
+        read_s15fixed16(data, off + 8)?,
+        read_s15fixed16(data, off + 12)?,
+        read_s15fixed16(data, off + 16)?,
     ])
 }
 
@@ -732,7 +744,7 @@ fn parse_curv(data: &[u8], off: usize, size: usize) -> Result<ToneCurve, RangaEr
             "curv tag too short for entry count".to_string(),
         ));
     }
-    let count = read_u32_be(data, off + 8) as usize;
+    let count = read_u32_be(data, off + 8)? as usize;
 
     if count == 0 {
         // Linear (gamma 1.0).
@@ -746,7 +758,7 @@ fn parse_curv(data: &[u8], off: usize, size: usize) -> Result<ToneCurve, RangaEr
                 "curv tag too short for gamma value".to_string(),
             ));
         }
-        let gamma = read_u16_be(data, off + 12) as f64 / 256.0;
+        let gamma = read_u16_be(data, off + 12)? as f64 / 256.0;
         return Ok(ToneCurve::Gamma(gamma));
     }
 
@@ -759,7 +771,7 @@ fn parse_curv(data: &[u8], off: usize, size: usize) -> Result<ToneCurve, RangaEr
     }
     let mut table = Vec::with_capacity(count);
     for i in 0..count {
-        let v = read_u16_be(data, off + 12 + i * 2);
+        let v = read_u16_be(data, off + 12 + i * 2)?;
         table.push(v as f64 / 65535.0);
     }
     Ok(ToneCurve::Table(table))
@@ -769,7 +781,7 @@ fn parse_para(data: &[u8], off: usize, size: usize) -> Result<ToneCurve, RangaEr
     if size < 12 || off + 12 > data.len() {
         return Err(RangaError::InvalidFormat("para tag too short".to_string()));
     }
-    let func_type = read_u16_be(data, off + 8);
+    let func_type = read_u16_be(data, off + 8)?;
 
     match func_type {
         0 => {
@@ -779,7 +791,7 @@ fn parse_para(data: &[u8], off: usize, size: usize) -> Result<ToneCurve, RangaEr
                     "para type 0 too short for gamma parameter".to_string(),
                 ));
             }
-            let g = read_s15fixed16(data, off + 12);
+            let g = read_s15fixed16(data, off + 12)?;
             Ok(ToneCurve::Gamma(g))
         }
         3 => {
@@ -790,13 +802,13 @@ fn parse_para(data: &[u8], off: usize, size: usize) -> Result<ToneCurve, RangaEr
                     "para type 3 too short for parameters".to_string(),
                 ));
             }
-            let g = read_s15fixed16(data, off + 12);
-            let a = read_s15fixed16(data, off + 16);
-            let b = read_s15fixed16(data, off + 20);
-            let c = read_s15fixed16(data, off + 24);
-            let d = read_s15fixed16(data, off + 28);
-            let e = read_s15fixed16(data, off + 32);
-            let f = read_s15fixed16(data, off + 36);
+            let g = read_s15fixed16(data, off + 12)?;
+            let a = read_s15fixed16(data, off + 16)?;
+            let b = read_s15fixed16(data, off + 20)?;
+            let c = read_s15fixed16(data, off + 24)?;
+            let d = read_s15fixed16(data, off + 28)?;
+            let e = read_s15fixed16(data, off + 32)?;
+            let f = read_s15fixed16(data, off + 36)?;
 
             // Build a 4096-entry lookup table for the parametric curve.
             let n = 4096;

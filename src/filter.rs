@@ -318,8 +318,7 @@ pub fn grayscale(buf: &mut PixelBuffer) -> Result<(), RangaError> {
 
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     {
-        // SAFETY: SSE2 is baseline for x86_64.
-        unsafe { grayscale_sse2(&mut buf.data) };
+        grayscale_sse2(&mut buf.data);
         Ok(())
     }
 
@@ -347,61 +346,12 @@ fn grayscale_scalar(data: &mut [u8]) {
     }
 }
 
+// x86_64: use scalar path — the compiler auto-vectorizes the simple loop with
+// optimizations enabled, which outperforms the previous hand-rolled SSE2 that
+// extracted individual lanes for scalar math.
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-#[target_feature(enable = "sse2")]
-unsafe fn grayscale_sse2(data: &mut [u8]) {
-    use std::arch::x86_64::*;
-    let pixel_count = data.len() / 4;
-    let simd_pixels = pixel_count / 2 * 2;
-    let byte_count = simd_pixels * 4;
-
-    // BT.601 coefficients as 8.8 fixed-point: 77, 150, 29
-    // SAFETY: SSE2 guaranteed by target_feature. Process 2 pixels (8 bytes) per iter.
-    unsafe {
-        let zero = _mm_setzero_si128();
-        let coeff_r = _mm_set1_epi16(77);
-        let coeff_g = _mm_set1_epi16(150);
-        let coeff_b = _mm_set1_epi16(29);
-
-        let mut i = 0usize;
-        while i < byte_count {
-            let px = _mm_loadl_epi64(data.as_ptr().add(i) as *const __m128i);
-            let px16 = _mm_unpacklo_epi8(px, zero);
-
-            // Extract R, G, B channels as u16: layout is [R0 G0 B0 A0 R1 G1 B1 A1]
-            // Shuffle to get [R0 R0 R0 R0 R1 R1 R1 R1] etc. is complex,
-            // so we'll use the scalar path for the luminance computation.
-            // Still vectorize the write-back.
-            let r0 = _mm_extract_epi16(px16, 0) as u16;
-            let g0 = _mm_extract_epi16(px16, 1) as u16;
-            let b0 = _mm_extract_epi16(px16, 2) as u16;
-            let a0 = data[i + 3];
-            let r1 = _mm_extract_epi16(px16, 4) as u16;
-            let g1 = _mm_extract_epi16(px16, 5) as u16;
-            let b1 = _mm_extract_epi16(px16, 6) as u16;
-            let a1 = data[i + 7];
-
-            let gray0 = ((77 * r0 + 150 * g0 + 29 * b0) >> 8) as u8;
-            let gray1 = ((77 * r1 + 150 * g1 + 29 * b1) >> 8) as u8;
-
-            data[i] = gray0;
-            data[i + 1] = gray0;
-            data[i + 2] = gray0;
-            data[i + 3] = a0;
-            data[i + 4] = gray1;
-            data[i + 5] = gray1;
-            data[i + 6] = gray1;
-            data[i + 7] = a1;
-
-            i += 8;
-        }
-        // Suppress unused variable warnings for the coefficient registers.
-        let _ = (coeff_r, coeff_g, coeff_b);
-    }
-
-    if simd_pixels < pixel_count {
-        grayscale_scalar(&mut data[byte_count..]);
-    }
+fn grayscale_sse2(data: &mut [u8]) {
+    grayscale_scalar(data);
 }
 
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]

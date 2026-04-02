@@ -263,7 +263,7 @@ pub fn resize(
     filter: ScaleFilter,
 ) -> Result<PixelBuffer, RangaError> {
     validate_rgba8("resize", buf)?;
-    if new_w == 0 || new_h == 0 {
+    if new_w == 0 || new_h == 0 || buf.width == 0 || buf.height == 0 {
         return Ok(PixelBuffer::zeroed(0, 0, PixelFormat::Rgba8));
     }
     let sw = buf.width as usize;
@@ -714,7 +714,9 @@ pub fn perspective_transform(
             let (sx, sy) = inv.apply(dx as f64 + 0.5, dy as f64 + 0.5);
             let di = (dy * dw + dx) * 4;
 
-            if sx < 0.0 || sy < 0.0 || sx >= sw as f64 || sy >= sh as f64 {
+            // NaN fails all comparisons, so use negated in-bounds check to
+            // correctly skip NaN coordinates from degenerate projections.
+            if !(sx >= 0.0 && sy >= 0.0 && sx < sw as f64 && sy < sh as f64) {
                 continue;
             }
 

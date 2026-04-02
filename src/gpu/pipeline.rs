@@ -94,7 +94,7 @@ pub fn gpu_blend(
         dst_gpu.wgpu_buffer(),
         params_bytes,
         pixel_count.div_ceil(256),
-    );
+    )?;
 
     let result = dst_gpu.download(ctx)?;
     dst.data = result.data;
@@ -143,7 +143,7 @@ pub fn gpu_invert(ctx: &GpuContext, buf: &mut PixelBuffer) -> Result<(), RangaEr
         gpu_buf.wgpu_buffer(),
         params_bytes,
         pixel_count.div_ceil(256),
-    );
+    )?;
     let result = gpu_buf.download(ctx)?;
     buf.data = result.data;
     Ok(())
@@ -191,7 +191,7 @@ pub fn gpu_grayscale(ctx: &GpuContext, buf: &mut PixelBuffer) -> Result<(), Rang
         gpu_buf.wgpu_buffer(),
         params_bytes,
         pixel_count.div_ceil(256),
-    );
+    )?;
     let result = gpu_buf.download(ctx)?;
     buf.data = result.data;
     Ok(())
@@ -245,7 +245,7 @@ pub fn gpu_brightness_contrast(
         gpu_buf.wgpu_buffer(),
         params_bytes,
         pixel_count.div_ceil(256),
-    );
+    )?;
     let result = gpu_buf.download(ctx)?;
     buf.data = result.data;
     Ok(())
@@ -297,7 +297,7 @@ pub fn gpu_saturation(
         gpu_buf.wgpu_buffer(),
         params_bytes,
         pixel_count.div_ceil(256),
-    );
+    )?;
     let result = gpu_buf.download(ctx)?;
     buf.data = result.data;
     Ok(())
@@ -348,7 +348,7 @@ pub fn gpu_noise_gaussian(
         gpu_buf.wgpu_buffer(),
         params_bytes,
         pixel_count.div_ceil(256),
-    );
+    )?;
     let result = gpu_buf.download(ctx)?;
     buf.data = result.data;
     Ok(())
@@ -417,7 +417,7 @@ pub fn gpu_dissolve(
         dst_gpu.wgpu_buffer(),
         params_bytes,
         pixel_count.div_ceil(256),
-    );
+    )?;
 
     let result = dst_gpu.download(ctx)?;
     dst.data = result.data;
@@ -463,7 +463,7 @@ pub fn gpu_fade(ctx: &GpuContext, buf: &mut PixelBuffer, factor: f32) -> Result<
         gpu_buf.wgpu_buffer(),
         params_bytes,
         pixel_count.div_ceil(256),
-    );
+    )?;
     let result = gpu_buf.download(ctx)?;
     buf.data = result.data;
     Ok(())
@@ -532,7 +532,7 @@ pub fn gpu_wipe(
         dst_gpu.wgpu_buffer(),
         params_bytes,
         pixel_count.div_ceil(256),
-    );
+    )?;
 
     let result = dst_gpu.download(ctx)?;
     dst.data = result.data;
@@ -675,7 +675,7 @@ impl<'a> GpuChain<'a> {
             self.current_buf().wgpu_buffer(),
             params_bytes,
             self.pixel_count.div_ceil(256),
-        );
+        )?;
         Ok(self)
     }
 
@@ -709,7 +709,7 @@ impl<'a> GpuChain<'a> {
             self.current_buf().wgpu_buffer(),
             params_bytes,
             self.pixel_count.div_ceil(256),
-        );
+        )?;
         Ok(self)
     }
 
@@ -749,7 +749,7 @@ impl<'a> GpuChain<'a> {
             self.current_buf().wgpu_buffer(),
             params_bytes,
             self.pixel_count.div_ceil(256),
-        );
+        )?;
         Ok(self)
     }
 
@@ -783,7 +783,7 @@ impl<'a> GpuChain<'a> {
             self.current_buf().wgpu_buffer(),
             params_bytes,
             self.pixel_count.div_ceil(256),
-        );
+        )?;
         Ok(self)
     }
 
@@ -818,7 +818,7 @@ impl<'a> GpuChain<'a> {
             self.current_buf().wgpu_buffer(),
             params_bytes,
             self.pixel_count.div_ceil(256),
-        );
+        )?;
         Ok(self)
     }
 
@@ -871,7 +871,7 @@ impl<'a> GpuChain<'a> {
             self.current_buf().wgpu_buffer(),
             params_bytes,
             self.pixel_count.div_ceil(256),
-        );
+        )?;
 
         Ok(self)
     }
@@ -907,7 +907,7 @@ impl<'a> GpuChain<'a> {
             self.current_buf().wgpu_buffer(),
             params_bytes,
             self.pixel_count.div_ceil(256),
-        );
+        )?;
         Ok(self)
     }
 
@@ -966,7 +966,7 @@ impl<'a> GpuChain<'a> {
             self.current_buf().wgpu_buffer(),
             params_bytes,
             self.pixel_count.div_ceil(256),
-        );
+        )?;
 
         Ok(self)
     }
@@ -1040,7 +1040,7 @@ impl<'a> GpuChain<'a> {
             params_bytes,
             workgroups_x,
             workgroups_y,
-        );
+        )?;
 
         // Pass 2: vertical blur (other -> current)
         // After this, the result is back in the current buffer.
@@ -1054,7 +1054,7 @@ impl<'a> GpuChain<'a> {
             params_bytes,
             workgroups_x,
             workgroups_y,
-        );
+        )?;
 
         // current_is_a stays the same — result is back in the current buffer
         Ok(self)
@@ -1133,7 +1133,7 @@ impl<'a> GpuChain<'a> {
             self.current_buf().wgpu_buffer(),
             params_bytes,
             self.pixel_count.div_ceil(256),
-        );
+        )?;
 
         Ok(self)
     }
@@ -1194,9 +1194,9 @@ fn dispatch_1buf_shader(
     storage_buf: &wgpu::Buffer,
     params_data: &[u8],
     workgroups: u32,
-) {
+) -> Result<(), RangaError> {
     // Get or create the cached pipeline (returns raw pointer to avoid holding borrow)
-    let pipeline_ptr = ctx.get_or_create_pipeline_1buf(name, shader_src);
+    let pipeline_ptr = ctx.get_or_create_pipeline_1buf(name, shader_src)?;
 
     // Pad uniform buffer to 16-byte alignment
     let aligned_size = params_data.len().div_ceil(16) * 16;
@@ -1211,9 +1211,9 @@ fn dispatch_1buf_shader(
     });
     ctx.queue().write_buffer(&params_buf, 0, &aligned_data);
 
-    let bgl = ctx
-        .bind_group_layout_1buf()
-        .expect("layout created by get_or_create");
+    let bgl = ctx.bind_group_layout_1buf().ok_or_else(|| {
+        RangaError::Other("GPU 1-buffer bind group layout not initialized".into())
+    })?;
     let bg = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout: &bgl,
@@ -1250,6 +1250,7 @@ fn dispatch_1buf_shader(
         pass.dispatch_workgroups(workgroups, 1, 1);
     }
     ctx.queue().submit(Some(encoder.finish()));
+    Ok(())
 }
 
 /// Dispatch a compute shader with 2 storage buffers (src read-only, dst read-write) + 1 uniform.
@@ -1264,8 +1265,8 @@ fn dispatch_3buf_shader(
     dst_buf: &wgpu::Buffer,
     params_data: &[u8],
     workgroups: u32,
-) {
-    let pipeline_ptr = ctx.get_or_create_pipeline_3buf(name, shader_src);
+) -> Result<(), RangaError> {
+    let pipeline_ptr = ctx.get_or_create_pipeline_3buf(name, shader_src)?;
 
     let aligned_size = params_data.len().div_ceil(16) * 16;
     let mut aligned_data = vec![0u8; aligned_size];
@@ -1279,9 +1280,9 @@ fn dispatch_3buf_shader(
     });
     ctx.queue().write_buffer(&params_buf, 0, &aligned_data);
 
-    let bgl = ctx
-        .bind_group_layout_3buf()
-        .expect("layout created by get_or_create");
+    let bgl = ctx.bind_group_layout_3buf().ok_or_else(|| {
+        RangaError::Other("GPU 3-buffer bind group layout not initialized".into())
+    })?;
     let bg = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout: &bgl,
@@ -1321,6 +1322,7 @@ fn dispatch_3buf_shader(
         pass.dispatch_workgroups(workgroups, 1, 1);
     }
     ctx.queue().submit(Some(encoder.finish()));
+    Ok(())
 }
 
 /// GPU-accelerated Gaussian blur (separable two-pass).
@@ -1418,7 +1420,7 @@ pub fn gpu_gaussian_blur(
         params_bytes,
         workgroups_x,
         workgroups_y,
-    );
+    )?;
 
     // Pass 2: vertical blur (temp -> output)
     dispatch_blur_shader(
@@ -1431,7 +1433,7 @@ pub fn gpu_gaussian_blur(
         params_bytes,
         workgroups_x,
         workgroups_y,
-    );
+    )?;
 
     output_gpu.download(ctx).map_err(Into::into)
 }
@@ -1529,7 +1531,7 @@ pub fn gpu_crop(
         params_bytes,
         workgroups_x,
         workgroups_y,
-    );
+    )?;
 
     output_gpu.download(ctx).map_err(Into::into)
 }
@@ -1607,7 +1609,7 @@ pub fn gpu_resize(
         params_bytes,
         workgroups_x,
         workgroups_y,
-    );
+    )?;
 
     output_gpu.download(ctx).map_err(Into::into)
 }
@@ -1661,7 +1663,7 @@ pub fn gpu_flip_horizontal(ctx: &GpuContext, buf: &PixelBuffer) -> Result<PixelB
         params_bytes,
         workgroups_x,
         workgroups_y,
-    );
+    )?;
 
     output_gpu.download(ctx).map_err(Into::into)
 }
@@ -1713,7 +1715,7 @@ pub fn gpu_flip_vertical(ctx: &GpuContext, buf: &PixelBuffer) -> Result<PixelBuf
         params_bytes,
         workgroups_x,
         workgroups_y,
-    );
+    )?;
 
     output_gpu.download(ctx).map_err(Into::into)
 }
@@ -1732,7 +1734,7 @@ fn dispatch_2d_3buf_shader(
     params_data: &[u8],
     workgroups_x: u32,
     workgroups_y: u32,
-) {
+) -> Result<(), RangaError> {
     let cache = ctx.cache.borrow();
     let cached = cache.pipelines.contains_key(name);
     drop(cache);
@@ -1820,7 +1822,9 @@ fn dispatch_2d_3buf_shader(
     ctx.queue().write_buffer(&params_buf, 0, &aligned_data);
 
     let cache = ctx.cache.borrow();
-    let pipeline = cache.pipelines.get(name).expect("just created");
+    let pipeline = cache.pipelines.get(name).ok_or_else(|| {
+        RangaError::Other(format!("GPU pipeline cache missing entry for '{name}'"))
+    })?;
     let bgl = pipeline.get_bind_group_layout(0);
 
     let bg = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1856,6 +1860,7 @@ fn dispatch_2d_3buf_shader(
     }
     drop(cache);
     ctx.queue().submit(Some(encoder.finish()));
+    Ok(())
 }
 
 /// Dispatch a blur compute shader with 4 bindings (input, output, kernel, params).
@@ -1874,7 +1879,7 @@ fn dispatch_blur_shader(
     params_data: &[u8],
     workgroups_x: u32,
     workgroups_y: u32,
-) {
+) -> Result<(), RangaError> {
     // Blur pipelines need a 4-binding layout — we create them inline and cache
     // via the pipeline name. Since the layout differs from 1buf/3buf, we build
     // the pipeline directly when not cached.
@@ -1976,7 +1981,9 @@ fn dispatch_blur_shader(
 
     // Get the pipeline's bind group layout from the pipeline itself
     let cache = ctx.cache.borrow();
-    let pipeline = cache.pipelines.get(name).expect("just created");
+    let pipeline = cache.pipelines.get(name).ok_or_else(|| {
+        RangaError::Other(format!("GPU pipeline cache missing entry for '{name}'"))
+    })?;
     let bgl = pipeline.get_bind_group_layout(0);
 
     let bg = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
@@ -2016,6 +2023,7 @@ fn dispatch_blur_shader(
     }
     drop(cache);
     ctx.queue().submit(Some(encoder.finish()));
+    Ok(())
 }
 
 #[cfg(test)]

@@ -15,8 +15,7 @@ use crate::pixel::{PixelBuffer, PixelFormat};
 fn compute_y_row(rgba: &[u8], y_out: &mut [u8]) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     {
-        // SAFETY: SSE2 is baseline for x86_64.
-        unsafe { compute_y_row_simd_sse2(rgba, y_out, 77, 150, 29) };
+        compute_y_row_simd_sse2(rgba, y_out, 77, 150, 29);
     }
 
     #[cfg(all(feature = "simd", target_arch = "aarch64"))]
@@ -35,8 +34,7 @@ fn compute_y_row_bt709(rgba: &[u8], y_out: &mut [u8]) {
     // (54, 183, 19) sums to 256 so white (255,255,255) correctly maps to Y=255
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     {
-        // SAFETY: SSE2 is baseline for x86_64.
-        unsafe { compute_y_row_simd_sse2(rgba, y_out, 54, 183, 19) };
+        compute_y_row_simd_sse2(rgba, y_out, 54, 183, 19);
     }
 
     #[cfg(all(feature = "simd", target_arch = "aarch64"))]
@@ -55,52 +53,12 @@ fn compute_y_row_scalar(rgba: &[u8], y_out: &mut [u8], cr: u16, cg: u16, cb: u16
     }
 }
 
+// x86_64: use scalar path — the compiler auto-vectorizes the simple loop with
+// optimizations enabled, which outperforms the previous hand-rolled SSE2 that
+// extracted individual lanes for scalar math.
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-#[target_feature(enable = "sse2")]
-unsafe fn compute_y_row_simd_sse2(rgba: &[u8], y_out: &mut [u8], cr: u16, cg: u16, cb: u16) {
-    use std::arch::x86_64::*;
-    let pixel_count = rgba.len() / 4;
-    let simd_pixels = pixel_count / 2 * 2;
-
-    // SAFETY: SSE2 is guaranteed by target_feature. We process 2 pixels (8 bytes)
-    // per iteration and write 2 Y values.
-    unsafe {
-        let zero = _mm_setzero_si128();
-        let vcr = _mm_set1_epi16(cr as i16);
-        let vcg = _mm_set1_epi16(cg as i16);
-        let vcb = _mm_set1_epi16(cb as i16);
-
-        let mut i = 0usize;
-        let mut oi = 0usize;
-        while i < simd_pixels * 4 {
-            let px = _mm_loadl_epi64(rgba.as_ptr().add(i) as *const __m128i);
-            let px16 = _mm_unpacklo_epi8(px, zero);
-            // [R0 G0 B0 A0 R1 G1 B1 A1] as u16
-            let r0 = _mm_extract_epi16(px16, 0) as u16;
-            let g0 = _mm_extract_epi16(px16, 1) as u16;
-            let b0 = _mm_extract_epi16(px16, 2) as u16;
-            let r1 = _mm_extract_epi16(px16, 4) as u16;
-            let g1 = _mm_extract_epi16(px16, 5) as u16;
-            let b1 = _mm_extract_epi16(px16, 6) as u16;
-
-            y_out[oi] = ((cr * r0 + cg * g0 + cb * b0) >> 8) as u8;
-            y_out[oi + 1] = ((cr * r1 + cg * g1 + cb * b1) >> 8) as u8;
-
-            i += 8;
-            oi += 2;
-        }
-        let _ = (vcr, vcg, vcb);
-    }
-
-    if simd_pixels < pixel_count {
-        compute_y_row_scalar(
-            &rgba[simd_pixels * 4..],
-            &mut y_out[simd_pixels..],
-            cr,
-            cg,
-            cb,
-        );
-    }
+fn compute_y_row_simd_sse2(rgba: &[u8], y_out: &mut [u8], cr: u16, cg: u16, cb: u16) {
+    compute_y_row_scalar(rgba, y_out, cr, cg, cb);
 }
 
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]

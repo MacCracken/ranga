@@ -49,6 +49,49 @@ impl std::fmt::Display for PixelFormat {
 impl PixelFormat {
     /// Compute expected buffer size in bytes for this format at the given dimensions.
     ///
+    /// Returns `None` if the size would overflow `usize`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ranga::pixel::PixelFormat;
+    ///
+    /// assert_eq!(PixelFormat::Rgb8.checked_buffer_size(10, 10), Some(300));
+    /// assert_eq!(
+    ///     PixelFormat::Yuv420p.checked_buffer_size(320, 240),
+    ///     Some(320 * 240 + 2 * 160 * 120),
+    /// );
+    /// assert_eq!(PixelFormat::Rgba8.checked_buffer_size(u32::MAX, u32::MAX), None);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn checked_buffer_size(self, width: u32, height: u32) -> Option<usize> {
+        let w = width as usize;
+        let h = height as usize;
+        match self {
+            Self::Rgba8 | Self::Argb8 => w.checked_mul(h)?.checked_mul(4),
+            Self::Rgb8 => w.checked_mul(h)?.checked_mul(3),
+            Self::Yuv420p => {
+                let y = w.checked_mul(h)?;
+                let chroma = w.div_ceil(2).checked_mul(h.div_ceil(2))?.checked_mul(2)?;
+                y.checked_add(chroma)
+            }
+            Self::Nv12 => {
+                let y = w.checked_mul(h)?;
+                let chroma = w.div_ceil(2).checked_mul(h.div_ceil(2))?.checked_mul(2)?;
+                y.checked_add(chroma)
+            }
+            Self::RgbaF32 => w.checked_mul(h)?.checked_mul(16),
+        }
+    }
+
+    /// Compute expected buffer size in bytes for this format at the given dimensions.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the size would overflow `usize`. Prefer [`checked_buffer_size`](Self::checked_buffer_size)
+    /// when dimensions come from untrusted input.
+    ///
     /// # Examples
     ///
     /// ```
@@ -58,16 +101,10 @@ impl PixelFormat {
     /// assert_eq!(PixelFormat::Yuv420p.buffer_size(320, 240), 320 * 240 + 2 * 160 * 120);
     /// ```
     #[must_use]
+    #[inline]
     pub fn buffer_size(self, width: u32, height: u32) -> usize {
-        let w = width as usize;
-        let h = height as usize;
-        match self {
-            Self::Rgba8 | Self::Argb8 => w * h * 4,
-            Self::Rgb8 => w * h * 3,
-            Self::Yuv420p => w * h + 2 * w.div_ceil(2) * h.div_ceil(2),
-            Self::Nv12 => w * h + w.div_ceil(2) * h.div_ceil(2) * 2,
-            Self::RgbaF32 => w * h * 16,
-        }
+        self.checked_buffer_size(width, height)
+            .expect("buffer size overflow")
     }
 }
 
@@ -126,7 +163,13 @@ impl PixelBuffer {
         height: u32,
         format: PixelFormat,
     ) -> Result<Self, RangaError> {
-        let expected = format.buffer_size(width, height);
+        let expected =
+            format
+                .checked_buffer_size(width, height)
+                .ok_or(RangaError::BufferTooSmall {
+                    need: usize::MAX,
+                    have: data.len(),
+                })?;
         if data.len() != expected {
             return Err(RangaError::DimensionMismatch {
                 expected,
@@ -142,6 +185,11 @@ impl PixelBuffer {
     }
 
     /// Create a zero-filled buffer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the buffer size would overflow `usize`. Use [`PixelFormat::checked_buffer_size`]
+    /// to validate dimensions from untrusted input before calling this.
     ///
     /// # Examples
     ///

@@ -195,7 +195,7 @@ impl GpuContext {
         &self,
         name: &'static str,
         shader_src: &str,
-    ) -> *const wgpu::ComputePipeline {
+    ) -> Result<*const wgpu::ComputePipeline, RangaError> {
         let mut cache = self.cache.borrow_mut();
 
         if !cache.pipelines.contains_key(name) {
@@ -258,8 +258,10 @@ impl GpuContext {
             cache.pipelines.insert(name, pipeline);
         }
 
-        let pipeline = cache.pipelines.get(name).expect("just inserted");
-        pipeline as *const wgpu::ComputePipeline
+        let pipeline = cache.pipelines.get(name).ok_or_else(|| {
+            RangaError::Other(format!("GPU pipeline cache missing entry for '{name}'"))
+        })?;
+        Ok(pipeline as *const wgpu::ComputePipeline)
     }
 
     /// Return a cached 3-buffer compute pipeline, creating it on first use.
@@ -283,7 +285,7 @@ impl GpuContext {
         &self,
         name: &'static str,
         shader_src: &str,
-    ) -> *const wgpu::ComputePipeline {
+    ) -> Result<*const wgpu::ComputePipeline, RangaError> {
         let mut cache = self.cache.borrow_mut();
 
         if !cache.pipelines.contains_key(name) {
@@ -356,8 +358,10 @@ impl GpuContext {
             cache.pipelines.insert(name, pipeline);
         }
 
-        let pipeline = cache.pipelines.get(name).expect("just inserted");
-        pipeline as *const wgpu::ComputePipeline
+        let pipeline = cache.pipelines.get(name).ok_or_else(|| {
+            RangaError::Other(format!("GPU pipeline cache missing entry for '{name}'"))
+        })?;
+        Ok(pipeline as *const wgpu::ComputePipeline)
     }
 
     /// Access the bind group layout for 1-buffer pipelines.
@@ -375,13 +379,7 @@ impl GpuContext {
     /// ```
     pub fn bind_group_layout_1buf(&self) -> Option<std::cell::Ref<'_, wgpu::BindGroupLayout>> {
         let cache = self.cache.borrow();
-        if cache.layouts_1buf.is_some() {
-            Some(std::cell::Ref::map(cache, |c| {
-                &c.layouts_1buf.as_ref().unwrap().0
-            }))
-        } else {
-            None
-        }
+        std::cell::Ref::filter_map(cache, |c| c.layouts_1buf.as_ref().map(|pair| &pair.0)).ok()
     }
 
     /// Access the bind group layout for 3-buffer pipelines.
@@ -399,13 +397,7 @@ impl GpuContext {
     /// ```
     pub fn bind_group_layout_3buf(&self) -> Option<std::cell::Ref<'_, wgpu::BindGroupLayout>> {
         let cache = self.cache.borrow();
-        if cache.layouts_3buf.is_some() {
-            Some(std::cell::Ref::map(cache, |c| {
-                &c.layouts_3buf.as_ref().unwrap().0
-            }))
-        } else {
-            None
-        }
+        std::cell::Ref::filter_map(cache, |c| c.layouts_3buf.as_ref().map(|pair| &pair.0)).ok()
     }
 }
 
