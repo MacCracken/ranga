@@ -78,3 +78,11 @@ harness = false
 name = "spectral"
 harness = false
 required-features = ["spectral"]
+
+[[example]]
+name = "gpu_compute"
+required-features = ["gpu"]
+
+[[example]]
+name = "spectral_analysis"
+required-features = ["spectral"]
