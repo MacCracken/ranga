@@ -152,6 +152,229 @@ unsafe fn compute_y_row_simd_neon(rgba: &[u8], y_out: &mut [u8], cr: u16, cg: u1
 }
 
 // =========================================================================
+// YUV→RGBA SSE2 row helpers (shared by BT.601, BT.709, BT.2020)
+// =========================================================================
+
+/// Convert a row of YUV420p data to RGBA using SSE2 intrinsics.
+///
+/// Processes 8 pixels at a time. U/V are half-width (4:2:0 subsampling), so
+/// each U/V value covers 2 horizontal pixels.
+///
+/// Coefficients:
+/// - `cr_v`: R = Y + (cr_v * V) >> 8
+/// - `cg_u`, `cg_v`: G = Y - (cg_u * U + cg_v * V) >> 8
+/// - `cb_u`: B = Y + (cb_u * U) >> 8
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "sse2")]
+#[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+unsafe fn yuv_row_to_rgba_sse2(
+    y_row: &[u8],
+    u_row: &[u8],
+    v_row: &[u8],
+    rgba_out: &mut [u8],
+    cr_v: i16,
+    cg_u: i16,
+    cg_v: i16,
+    cb_u: i16,
+) {
+    use std::arch::x86_64::*;
+
+    let width = y_row.len();
+    let simd_width = width / 8 * 8; // process 8 pixels at a time
+
+    unsafe {
+        let zero = _mm_setzero_si128();
+        let alpha = _mm_set1_epi16(255);
+        let v_cr_v = _mm_set1_epi16(cr_v);
+        let v_cg_u = _mm_set1_epi16(cg_u);
+        let v_cg_v = _mm_set1_epi16(cg_v);
+        let v_cb_u = _mm_set1_epi16(cb_u);
+        let bias = _mm_set1_epi16(128);
+
+        let mut x = 0usize;
+        while x + 8 <= simd_width {
+            // 1. Load 8 Y values, zero-extend to i16
+            let y8 = _mm_loadl_epi64(y_row.as_ptr().add(x) as *const __m128i);
+            let y16 = _mm_unpacklo_epi8(y8, zero);
+
+            // 2. Load 4 U and 4 V values, zero-extend to i16, subtract 128
+            let cx = x / 2;
+            let u4 = _mm_cvtsi32_si128(i32::from_ne_bytes([
+                u_row[cx],
+                u_row[cx + 1],
+                u_row[cx + 2],
+                u_row[cx + 3],
+            ]));
+            let v4 = _mm_cvtsi32_si128(i32::from_ne_bytes([
+                v_row[cx],
+                v_row[cx + 1],
+                v_row[cx + 2],
+                v_row[cx + 3],
+            ]));
+
+            // 3. Duplicate each U/V to cover 2 pixels: [u0,u0,u1,u1,u2,u2,u3,u3]
+            let u_dup = _mm_unpacklo_epi8(u4, u4); // byte-level interleave with self
+            let v_dup = _mm_unpacklo_epi8(v4, v4);
+
+            // Zero-extend to i16 and subtract 128
+            let u16 = _mm_sub_epi16(_mm_unpacklo_epi8(u_dup, zero), bias);
+            let v16 = _mm_sub_epi16(_mm_unpacklo_epi8(v_dup, zero), bias);
+
+            // 4. R = Y + (cr_v * V) >> 8
+            let r16 = _mm_add_epi16(y16, _mm_srai_epi16(_mm_mullo_epi16(v_cr_v, v16), 8));
+            // Clamp [0, 255]: pack to u8 with saturation, then unpack back
+            let r_clamped = _mm_unpacklo_epi8(_mm_packus_epi16(r16, zero), zero);
+
+            // 5. G = Y - (cg_u * U + cg_v * V) >> 8
+            let gu = _mm_mullo_epi16(v_cg_u, u16);
+            let gv = _mm_mullo_epi16(v_cg_v, v16);
+            let g16 = _mm_sub_epi16(y16, _mm_srai_epi16(_mm_add_epi16(gu, gv), 8));
+            let g_clamped = _mm_unpacklo_epi8(_mm_packus_epi16(g16, zero), zero);
+
+            // 6. B = Y + (cb_u * U) >> 8
+            let b16 = _mm_add_epi16(y16, _mm_srai_epi16(_mm_mullo_epi16(v_cb_u, u16), 8));
+            let b_clamped = _mm_unpacklo_epi8(_mm_packus_epi16(b16, zero), zero);
+
+            // 7. Interleave R,G,B,A=255 and store 32 bytes
+            // Pack clamped i16 back to u8 for byte-level interleaving
+            let r8 = _mm_packus_epi16(r_clamped, zero);
+            let g8 = _mm_packus_epi16(g_clamped, zero);
+            let b8 = _mm_packus_epi16(b_clamped, zero);
+            let a8 = _mm_packus_epi16(alpha, zero);
+
+            // Interleave: RG low, RG high, BA low, BA high
+            let rg_lo = _mm_unpacklo_epi8(r8, g8); // [r0,g0,r1,g1,r2,g2,r3,g3,...]
+            let ba_lo = _mm_unpacklo_epi8(b8, a8); // [b0,a0,b1,a1,b2,a2,b3,a3,...]
+
+            // Now interleave 16-bit pairs: [r0,g0,b0,a0, r1,g1,b1,a1, ...]
+            let rgba_0 = _mm_unpacklo_epi16(rg_lo, ba_lo); // pixels 0-3
+            let rgba_1 = _mm_unpackhi_epi16(rg_lo, ba_lo); // pixels 4-7
+
+            let out_ptr = rgba_out.as_mut_ptr().add(x * 4);
+            _mm_storeu_si128(out_ptr as *mut __m128i, rgba_0);
+            _mm_storeu_si128(out_ptr.add(16) as *mut __m128i, rgba_1);
+
+            x += 8;
+        }
+    }
+
+    // Scalar tail for remaining pixels
+    for x in simd_width..width {
+        let cx = (x / 2).min(u_row.len().saturating_sub(1));
+        let yi = y_row[x] as i16;
+        let u = u_row[cx] as i16 - 128;
+        let v = v_row[cx] as i16 - 128;
+        let oi = x * 4;
+        rgba_out[oi] = (yi + ((cr_v * v) >> 8)).clamp(0, 255) as u8;
+        rgba_out[oi + 1] = (yi - ((cg_u * u + cg_v * v) >> 8)).clamp(0, 255) as u8;
+        rgba_out[oi + 2] = (yi + ((cb_u * u) >> 8)).clamp(0, 255) as u8;
+        rgba_out[oi + 3] = 255;
+    }
+}
+
+/// NV12 variant: U/V are interleaved as [U0,V0,U1,V1,...] instead of separate planes.
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "sse2")]
+#[allow(clippy::needless_range_loop)]
+unsafe fn yuv_row_to_rgba_nv12_sse2(
+    y_row: &[u8],
+    uv_row: &[u8],
+    rgba_out: &mut [u8],
+    cr_v: i16,
+    cg_u: i16,
+    cg_v: i16,
+    cb_u: i16,
+) {
+    use std::arch::x86_64::*;
+
+    let width = y_row.len();
+    let simd_width = width / 8 * 8;
+
+    unsafe {
+        let zero = _mm_setzero_si128();
+        let alpha = _mm_set1_epi16(255);
+        let v_cr_v = _mm_set1_epi16(cr_v);
+        let v_cg_u = _mm_set1_epi16(cg_u);
+        let v_cg_v = _mm_set1_epi16(cg_v);
+        let v_cb_u = _mm_set1_epi16(cb_u);
+        let bias = _mm_set1_epi16(128);
+        // Mask to extract even bytes (U values from interleaved UV)
+        let even_mask = _mm_set1_epi16(0x00FF);
+
+        let mut x = 0usize;
+        while x + 8 <= simd_width {
+            // 1. Load 8 Y values
+            let y8 = _mm_loadl_epi64(y_row.as_ptr().add(x) as *const __m128i);
+            let y16 = _mm_unpacklo_epi8(y8, zero);
+
+            // 2. Load 8 bytes of interleaved UV: [U0,V0,U1,V1,U2,V2,U3,V3]
+            let cx = x / 2;
+            let uv8 = _mm_loadl_epi64(uv_row.as_ptr().add(cx * 2) as *const __m128i);
+
+            // Deinterleave: extract U (even bytes) and V (odd bytes)
+            let u_bytes = _mm_and_si128(uv8, even_mask); // U in low byte of each 16-bit word
+            let v_bytes = _mm_srli_epi16(uv8, 8); // V shifted down
+
+            // u_bytes/v_bytes are already i16 with values in [0,255]
+            // We need to duplicate each for 2 pixels. The values are in 16-bit lanes:
+            // u_bytes = [u0, u1, u2, u3, 0, 0, 0, 0] as i16
+            // Pack to bytes, duplicate, unpack back
+            let u4 = _mm_packus_epi16(u_bytes, zero); // [u0,u1,u2,u3,0,0,...] as bytes
+            let v4 = _mm_packus_epi16(v_bytes, zero);
+
+            let u_dup = _mm_unpacklo_epi8(u4, u4); // [u0,u0,u1,u1,u2,u2,u3,u3,...]
+            let v_dup = _mm_unpacklo_epi8(v4, v4);
+
+            let u16 = _mm_sub_epi16(_mm_unpacklo_epi8(u_dup, zero), bias);
+            let v16 = _mm_sub_epi16(_mm_unpacklo_epi8(v_dup, zero), bias);
+
+            // Same math as planar version
+            let r16 = _mm_add_epi16(y16, _mm_srai_epi16(_mm_mullo_epi16(v_cr_v, v16), 8));
+            let r_clamped = _mm_unpacklo_epi8(_mm_packus_epi16(r16, zero), zero);
+
+            let gu = _mm_mullo_epi16(v_cg_u, u16);
+            let gv = _mm_mullo_epi16(v_cg_v, v16);
+            let g16 = _mm_sub_epi16(y16, _mm_srai_epi16(_mm_add_epi16(gu, gv), 8));
+            let g_clamped = _mm_unpacklo_epi8(_mm_packus_epi16(g16, zero), zero);
+
+            let b16 = _mm_add_epi16(y16, _mm_srai_epi16(_mm_mullo_epi16(v_cb_u, u16), 8));
+            let b_clamped = _mm_unpacklo_epi8(_mm_packus_epi16(b16, zero), zero);
+
+            let r8 = _mm_packus_epi16(r_clamped, zero);
+            let g8 = _mm_packus_epi16(g_clamped, zero);
+            let b8 = _mm_packus_epi16(b_clamped, zero);
+            let a8 = _mm_packus_epi16(alpha, zero);
+
+            let rg_lo = _mm_unpacklo_epi8(r8, g8);
+            let ba_lo = _mm_unpacklo_epi8(b8, a8);
+
+            let rgba_0 = _mm_unpacklo_epi16(rg_lo, ba_lo);
+            let rgba_1 = _mm_unpackhi_epi16(rg_lo, ba_lo);
+
+            let out_ptr = rgba_out.as_mut_ptr().add(x * 4);
+            _mm_storeu_si128(out_ptr as *mut __m128i, rgba_0);
+            _mm_storeu_si128(out_ptr.add(16) as *mut __m128i, rgba_1);
+
+            x += 8;
+        }
+    }
+
+    // Scalar tail
+    let cw = width.div_ceil(2);
+    for x in simd_width..width {
+        let cx = (x / 2).min(cw.saturating_sub(1));
+        let yi = y_row[x] as i16;
+        let u = uv_row[cx * 2] as i16 - 128;
+        let v = uv_row[cx * 2 + 1] as i16 - 128;
+        let oi = x * 4;
+        rgba_out[oi] = (yi + ((cr_v * v) >> 8)).clamp(0, 255) as u8;
+        rgba_out[oi + 1] = (yi - ((cg_u * u + cg_v * v) >> 8)).clamp(0, 255) as u8;
+        rgba_out[oi + 2] = (yi + ((cb_u * u) >> 8)).clamp(0, 255) as u8;
+        rgba_out[oi + 3] = 255;
+    }
+}
+
+// =========================================================================
 // BT.601 conversions
 // =========================================================================
 
@@ -239,21 +462,50 @@ pub fn yuv420p_to_rgba(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
     let v_off = u_off + cw * (h.div_ceil(2));
     let ch = h.div_ceil(2);
     let mut rgba = vec![0u8; w * h * 4];
-    for y in 0..h {
-        let cy = (y / 2).min(ch.saturating_sub(1));
-        for x in 0..w {
-            let cx = (x / 2).min(cw.saturating_sub(1));
-            let yi = buf.data[y * w + x] as i16;
-            let u = buf.data[u_off + cy * cw + cx] as i16 - 128;
-            let v = buf.data[v_off + cy * cw + cx] as i16 - 128;
-            let oi = (y * w + x) * 4;
-            rgba[oi] = (yi + ((359 * v) >> 8)).clamp(0, 255) as u8;
-            rgba[oi + 1] = (yi - ((88 * u + 183 * v) >> 8)).clamp(0, 255) as u8;
-            rgba[oi + 2] = (yi + ((454 * u) >> 8)).clamp(0, 255) as u8;
-            rgba[oi + 3] = 255;
+
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    {
+        for y in 0..h {
+            let cy = (y / 2).min(ch.saturating_sub(1));
+            let y_start = y * w;
+            let u_start = u_off + cy * cw;
+            let v_start = v_off + cy * cw;
+            let rgba_start = y * w * 4;
+            // SAFETY: SSE2 is baseline for x86_64.
+            unsafe {
+                yuv_row_to_rgba_sse2(
+                    &buf.data[y_start..y_start + w],
+                    &buf.data[u_start..u_start + cw],
+                    &buf.data[v_start..v_start + cw],
+                    &mut rgba[rgba_start..rgba_start + w * 4],
+                    359,
+                    88,
+                    183,
+                    454,
+                );
+            }
         }
+        PixelBuffer::new(rgba, buf.width, buf.height, PixelFormat::Rgba8)
     }
-    PixelBuffer::new(rgba, buf.width, buf.height, PixelFormat::Rgba8)
+
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    {
+        for y in 0..h {
+            let cy = (y / 2).min(ch.saturating_sub(1));
+            for x in 0..w {
+                let cx = (x / 2).min(cw.saturating_sub(1));
+                let yi = buf.data[y * w + x] as i16;
+                let u = buf.data[u_off + cy * cw + cx] as i16 - 128;
+                let v = buf.data[v_off + cy * cw + cx] as i16 - 128;
+                let oi = (y * w + x) * 4;
+                rgba[oi] = (yi + ((359 * v) >> 8)).clamp(0, 255) as u8;
+                rgba[oi + 1] = (yi - ((88 * u + 183 * v) >> 8)).clamp(0, 255) as u8;
+                rgba[oi + 2] = (yi + ((454 * u) >> 8)).clamp(0, 255) as u8;
+                rgba[oi + 3] = 255;
+            }
+        }
+        PixelBuffer::new(rgba, buf.width, buf.height, PixelFormat::Rgba8)
+    }
 }
 
 /// Convert ARGB8 buffer to NV12 (semi-planar YUV 4:2:0, BT.601).
@@ -390,21 +642,50 @@ pub fn yuv420p_to_rgba_bt709(buf: &PixelBuffer) -> Result<PixelBuffer, RangaErro
     let u_off = w * h;
     let v_off = u_off + cw * ch;
     let mut rgba = vec![0u8; w * h * 4];
-    for y in 0..h {
-        let cy = (y / 2).min(ch.saturating_sub(1));
-        for x in 0..w {
-            let cx = (x / 2).min(cw.saturating_sub(1));
-            let yi = buf.data[y * w + x] as i16;
-            let u = buf.data[u_off + cy * cw + cx] as i16 - 128;
-            let v = buf.data[v_off + cy * cw + cx] as i16 - 128;
-            let oi = (y * w + x) * 4;
-            rgba[oi] = (yi + ((403 * v) >> 8)).clamp(0, 255) as u8;
-            rgba[oi + 1] = (yi - ((48 * u + 120 * v) >> 8)).clamp(0, 255) as u8;
-            rgba[oi + 2] = (yi + ((475 * u) >> 8)).clamp(0, 255) as u8;
-            rgba[oi + 3] = 255;
+
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    {
+        for y in 0..h {
+            let cy = (y / 2).min(ch.saturating_sub(1));
+            let y_start = y * w;
+            let u_start = u_off + cy * cw;
+            let v_start = v_off + cy * cw;
+            let rgba_start = y * w * 4;
+            // SAFETY: SSE2 is baseline for x86_64.
+            unsafe {
+                yuv_row_to_rgba_sse2(
+                    &buf.data[y_start..y_start + w],
+                    &buf.data[u_start..u_start + cw],
+                    &buf.data[v_start..v_start + cw],
+                    &mut rgba[rgba_start..rgba_start + w * 4],
+                    403,
+                    48,
+                    120,
+                    475,
+                );
+            }
         }
+        PixelBuffer::new(rgba, buf.width, buf.height, PixelFormat::Rgba8)
     }
-    PixelBuffer::new(rgba, buf.width, buf.height, PixelFormat::Rgba8)
+
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    {
+        for y in 0..h {
+            let cy = (y / 2).min(ch.saturating_sub(1));
+            for x in 0..w {
+                let cx = (x / 2).min(cw.saturating_sub(1));
+                let yi = buf.data[y * w + x] as i16;
+                let u = buf.data[u_off + cy * cw + cx] as i16 - 128;
+                let v = buf.data[v_off + cy * cw + cx] as i16 - 128;
+                let oi = (y * w + x) * 4;
+                rgba[oi] = (yi + ((403 * v) >> 8)).clamp(0, 255) as u8;
+                rgba[oi + 1] = (yi - ((48 * u + 120 * v) >> 8)).clamp(0, 255) as u8;
+                rgba[oi + 2] = (yi + ((475 * u) >> 8)).clamp(0, 255) as u8;
+                rgba[oi + 3] = 255;
+            }
+        }
+        PixelBuffer::new(rgba, buf.width, buf.height, PixelFormat::Rgba8)
+    }
 }
 
 // =========================================================================
@@ -506,21 +787,50 @@ pub fn yuv420p_to_rgba_bt2020(buf: &PixelBuffer) -> Result<PixelBuffer, RangaErr
     // R = Y + 1.4746 * Cr → Y + (377 * V) >> 8
     // G = Y - 0.1646 * Cb - 0.5714 * Cr → Y - (42 * U + 146 * V) >> 8
     // B = Y + 1.8814 * Cb → Y + (481 * U) >> 8
-    for y in 0..h {
-        let cy = (y / 2).min(ch.saturating_sub(1));
-        for x in 0..w {
-            let cx = (x / 2).min(cw.saturating_sub(1));
-            let yi = buf.data[y * w + x] as i16;
-            let u = buf.data[u_off + cy * cw + cx] as i16 - 128;
-            let v = buf.data[v_off + cy * cw + cx] as i16 - 128;
-            let oi = (y * w + x) * 4;
-            rgba[oi] = (yi + ((377 * v) >> 8)).clamp(0, 255) as u8;
-            rgba[oi + 1] = (yi - ((42 * u + 146 * v) >> 8)).clamp(0, 255) as u8;
-            rgba[oi + 2] = (yi + ((481 * u) >> 8)).clamp(0, 255) as u8;
-            rgba[oi + 3] = 255;
+
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    {
+        for y in 0..h {
+            let cy = (y / 2).min(ch.saturating_sub(1));
+            let y_start = y * w;
+            let u_start = u_off + cy * cw;
+            let v_start = v_off + cy * cw;
+            let rgba_start = y * w * 4;
+            // SAFETY: SSE2 is baseline for x86_64.
+            unsafe {
+                yuv_row_to_rgba_sse2(
+                    &buf.data[y_start..y_start + w],
+                    &buf.data[u_start..u_start + cw],
+                    &buf.data[v_start..v_start + cw],
+                    &mut rgba[rgba_start..rgba_start + w * 4],
+                    377,
+                    42,
+                    146,
+                    481,
+                );
+            }
         }
+        PixelBuffer::new(rgba, buf.width, buf.height, PixelFormat::Rgba8)
     }
-    PixelBuffer::new(rgba, buf.width, buf.height, PixelFormat::Rgba8)
+
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    {
+        for y in 0..h {
+            let cy = (y / 2).min(ch.saturating_sub(1));
+            for x in 0..w {
+                let cx = (x / 2).min(cw.saturating_sub(1));
+                let yi = buf.data[y * w + x] as i16;
+                let u = buf.data[u_off + cy * cw + cx] as i16 - 128;
+                let v = buf.data[v_off + cy * cw + cx] as i16 - 128;
+                let oi = (y * w + x) * 4;
+                rgba[oi] = (yi + ((377 * v) >> 8)).clamp(0, 255) as u8;
+                rgba[oi + 1] = (yi - ((42 * u + 146 * v) >> 8)).clamp(0, 255) as u8;
+                rgba[oi + 2] = (yi + ((481 * u) >> 8)).clamp(0, 255) as u8;
+                rgba[oi + 3] = 255;
+            }
+        }
+        PixelBuffer::new(rgba, buf.width, buf.height, PixelFormat::Rgba8)
+    }
 }
 
 // =========================================================================
@@ -557,22 +867,49 @@ pub fn nv12_to_rgba(buf: &PixelBuffer) -> Result<PixelBuffer, RangaError> {
     let uv_off = w * h;
     let uv_stride = cw * 2; // interleaved UV pairs per row
     let mut rgba = vec![0u8; w * h * 4];
-    for y in 0..h {
-        let cy = (y / 2).min(ch.saturating_sub(1));
-        for x in 0..w {
-            let cx = (x / 2).min(cw.saturating_sub(1));
-            let yi = buf.data[y * w + x] as i16;
-            let uv_idx = uv_off + cy * uv_stride + cx * 2;
-            let u = buf.data[uv_idx] as i16 - 128;
-            let v = buf.data[uv_idx + 1] as i16 - 128;
-            let oi = (y * w + x) * 4;
-            rgba[oi] = (yi + ((359 * v) >> 8)).clamp(0, 255) as u8;
-            rgba[oi + 1] = (yi - ((88 * u + 183 * v) >> 8)).clamp(0, 255) as u8;
-            rgba[oi + 2] = (yi + ((454 * u) >> 8)).clamp(0, 255) as u8;
-            rgba[oi + 3] = 255;
+
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    {
+        for y in 0..h {
+            let cy = (y / 2).min(ch.saturating_sub(1));
+            let y_start = y * w;
+            let uv_start = uv_off + cy * uv_stride;
+            let rgba_start = y * w * 4;
+            // SAFETY: SSE2 is baseline for x86_64.
+            unsafe {
+                yuv_row_to_rgba_nv12_sse2(
+                    &buf.data[y_start..y_start + w],
+                    &buf.data[uv_start..uv_start + uv_stride],
+                    &mut rgba[rgba_start..rgba_start + w * 4],
+                    359,
+                    88,
+                    183,
+                    454,
+                );
+            }
         }
+        PixelBuffer::new(rgba, buf.width, buf.height, PixelFormat::Rgba8)
     }
-    PixelBuffer::new(rgba, buf.width, buf.height, PixelFormat::Rgba8)
+
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    {
+        for y in 0..h {
+            let cy = (y / 2).min(ch.saturating_sub(1));
+            for x in 0..w {
+                let cx = (x / 2).min(cw.saturating_sub(1));
+                let yi = buf.data[y * w + x] as i16;
+                let uv_idx = uv_off + cy * uv_stride + cx * 2;
+                let u = buf.data[uv_idx] as i16 - 128;
+                let v = buf.data[uv_idx + 1] as i16 - 128;
+                let oi = (y * w + x) * 4;
+                rgba[oi] = (yi + ((359 * v) >> 8)).clamp(0, 255) as u8;
+                rgba[oi + 1] = (yi - ((88 * u + 183 * v) >> 8)).clamp(0, 255) as u8;
+                rgba[oi + 2] = (yi + ((454 * u) >> 8)).clamp(0, 255) as u8;
+                rgba[oi + 3] = 255;
+            }
+        }
+        PixelBuffer::new(rgba, buf.width, buf.height, PixelFormat::Rgba8)
+    }
 }
 
 // =========================================================================

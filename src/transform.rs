@@ -686,11 +686,11 @@ fn solve_8x8(mut a: [[f64; 8]; 8], mut b: [f64; 8]) -> Option<[f64; 8]> {
 ///
 /// ```
 /// use ranga::pixel::{PixelBuffer, PixelFormat};
-/// use ranga::transform::{self, Perspective};
+/// use ranga::transform::{self, Perspective, ScaleFilter};
 ///
 /// let buf = PixelBuffer::zeroed(100, 100, PixelFormat::Rgba8);
 /// let p = Perspective::identity();
-/// let result = transform::perspective_transform(&buf, &p, 100, 100).unwrap();
+/// let result = transform::perspective_transform(&buf, &p, 100, 100, ScaleFilter::Bilinear).unwrap();
 /// assert_eq!(result.width(), 100);
 /// ```
 #[must_use = "returns a new transformed buffer"]
@@ -699,6 +699,7 @@ pub fn perspective_transform(
     transform: &Perspective,
     out_w: u32,
     out_h: u32,
+    filter: ScaleFilter,
 ) -> Result<PixelBuffer, RangaError> {
     validate_rgba8("perspective_transform", buf)?;
     let inv = transform
@@ -721,21 +722,48 @@ pub fn perspective_transform(
                 continue;
             }
 
-            // Bilinear interpolation.
-            let x0 = sx.floor() as usize;
-            let y0 = sy.floor() as usize;
-            let x1 = (x0 + 1).min(sw - 1);
-            let y1 = (y0 + 1).min(sh - 1);
-            let fx = sx - x0 as f64;
-            let fy = sy - y0 as f64;
-            for c in 0..4 {
-                let c00 = buf.data[(y0 * sw + x0) * 4 + c] as f64;
-                let c10 = buf.data[(y0 * sw + x1) * 4 + c] as f64;
-                let c01 = buf.data[(y1 * sw + x0) * 4 + c] as f64;
-                let c11 = buf.data[(y1 * sw + x1) * 4 + c] as f64;
-                let top = c00 + fx * (c10 - c00);
-                let bot = c01 + fx * (c11 - c01);
-                out[di + c] = (top + fy * (bot - top)).clamp(0.0, 255.0) as u8;
+            match filter {
+                ScaleFilter::Nearest => {
+                    let xi = sx.floor() as usize;
+                    let yi = sy.floor() as usize;
+                    let si = (yi * sw + xi) * 4;
+                    out[di..di + 4].copy_from_slice(&buf.data[si..si + 4]);
+                }
+                ScaleFilter::Bilinear => {
+                    let x0 = sx.floor() as usize;
+                    let y0 = sy.floor() as usize;
+                    let x1 = (x0 + 1).min(sw - 1);
+                    let y1 = (y0 + 1).min(sh - 1);
+                    let fx = sx - x0 as f64;
+                    let fy = sy - y0 as f64;
+                    for c in 0..4 {
+                        let c00 = buf.data[(y0 * sw + x0) * 4 + c] as f64;
+                        let c10 = buf.data[(y0 * sw + x1) * 4 + c] as f64;
+                        let c01 = buf.data[(y1 * sw + x0) * 4 + c] as f64;
+                        let c11 = buf.data[(y1 * sw + x1) * 4 + c] as f64;
+                        let top = c00 + fx * (c10 - c00);
+                        let bot = c01 + fx * (c11 - c01);
+                        out[di + c] = (top + fy * (bot - top)).clamp(0.0, 255.0) as u8;
+                    }
+                }
+                ScaleFilter::Bicubic => {
+                    let x0 = sx.floor() as isize;
+                    let y0 = sy.floor() as isize;
+                    let fx = sx - x0 as f64;
+                    let fy = sy - y0 as f64;
+                    for c in 0..4 {
+                        let mut val = 0.0;
+                        for ky in -1..=2_isize {
+                            let wy = cubic_weight(fy - ky as f64);
+                            for kx in -1..=2_isize {
+                                let wx = cubic_weight(fx - kx as f64);
+                                let s = sample_clamped(&buf.data, x0 + kx, y0 + ky, sw, sh, c);
+                                val += wx * wy * s;
+                            }
+                        }
+                        out[di + c] = val.clamp(0.0, 255.0) as u8;
+                    }
+                }
             }
         }
     }
@@ -894,7 +922,7 @@ mod tests {
         let buf =
             PixelBuffer::new([200, 100, 50, 255].repeat(4), 2, 2, PixelFormat::Rgba8).unwrap();
         let p = Perspective::identity();
-        let result = perspective_transform(&buf, &p, 2, 2).unwrap();
+        let result = perspective_transform(&buf, &p, 2, 2, ScaleFilter::Bilinear).unwrap();
         assert_eq!(result.width, 2);
         // Center pixel should be close to original value.
         assert!(result.data[0] > 150);

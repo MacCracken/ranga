@@ -841,6 +841,88 @@ fn parse_para(data: &[u8], off: usize, size: usize) -> Result<ToneCurve, RangaEr
             }
             Ok(ToneCurve::Table(table))
         }
+        1 => {
+            // Type 1: Y = (aX + b)^g for X >= -b/a, else 0
+            // Parameters: g, a, b — 12 + 3*4 = 24 bytes.
+            if off + 24 > data.len() {
+                return Err(RangaError::InvalidFormat(
+                    "para type 1 too short for parameters".to_string(),
+                ));
+            }
+            let g = read_s15fixed16(data, off + 12)?;
+            let a = read_s15fixed16(data, off + 16)?;
+            let b = read_s15fixed16(data, off + 20)?;
+
+            let threshold = if a.abs() > 1e-12 { -b / a } else { 0.0 };
+            let n = 4096;
+            let mut table = Vec::with_capacity(n);
+            for i in 0..n {
+                let input = i as f64 / (n - 1) as f64;
+                let output = if input >= threshold {
+                    (a * input + b).max(0.0).powf(g)
+                } else {
+                    0.0
+                };
+                table.push(output.clamp(0.0, 1.0));
+            }
+            Ok(ToneCurve::Table(table))
+        }
+        2 => {
+            // Type 2: Y = (aX + b)^g + c for X >= -b/a, else c
+            // Parameters: g, a, b, c — 12 + 4*4 = 28 bytes.
+            if off + 28 > data.len() {
+                return Err(RangaError::InvalidFormat(
+                    "para type 2 too short for parameters".to_string(),
+                ));
+            }
+            let g = read_s15fixed16(data, off + 12)?;
+            let a = read_s15fixed16(data, off + 16)?;
+            let b = read_s15fixed16(data, off + 20)?;
+            let c = read_s15fixed16(data, off + 24)?;
+
+            let threshold = if a.abs() > 1e-12 { -b / a } else { 0.0 };
+            let n = 4096;
+            let mut table = Vec::with_capacity(n);
+            for i in 0..n {
+                let input = i as f64 / (n - 1) as f64;
+                let output = if input >= threshold {
+                    (a * input + b).max(0.0).powf(g) + c
+                } else {
+                    c
+                };
+                table.push(output.clamp(0.0, 1.0));
+            }
+            Ok(ToneCurve::Table(table))
+        }
+        4 => {
+            // Type 4: Y = (aX + b)^g + e for X >= d, else cX + f
+            // Parameters: g, a, b, c, d, e, f — 12 + 7*4 = 40 bytes.
+            if off + 40 > data.len() {
+                return Err(RangaError::InvalidFormat(
+                    "para type 4 too short for parameters".to_string(),
+                ));
+            }
+            let g = read_s15fixed16(data, off + 12)?;
+            let a = read_s15fixed16(data, off + 16)?;
+            let b = read_s15fixed16(data, off + 20)?;
+            let c = read_s15fixed16(data, off + 24)?;
+            let d = read_s15fixed16(data, off + 28)?;
+            let e = read_s15fixed16(data, off + 32)?;
+            let f = read_s15fixed16(data, off + 36)?;
+
+            let n = 4096;
+            let mut table = Vec::with_capacity(n);
+            for i in 0..n {
+                let input = i as f64 / (n - 1) as f64;
+                let output = if input >= d {
+                    (a * input + b).max(0.0).powf(g) + e
+                } else {
+                    c * input + f
+                };
+                table.push(output.clamp(0.0, 1.0));
+            }
+            Ok(ToneCurve::Table(table))
+        }
         _ => Err(RangaError::InvalidFormat(format!(
             "unsupported parametricCurveType function type: {func_type}"
         ))),

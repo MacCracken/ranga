@@ -2,6 +2,59 @@
 
 ## [Unreleased] — 1.0.0
 
+## [0.29.5] — 2026-04-02
+
+P(-1) scaffold hardening pass — full audit and fix cycle across all modules.
+
+### Changed
+
+- **License**: AGPL-3.0-only → GPL-3.0-only (Cargo.toml, fuzz/Cargo.toml, CONTRIBUTING.md, README.md)
+- **GPU backend**: migrated from raw wgpu to mabda 1.0 (pipeline cache, shader cache, buffer helpers, pollster)
+  - `GpuContext` wraps `mabda::GpuContext` — no more `RefCell`, raw pointers, or custom `block_on`
+  - `GpuBuffer` uses `mabda::buffer` helpers; now stores `PixelFormat` (was hardcoded Rgba8)
+  - All `gpu_*` functions and `GpuChain` take `&mut GpuContext` (was `&GpuContext`)
+  - All `expect()`/`unwrap()` in GPU code replaced with `Result` propagation
+- **PixelBuffer**: fields now `pub(crate)` — use `data()`, `data_mut()`, `into_data()`, `width()`, `height()`, `format()` accessors
+- **BufferPool::acquire**: best-fit allocation (was first-fit)
+- **Flood fill**: rewritten with scanline algorithm (was naive 4-neighbor push with O(4n) stack bloat)
+- **Median filter**: rewritten with histogram-based Huang approach — O(n*r) per channel (was O(n*r^2*log(r^2)))
+- **Bilateral filter**: spatial Gaussian weights precomputed into table (was `exp()` per sample per pixel)
+- **Vertical blur**: parallelized with rayon (horizontal was already parallel)
+- **SSE2**: replaced fake SIMD stubs (extracted lanes → scalar) with real implementations
+  - `compute_y_row` — `_mm_madd_epi16` horizontal dot-product, 2 pixels/iter
+  - `grayscale` — `_mm_madd_epi16` luminance, 2 pixels/iter
+  - `blend_row_normal_argb` — full SSE2 Porter-Duff, 2 pixels/iter
+  - YUV-to-RGBA inverse (BT.601, BT.709, BT.2020, NV12) — 8 pixels/iter with U/V broadcast
+- **GPU shaders**: `pack_rgba` uses `round()` (was `floor(x+0.5)`); saturation luminance standardized to BT.709; noise R/B decorrelated with independent Box-Muller pair
+- **`chi_squared`**: returns `Result<f64, RangaError>` with length validation (was silent truncation)
+- **`composite`**: `premultiply_alpha`/`apply_mask` use `div255` (was `/255`, off-by-one)
+- **`blend`**: doc corrected to "straight alpha" (was "premultiplied"); SIMD slice checks upgraded from `debug_assert` to runtime guard
+- **`perspective_transform`**: accepts `ScaleFilter` parameter (Nearest/Bilinear/Bicubic)
+- **prakash**: 1.1.1 → 1.2 (version spec widened)
+- **deny.toml**: removed stale advisory ignore, license entries, fuzz exception; cleaned cargo-vet imports
+
+### Added
+
+- `PixelFormat::checked_buffer_size()` — overflow-safe dimension validation
+- `blend_row()` — row-level blend for any `BlendMode` (dispatches Normal to SIMD)
+- ICC `para` curve types 1, 2, 4 (was only 0 and 3) — all 5 ICC parametric curve types now supported
+- `#[inline]` on all `From` impls in `color.rs`, all `PixelBuffer`/`PixelView`/`PixelViewMut` accessors, `ToneCurve::apply`, ICC read helpers, filter scalars, spectral wrappers, GPU buffer accessors
+- `#[must_use]` on `PixelBuffer::set_rgba`
+- `scripts/bench-history.sh` — benchmark CSV tracking with Criterion output parsing
+- `benches/history.csv` — baseline + post-hardening benchmark data
+
+### Fixed
+
+- **buffer_size overflow**: `checked_buffer_size()` prevents silent wrap on large dimensions; `buffer_size()` panics instead of wrapping
+- **Perspective NaN**: degenerate projections (w≈0) now correctly skip pixels instead of indexing with NaN
+- **Resize 0-dim source**: early return for `width==0 || height==0` prevents `usize` underflow
+- **ICC parser**: `tag_count` capped at 1024, `grid_size` capped at 64 (prevents OOM from malformed profiles); `read_u32_be`/`read_u16_be`/`read_i32_be`/`read_s15fixed16` return `Result` (was panicking on OOB)
+- **`rows()`/`rows_mut()`**: debug_assert rejects planar formats (Yuv420p, Nv12) instead of silently producing wrong slices
+- **Bilateral filter**: `sigma=0` now returns error (was `-inf` coefficient)
+- **Levels**: `gamma=0` now returns error (was `powf(infinity)`)
+- **`color_temperature`**: NaN input returns neutral `[1.0, 1.0, 1.0]` (was propagating NaN through clamp)
+- **GPU doctest**: `wgpu::Maintain::Wait` → `wgpu::PollType::wait_indefinitely()`
+
 ## [0.29.4] — 2026-03-29
 
 ### Changed

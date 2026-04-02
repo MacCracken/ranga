@@ -403,7 +403,7 @@ fn perspective_identity_preserves_image() -> Result<(), RangaError> {
     // Use a solid-color image to avoid offset/interpolation artifacts
     let buf = PixelBuffer::new([100, 150, 200, 255].repeat(64), 8, 8, PixelFormat::Rgba8)?;
     let p = Perspective::identity();
-    let result = transform::perspective_transform(&buf, &p, 8, 8)?;
+    let result = transform::perspective_transform(&buf, &p, 8, 8, ScaleFilter::Bilinear)?;
     assert_eq!(result.width(), 8);
     assert_eq!(result.height(), 8);
     // Solid color should be preserved everywhere

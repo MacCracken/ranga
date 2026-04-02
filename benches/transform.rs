@@ -63,7 +63,10 @@ fn bench_perspective_transform(c: &mut Criterion) {
     let buf = PixelBuffer::new(vec![128; 512 * 512 * 4], 512, 512, PixelFormat::Rgba8).unwrap();
     let p = Perspective::identity();
     c.bench_function("perspective_identity_512x512", |b| {
-        b.iter(|| transform::perspective_transform(black_box(&buf), &p, 512, 512).unwrap())
+        b.iter(|| {
+            transform::perspective_transform(black_box(&buf), &p, 512, 512, ScaleFilter::Bilinear)
+                .unwrap()
+        })
     });
 }
 
