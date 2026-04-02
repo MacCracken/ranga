@@ -1,8 +1,8 @@
 # Changelog
 
-## [Unreleased] — 1.0.0
+## [Unreleased]
 
-## [0.29.5] — 2026-04-02
+## [1.0.0] — 2026-04-02
 
 P(-1) scaffold hardening pass — full audit and fix cycle across all modules.
 

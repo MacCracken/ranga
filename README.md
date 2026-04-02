@@ -27,7 +27,7 @@ Ranga provides shared image processing primitives for the [AGNOS](https://github
 
 ```toml
 [dependencies]
-ranga = "0.24"
+ranga = "1"
 ```
 
 ```rust
@@ -71,9 +71,9 @@ let [r, g, b] = color_temperature(3200.0); // warm light
 use ranga::gpu::{GpuContext, gpu_blend, gpu_gaussian_blur};
 use ranga::blend::BlendMode;
 
-let ctx = GpuContext::new()?;
-gpu_blend(&ctx, &src, &mut dst, BlendMode::Multiply, 0.8)?;
-let blurred = gpu_gaussian_blur(&ctx, &buf, 5)?;
+let mut ctx = GpuContext::new()?;
+gpu_blend(&mut ctx, &src, &mut dst, BlendMode::Multiply, 0.8)?;
+let blurred = gpu_gaussian_blur(&mut ctx, &buf, 5)?;
 ```
 
 ### Zero-Copy Integration
@@ -134,7 +134,7 @@ Run benchmarks: `cargo bench` or `cargo bench --all-features`
 ### Reference
 - [API Reference](https://docs.rs/ranga) — rustdoc for all public items
 - [Threat Model](docs/development/threat-model.md) — security trust boundaries
-- Architecture Decisions: [001](docs/decisions/001-pure-rust-core.md), [002](docs/decisions/002-semver-versioning.md), [003](docs/decisions/003-packed-u32-gpu-shaders.md), [004](docs/decisions/004-feature-gated-optional-deps.md)
+- Architecture Decisions: [001](docs/decisions/001-pure-rust-core.md), [002](docs/decisions/002-semver-versioning.md), [003](docs/decisions/003-packed-u32-gpu-shaders.md), [004](docs/decisions/004-feature-gated-optional-deps.md), [005](docs/decisions/005-mabda-gpu-foundation.md), [006](docs/decisions/006-pixelbuffer-encapsulation.md)
 
 ## Minimum Supported Rust Version
 
