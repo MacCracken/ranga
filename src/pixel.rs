@@ -272,6 +272,9 @@ impl PixelBuffer {
     /// Each row is `width * bytes_per_pixel` bytes. Only valid for
     /// non-planar formats (Rgba8, Argb8, Rgb8, RgbaF32).
     ///
+    /// Panics in debug mode for planar formats (Yuv420p, Nv12).
+    /// For planar formats, access [`data()`](Self::data) directly.
+    ///
     /// # Examples
     ///
     /// ```
@@ -287,12 +290,21 @@ impl PixelBuffer {
             PixelFormat::Rgba8 | PixelFormat::Argb8 => self.width as usize * 4,
             PixelFormat::Rgb8 => self.width as usize * 3,
             PixelFormat::RgbaF32 => self.width as usize * 16,
-            _ => self.width as usize, // planar: Y-plane row
+            PixelFormat::Yuv420p | PixelFormat::Nv12 => {
+                debug_assert!(
+                    false,
+                    "rows()/rows_mut() not supported for planar formats; access data() directly"
+                );
+                self.width as usize
+            }
         };
         self.data.chunks_exact(stride)
     }
 
     /// Iterate over rows as mutable byte slices.
+    ///
+    /// Panics in debug mode for planar formats (Yuv420p, Nv12).
+    /// For planar formats, access [`data_mut()`](Self::data_mut) directly.
     ///
     /// # Examples
     ///
@@ -312,7 +324,13 @@ impl PixelBuffer {
             PixelFormat::Rgba8 | PixelFormat::Argb8 => self.width as usize * 4,
             PixelFormat::Rgb8 => self.width as usize * 3,
             PixelFormat::RgbaF32 => self.width as usize * 16,
-            _ => self.width as usize,
+            PixelFormat::Yuv420p | PixelFormat::Nv12 => {
+                debug_assert!(
+                    false,
+                    "rows()/rows_mut() not supported for planar formats; access data() directly"
+                );
+                self.width as usize
+            }
         };
         self.data.chunks_exact_mut(stride)
     }
@@ -628,8 +646,15 @@ impl BufferPool {
     /// allocates a new one. The returned buffer is zero-filled.
     #[must_use]
     pub fn acquire(&mut self, size: usize) -> Vec<u8> {
-        // Find the smallest buffer that fits
-        if let Some(pos) = self.pool.iter().position(|b| b.capacity() >= size) {
+        // Find the smallest buffer that fits (best-fit)
+        if let Some(pos) = self
+            .pool
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.capacity() >= size)
+            .min_by_key(|(_, b)| b.capacity())
+            .map(|(i, _)| i)
+        {
             let mut buf = self.pool.swap_remove(pos);
             buf.clear();
             buf.resize(size, 0);

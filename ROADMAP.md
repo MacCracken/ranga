@@ -1,56 +1,49 @@
 # Roadmap — Audit Backlog
 
 Items identified during P(-1) scaffold hardening audit (2026-04-02).
-Ordered by priority within each category.
 
-## MEDIUM — Correctness & Safety
+## Completed
 
-- [ ] **pixel.rs:94-103** — Make `PixelBuffer` fields private, add accessors. Public fields allow invariant violation (data/dimensions mismatch). Biggest structural change — ripples through entire codebase.
-- [ ] **pixel.rs:196-203** — `rows()`/`rows_mut()` silently produce wrong results for planar formats (Yuv420p, Nv12). Return `Result` or add debug assertions.
-- [ ] **composite.rs:60-63,124** — `premultiply_alpha` and `apply_mask` use `/255` instead of `div255`, inconsistent with compositing pipeline (off-by-one for many inputs).
-- [ ] **histogram.rs:116** — `chi_squared` silently truncates mismatched-length inputs. Should return error.
-- [ ] **icc.rs:410** — `grid_size.pow(3)` from untrusted input can cause large allocation (~100MB). Add upper bound.
-- [ ] **filter.rs:1183-1184** — Bilateral filter `sigma=0` causes `-inf` coefficient, silent degradation. Validate sigma > 0.
-- [ ] **filter.rs:249** — Levels `gamma=0` causes `powf(infinity)`. Validate gamma > 0.
-- [ ] **blend.rs:27** — Doc comment says "premultiplied alpha" but `blend_pixel` operates on straight alpha. Fix docs.
-- [ ] **blend.rs:429-430** — SIMD slice validation uses `debug_assert` only — could OOB in release with bad input. Add runtime check.
-- [ ] **gpu/shaders.rs:22-23** — `pack_rgba` rounding bias (`floor(x+0.5)`) may differ from CPU rounding.
+- [x] **pixel.rs** — `PixelBuffer` fields `pub(crate)`, public accessors added
+- [x] **pixel.rs** — `rows()`/`rows_mut()` debug_assert for planar formats
+- [x] **pixel.rs** — `BufferPool::acquire` best-fit instead of first-fit
+- [x] **pixel.rs** — `checked_buffer_size()` for overflow-safe dimension validation
+- [x] **pixel.rs** — `#[inline]` on all accessors, `#[must_use]` on `set_rgba`
+- [x] **composite.rs** — `div255` consistency in `premultiply_alpha`/`apply_mask`
+- [x] **histogram.rs** — `chi_squared` length validation (returns `Result`)
+- [x] **filter.rs** — Bilateral sigma>0 validation, spatial weight precomputation
+- [x] **filter.rs** — Levels gamma>0 validation
+- [x] **filter.rs** — Flood fill rewritten with scanline algorithm
+- [x] **filter.rs** — Median filter rewritten with histogram-based (Huang) approach
+- [x] **filter.rs** — Vertical blur parallelized
+- [x] **blend.rs** — Doc fix: straight alpha, not premultiplied
+- [x] **blend.rs** — SIMD slice validation: `debug_assert` → runtime check
+- [x] **color.rs** — `#[inline]` on all `From` impls and free functions
+- [x] **color.rs** — `color_temperature` NaN guard
+- [x] **color.rs** — Alpha loss documented on XYZ/Oklab conversions
+- [x] **icc.rs** — `tag_count` capped at 1024, `grid_size` capped at 64
+- [x] **icc.rs** — `read_*` helpers return `Result` (no more panics)
+- [x] **icc.rs** — `#[inline]` on `ToneCurve::apply` and read helpers
+- [x] **transform.rs** — Perspective NaN propagation fixed
+- [x] **transform.rs** — Resize 0-dimension source guarded
+- [x] **convert.rs + filter.rs** — Fake SSE2 removed, scalar fallback
+- [x] **gpu/** — Migrated from raw wgpu to mabda (pipeline cache, shader cache, buffer helpers)
+- [x] **gpu/** — All `expect()`/`unwrap()` replaced with `Result` propagation
+- [x] **gpu/buffer.rs** — `GpuBuffer` stores format (no more hardcoded Rgba8)
+- [x] **gpu/shaders.rs** — `pack_rgba` uses `round()` instead of floor+0.5 bias
+- [x] **gpu/shaders.rs** — Luminance coefficients standardized to BT.709
+- [x] **gpu/shaders.rs** — Noise R/B channels decorrelated (independent Box-Muller pair)
+- [x] **Cargo.toml** — License AGPL→GPL, deps updated, deny.toml/vet cleaned
 
-## MEDIUM — Performance
+## Completed — SIMD
 
-- [ ] **pixel.rs:528** — `BufferPool::acquire` finds first-fit, not best-fit. Use `min_by_key` on capacity.
-- [ ] **filter.rs:1394-1424** — Flood fill pushes duplicates causing O(4n) memory bloat. Check visited before push, or use scanline fill.
-- [ ] **filter.rs:540-569** — Vertical blur pass not parallelized (horizontal is).
-- [ ] **filter.rs:1127-1145** — Median filter is O(n*r^2*log(r^2)) per pixel. Histogram-based approach (Huang et al.) would be O(n*r).
-- [ ] **filter.rs:1187-1231** — Bilateral filter spatial Gaussian weights recomputed per pixel. Precompute into table.
-- [ ] **convert.rs:all YUV-to-RGBA** — All inverse conversions are scalar per-pixel, no SIMD.
-- [ ] **blend.rs:102** — Non-Normal blend modes all scalar f32 per-pixel, no SIMD row variants.
-- [x] ~~**gpu/pipeline.rs:build_shader** — Shader string allocated on every dispatch even on cache hits.~~ Fixed by mabda migration (ShaderCache).
+- [x] **convert.rs** — Real SSE2 Y-row via `_mm_madd_epi16`
+- [x] **filter.rs** — Real SSE2 grayscale via `_mm_madd_epi16`
+- [x] **blend.rs** — `blend_row` API for all modes (Normal dispatches to SIMD)
+- [x] **blend.rs** — SSE2 path for `blend_row_normal_argb`
 
-## LOW — Annotations & Docs
+## Remaining — Architecture
 
-- [ ] **color.rs:many** — Missing `#[inline]` on all `From` impls — blocks cross-crate inlining.
-- [ ] **pixel.rs:176,242,269,61** — Missing `#[inline]` on `pixel_count`, `get_rgba`, `set_rgba`, `buffer_size`.
-- [ ] **icc.rs:95,220,311,365** — Missing `#[inline]` on `ToneCurve::apply`, `IccProfile::apply`, `IccLutProfile::apply`, `apply_curve`.
-- [ ] **filter.rs:60,340,475,998** — Missing `#[inline]` on `brightness_scalar`, `grayscale_scalar`, `build_gaussian_kernel`, `Xorshift64` methods.
-- [ ] **transform.rs:191** — Missing `#[inline]` on `validate_rgba8`.
-- [ ] **spectral.rs:54,62,73,80,85,94** — Missing `#[inline]` on all wrapper functions.
-- [ ] **gpu/buffer.rs:210-231** — Missing `#[inline]` on trivial accessors.
-- [ ] **pixel.rs:269** — Missing `#[must_use]` on `set_rgba` return value.
-- [ ] **histogram.rs:146,224** — Missing `#[must_use]` on `equalize`/`auto_levels` Results.
-- [ ] **color.rs:479,741** — Alpha silently lost in XYZ/Oklab conversions. Document behavior.
-- [ ] **color.rs:843** — `color_temperature` doesn't guard against NaN input (clamp passes NaN).
-- [ ] **gpu/shaders.rs:152-156 vs 213-219** — Inconsistent luminance coefficients: grayscale uses BT.709, saturation uses BT.601.
-- [ ] **gpu/shaders.rs:598-601** — Noise R/B channel correlation. Generate third random value for B.
-
-## LOW — Architecture
-
-- [ ] **icc.rs:806** — Only ICC `para` curve types 0 and 3 supported. Add types 1, 2, 4.
-- [ ] **transform.rs:696** — `perspective_transform` hardcodes bilinear. Add `ScaleFilter` parameter.
-
-## Real SSE2 SIMD (deferred)
-
-- [ ] **convert.rs** — Write proper SSE2 Y-row computation using `_mm_madd_epi16` for horizontal dot-product.
-- [ ] **filter.rs** — Write proper SSE2 grayscale using channel deinterleave + vectorized multiply-accumulate.
-- [ ] **blend.rs** — Add SIMD row-blend variants for non-Normal blend modes.
-- [ ] **blend.rs:497** — Add SIMD path for `blend_row_normal_argb`.
+- [ ] **icc.rs** — Add ICC `para` curve types 1, 2, 4 (only 0 and 3 supported)
+- [ ] **transform.rs** — `perspective_transform` add `ScaleFilter` parameter
+- [ ] **convert.rs** — SIMD for YUV-to-RGBA inverse conversions

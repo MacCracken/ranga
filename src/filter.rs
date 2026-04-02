@@ -322,7 +322,8 @@ pub fn grayscale(buf: &mut PixelBuffer) -> Result<(), RangaError> {
 
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     {
-        grayscale_sse2(&mut buf.data);
+        // SAFETY: SSE2 is baseline for x86_64.
+        unsafe { grayscale_sse2(&mut buf.data) };
         Ok(())
     }
 
@@ -351,12 +352,54 @@ fn grayscale_scalar(data: &mut [u8]) {
     }
 }
 
-// x86_64: use scalar path — the compiler auto-vectorizes the simple loop with
-// optimizations enabled, which outperforms the previous hand-rolled SSE2 that
-// extracted individual lanes for scalar math.
+// x86_64: SSE2 grayscale using _mm_madd_epi16 for pair-wise multiply-accumulate.
+// Processes 2 pixels at a time, writes gray back to R/G/B while preserving alpha.
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-fn grayscale_sse2(data: &mut [u8]) {
-    grayscale_scalar(data);
+#[target_feature(enable = "sse2")]
+unsafe fn grayscale_sse2(data: &mut [u8]) {
+    use std::arch::x86_64::*;
+    let pixel_count = data.len() / 4;
+    let simd_pixels = pixel_count / 2 * 2;
+    let byte_count = simd_pixels * 4;
+
+    unsafe {
+        let zero = _mm_setzero_si128();
+        let coeffs = _mm_setr_epi16(77, 150, 29, 0, 77, 150, 29, 0);
+
+        let mut i = 0usize;
+        while i < byte_count {
+            // Save alpha
+            let a0 = data[i + 3];
+            let a1 = data[i + 7];
+
+            // Load 2 pixels
+            let px = _mm_loadl_epi64(data.as_ptr().add(i) as *const __m128i);
+            let px16 = _mm_unpacklo_epi8(px, zero);
+
+            let products = _mm_madd_epi16(px16, coeffs);
+            let shuffled = _mm_shuffle_epi32(products, 0b10_11_00_01);
+            let sums = _mm_add_epi32(products, shuffled);
+            let y_vals = _mm_srli_epi32(sums, 8);
+
+            let gray0 = _mm_extract_epi16(y_vals, 0) as u8;
+            let gray1 = _mm_extract_epi16(y_vals, 4) as u8;
+
+            data[i] = gray0;
+            data[i + 1] = gray0;
+            data[i + 2] = gray0;
+            data[i + 3] = a0;
+            data[i + 4] = gray1;
+            data[i + 5] = gray1;
+            data[i + 6] = gray1;
+            data[i + 7] = a1;
+
+            i += 8;
+        }
+    }
+
+    if simd_pixels < pixel_count {
+        grayscale_scalar(&mut data[byte_count..]);
+    }
 }
 
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
@@ -497,8 +540,8 @@ fn blur_pass_vertical(src: &[u8], dst: &mut [u8], w: usize, h: usize, kernel: &[
     // Each tile is BLUR_TILE_WIDTH pixels wide, ensuring column accesses
     // stay within L2 cache.
     let tile_w = BLUR_TILE_WIDTH;
-    let mut x_start = 0;
-    while x_start < w {
+
+    let process_tile = |x_start: usize, tile_dst: &mut [u8]| {
         let x_end = (x_start + tile_w).min(w);
         for y in 0..h {
             for x in x_start..x_end {
@@ -512,14 +555,59 @@ fn blur_pass_vertical(src: &[u8], dst: &mut [u8], w: usize, h: usize, kernel: &[
                     gv += src[idx + 1] as f32 * kv;
                     bv += src[idx + 2] as f32 * kv;
                 }
-                let oi = (y * w + x) * 4;
-                dst[oi] = rv.clamp(0.0, 255.0) as u8;
-                dst[oi + 1] = gv.clamp(0.0, 255.0) as u8;
-                dst[oi + 2] = bv.clamp(0.0, 255.0) as u8;
-                dst[oi + 3] = src[(y * w + x) * 4 + 3];
+                let oi = (y * w + x - x_start) * 4;
+                tile_dst[oi] = rv.clamp(0.0, 255.0) as u8;
+                tile_dst[oi + 1] = gv.clamp(0.0, 255.0) as u8;
+                tile_dst[oi + 2] = bv.clamp(0.0, 255.0) as u8;
+                tile_dst[oi + 3] = src[(y * w + x) * 4 + 3];
             }
         }
-        x_start = x_end;
+    };
+
+    // Build tile descriptors: (x_start, tile_pixel_width)
+    let tiles: Vec<(usize, usize)> = (0..w)
+        .step_by(tile_w)
+        .map(|xs| {
+            let tw = tile_w.min(w - xs);
+            (xs, tw)
+        })
+        .collect();
+
+    #[cfg(feature = "parallel")]
+    {
+        // Allocate separate tile buffers to avoid overlapping writes, then scatter.
+        let tile_bufs: Vec<Vec<u8>> = tiles
+            .par_iter()
+            .map(|&(x_start, tw)| {
+                let mut tile_buf = vec![0u8; tw * h * 4];
+                process_tile(x_start, &mut tile_buf);
+                tile_buf
+            })
+            .collect();
+
+        for (&(x_start, tw), tile_buf) in tiles.iter().zip(tile_bufs.iter()) {
+            for y in 0..h {
+                for x in 0..tw {
+                    let si = (y * tw + x) * 4;
+                    let di = (y * w + x_start + x) * 4;
+                    dst[di..di + 4].copy_from_slice(&tile_buf[si..si + 4]);
+                }
+            }
+        }
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        for &(x_start, tw) in &tiles {
+            let mut tile_buf = vec![0u8; tw * h * 4];
+            process_tile(x_start, &mut tile_buf);
+            for y in 0..h {
+                for x in 0..tw {
+                    let si = (y * tw + x) * 4;
+                    let di = (y * w + x_start + x) * 4;
+                    dst[di..di + 4].copy_from_slice(&tile_buf[si..si + 4]);
+                }
+            }
+        }
     }
 }
 
@@ -1049,6 +1137,18 @@ pub fn noise_salt_pepper(buf: &mut PixelBuffer, density: f32, seed: u64) -> Resu
 // Median, bilateral, vibrance, channel mixer, threshold, flood fill
 // ---------------------------------------------------------------------------
 
+#[inline]
+fn find_median(hist: &[u32; 256], target: u32) -> u8 {
+    let mut sum = 0;
+    for (val, &count) in hist.iter().enumerate() {
+        sum += count;
+        if sum > target {
+            return val as u8;
+        }
+    }
+    255
+}
+
 /// Apply a median filter with the given pixel radius (noise reduction).
 ///
 /// Non-linear filter that replaces each pixel with the median of its
@@ -1080,26 +1180,50 @@ pub fn median(buf: &PixelBuffer, radius: u32) -> Result<PixelBuffer, RangaError>
     let h = buf.height as usize;
     let r = radius as i32;
     let mut out = vec![0u8; buf.data.len()];
-    let mut window = Vec::with_capacity(((2 * r + 1) * (2 * r + 1)) as usize);
 
-    for y in 0..h {
-        for x in 0..w {
-            let di = (y * w + x) * 4;
-            for c in 0..3 {
-                window.clear();
+    for c in 0..3usize {
+        for y in 0..h {
+            // Initialize histogram for x=0 window
+            let mut hist = [0u32; 256];
+            let mut count = 0u32;
+
+            for ky in -r..=r {
+                let sy = (y as i32 + ky).clamp(0, h as i32 - 1) as usize;
+                for kx in -r..=r {
+                    let sx = kx.clamp(0, w as i32 - 1) as usize;
+                    let val = buf.data[(sy * w + sx) * 4 + c];
+                    hist[val as usize] += 1;
+                    count += 1;
+                }
+            }
+
+            // Find median for x=0
+            let median_pos = count / 2;
+            out[(y * w) * 4 + c] = find_median(&hist, median_pos);
+
+            // Slide right
+            for x in 1..w {
+                let old_col = (x as i32 - r - 1).clamp(0, w as i32 - 1) as usize;
+                let new_col = (x as i32 + r).clamp(0, w as i32 - 1) as usize;
+
                 for ky in -r..=r {
                     let sy = (y as i32 + ky).clamp(0, h as i32 - 1) as usize;
-                    for kx in -r..=r {
-                        let sx = (x as i32 + kx).clamp(0, w as i32 - 1) as usize;
-                        window.push(buf.data[(sy * w + sx) * 4 + c]);
-                    }
+                    let old_val = buf.data[(sy * w + old_col) * 4 + c];
+                    hist[old_val as usize] -= 1;
+                    let new_val = buf.data[(sy * w + new_col) * 4 + c];
+                    hist[new_val as usize] += 1;
                 }
-                window.sort_unstable();
-                out[di + c] = window[window.len() / 2];
+
+                out[(y * w + x) * 4 + c] = find_median(&hist, median_pos);
             }
-            out[di + 3] = buf.data[di + 3]; // preserve alpha
         }
     }
+
+    // Copy alpha channel
+    for i in (3..out.len()).step_by(4) {
+        out[i] = buf.data[i];
+    }
+
     PixelBuffer::new(out, buf.width, buf.height, PixelFormat::Rgba8)
 }
 
@@ -1147,6 +1271,12 @@ pub fn bilateral(
     let color_coeff = -0.5 / (sigma_color * sigma_color);
     let mut out = vec![0u8; buf.data.len()];
 
+    // Precompute spatial Gaussian weights — they only depend on (kx, ky).
+    let diameter = (2 * r + 1) as usize;
+    let spatial_weights: Vec<f32> = (-r..=r)
+        .flat_map(|ky| (-r..=r).map(move |kx| ((kx * kx + ky * ky) as f32 * space_coeff).exp()))
+        .collect();
+
     for y in 0..h {
         for x in 0..w {
             let ci = (y * w + x) * 4;
@@ -1168,9 +1298,10 @@ pub fn bilateral(
                     let sg = buf.data[si + 1] as f32;
                     let sb = buf.data[si + 2] as f32;
 
-                    let dist_sq = (kx * kx + ky * ky) as f32;
+                    let spatial_w =
+                        spatial_weights[(ky + r) as usize * diameter + (kx + r) as usize];
                     let color_diff_sq = (sr - cr).powi(2) + (sg - cg).powi(2) + (sb - cb).powi(2);
-                    let weight = (dist_sq * space_coeff + color_diff_sq * color_coeff).exp();
+                    let weight = spatial_w * (color_diff_sq * color_coeff).exp();
 
                     sum_r += sr * weight;
                     sum_g += sg * weight;
@@ -1354,36 +1485,93 @@ pub fn flood_fill(
         return Ok(());
     }
 
-    let mut stack = vec![(seed_x as usize, seed_y as usize)];
+    let mut stack: Vec<(usize, usize)> = Vec::new();
     let mut visited = vec![false; w * h];
 
-    while let Some((x, y)) = stack.pop() {
-        let idx = y * w + x;
-        if visited[idx] {
-            continue;
-        }
-        let pi = idx * 4;
-        let pixel_matches = (buf.data[pi] as i16 - seed_color[0] as i16).abs() <= tol
-            && (buf.data[pi + 1] as i16 - seed_color[1] as i16).abs() <= tol
-            && (buf.data[pi + 2] as i16 - seed_color[2] as i16).abs() <= tol
-            && (buf.data[pi + 3] as i16 - seed_color[3] as i16).abs() <= tol;
-        if !pixel_matches {
-            continue;
-        }
-        visited[idx] = true;
-        buf.data[pi..pi + 4].copy_from_slice(&fill_color);
+    stack.push((seed_x as usize, seed_y as usize));
 
-        if x > 0 {
-            stack.push((x - 1, y));
+    while let Some((sx, y)) = stack.pop() {
+        // Skip if already visited
+        if visited[y * w + sx] {
+            continue;
         }
-        if x + 1 < w {
-            stack.push((x + 1, y));
+
+        // Find leftmost matching pixel on this row
+        let mut left = sx;
+        while left > 0 {
+            let pi = (y * w + (left - 1)) * 4;
+            if visited[y * w + left - 1]
+                || (buf.data[pi] as i16 - seed_color[0] as i16).abs() > tol
+                || (buf.data[pi + 1] as i16 - seed_color[1] as i16).abs() > tol
+                || (buf.data[pi + 2] as i16 - seed_color[2] as i16).abs() > tol
+                || (buf.data[pi + 3] as i16 - seed_color[3] as i16).abs() > tol
+            {
+                break;
+            }
+            left -= 1;
         }
-        if y > 0 {
-            stack.push((x, y - 1));
+
+        // Find rightmost matching pixel on this row
+        let mut right = sx;
+        while right + 1 < w {
+            let pi = (y * w + (right + 1)) * 4;
+            if visited[y * w + right + 1]
+                || (buf.data[pi] as i16 - seed_color[0] as i16).abs() > tol
+                || (buf.data[pi + 1] as i16 - seed_color[1] as i16).abs() > tol
+                || (buf.data[pi + 2] as i16 - seed_color[2] as i16).abs() > tol
+                || (buf.data[pi + 3] as i16 - seed_color[3] as i16).abs() > tol
+            {
+                break;
+            }
+            right += 1;
         }
-        if y + 1 < h {
-            stack.push((x, y + 1));
+
+        // Fill the span and mark visited
+        for x in left..=right {
+            let pi = (y * w + x) * 4;
+            let matches = (buf.data[pi] as i16 - seed_color[0] as i16).abs() <= tol
+                && (buf.data[pi + 1] as i16 - seed_color[1] as i16).abs() <= tol
+                && (buf.data[pi + 2] as i16 - seed_color[2] as i16).abs() <= tol
+                && (buf.data[pi + 3] as i16 - seed_color[3] as i16).abs() <= tol;
+            if !matches || visited[y * w + x] {
+                continue;
+            }
+            visited[y * w + x] = true;
+            buf.data[pi..pi + 4].copy_from_slice(&fill_color);
+        }
+
+        // Push seeds for row above and below
+        for &ny in &[y.wrapping_sub(1), y + 1] {
+            if ny >= h {
+                continue;
+            }
+            let mut x = left;
+            while x <= right {
+                let idx = ny * w + x;
+                if !visited[idx] {
+                    let pi = idx * 4;
+                    let matches = (buf.data[pi] as i16 - seed_color[0] as i16).abs() <= tol
+                        && (buf.data[pi + 1] as i16 - seed_color[1] as i16).abs() <= tol
+                        && (buf.data[pi + 2] as i16 - seed_color[2] as i16).abs() <= tol
+                        && (buf.data[pi + 3] as i16 - seed_color[3] as i16).abs() <= tol;
+                    if matches {
+                        stack.push((x, ny));
+                        // Skip to end of this matching run to avoid duplicate pushes
+                        while x < right && !visited[ny * w + x + 1] {
+                            let pi2 = (ny * w + (x + 1)) * 4;
+                            if (buf.data[pi2] as i16 - seed_color[0] as i16).abs() > tol
+                                || (buf.data[pi2 + 1] as i16 - seed_color[1] as i16).abs() > tol
+                                || (buf.data[pi2 + 2] as i16 - seed_color[2] as i16).abs() > tol
+                                || (buf.data[pi2 + 3] as i16 - seed_color[3] as i16).abs() > tol
+                            {
+                                break;
+                            }
+                            x += 1;
+                        }
+                    }
+                }
+                x += 1;
+            }
         }
     }
     Ok(())

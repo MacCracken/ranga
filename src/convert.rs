@@ -15,7 +15,8 @@ use crate::pixel::{PixelBuffer, PixelFormat};
 fn compute_y_row(rgba: &[u8], y_out: &mut [u8]) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     {
-        compute_y_row_simd_sse2(rgba, y_out, 77, 150, 29);
+        // SAFETY: SSE2 is baseline for x86_64.
+        unsafe { compute_y_row_simd_sse2(rgba, y_out, 77, 150, 29) };
     }
 
     #[cfg(all(feature = "simd", target_arch = "aarch64"))]
@@ -34,7 +35,8 @@ fn compute_y_row_bt709(rgba: &[u8], y_out: &mut [u8]) {
     // (54, 183, 19) sums to 256 so white (255,255,255) correctly maps to Y=255
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     {
-        compute_y_row_simd_sse2(rgba, y_out, 54, 183, 19);
+        // SAFETY: SSE2 is baseline for x86_64.
+        unsafe { compute_y_row_simd_sse2(rgba, y_out, 54, 183, 19) };
     }
 
     #[cfg(all(feature = "simd", target_arch = "aarch64"))]
@@ -53,12 +55,60 @@ fn compute_y_row_scalar(rgba: &[u8], y_out: &mut [u8], cr: u16, cg: u16, cb: u16
     }
 }
 
-// x86_64: use scalar path — the compiler auto-vectorizes the simple loop with
-// optimizations enabled, which outperforms the previous hand-rolled SSE2 that
-// extracted individual lanes for scalar math.
+// x86_64: SSE2 Y-row using _mm_madd_epi16 for pair-wise multiply-accumulate.
+// Processes 2 pixels at a time.
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-fn compute_y_row_simd_sse2(rgba: &[u8], y_out: &mut [u8], cr: u16, cg: u16, cb: u16) {
-    compute_y_row_scalar(rgba, y_out, cr, cg, cb);
+#[target_feature(enable = "sse2")]
+unsafe fn compute_y_row_simd_sse2(rgba: &[u8], y_out: &mut [u8], cr: u16, cg: u16, cb: u16) {
+    use std::arch::x86_64::*;
+    let pixel_count = rgba.len() / 4;
+    let simd_pixels = pixel_count / 2 * 2;
+
+    unsafe {
+        let zero = _mm_setzero_si128();
+        let coeffs = _mm_setr_epi16(
+            cr as i16, cg as i16, cb as i16, 0, cr as i16, cg as i16, cb as i16, 0,
+        );
+
+        let mut i = 0usize;
+        let mut oi = 0usize;
+        while oi + 2 <= simd_pixels {
+            // Load 2 pixels (8 bytes)
+            let px = _mm_loadl_epi64(rgba.as_ptr().add(i * 4) as *const __m128i);
+            let px16 = _mm_unpacklo_epi8(px, zero);
+
+            // _mm_madd_epi16: multiply pairs and add adjacent
+            // [R0*cr+G0*cg, B0*cb+0, R1*cr+G1*cg, B1*cb+0] as i32
+            let products = _mm_madd_epi16(px16, coeffs);
+
+            // Horizontal add adjacent i32 pairs to get Y per pixel
+            // products = [RG0, B0, RG1, B1]
+            // Shuffle to [B0, RG0, B1, RG1] and add
+            let shuffled = _mm_shuffle_epi32(products, 0b10_11_00_01);
+            let sums = _mm_add_epi32(products, shuffled);
+            // sums = [RG0+B0, ?, RG1+B1, ?] — Y values in slots 0 and 2
+
+            // Shift right by 8
+            let y_vals = _mm_srli_epi32(sums, 8);
+
+            // Extract from slots 0 and 2
+            y_out[oi] = _mm_extract_epi16(y_vals, 0) as u8;
+            y_out[oi + 1] = _mm_extract_epi16(y_vals, 4) as u8;
+
+            i += 2;
+            oi += 2;
+        }
+    }
+
+    if simd_pixels < pixel_count {
+        compute_y_row_scalar(
+            &rgba[simd_pixels * 4..],
+            &mut y_out[simd_pixels..],
+            cr,
+            cg,
+            cb,
+        );
+    }
 }
 
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]

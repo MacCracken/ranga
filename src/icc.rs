@@ -412,6 +412,12 @@ fn parse_mft2_lut(
         ));
     }
 
+    if grid_size > 64 {
+        return Err(RangaError::InvalidFormat(
+            "ICC LUT grid size exceeds limit (max 64)".into(),
+        ));
+    }
+
     let input_entries = read_u16_be(data, off + 48)? as usize;
     let output_entries = read_u16_be(data, off + 50)? as usize;
 
@@ -480,6 +486,12 @@ fn parse_mft1_lut(
     if input_channels != 3 || output_channels != 3 {
         return Err(RangaError::InvalidFormat(
             "only 3→3 channel LUT profiles supported".into(),
+        ));
+    }
+
+    if grid_size > 64 {
+        return Err(RangaError::InvalidFormat(
+            "ICC LUT grid size exceeds limit (max 64)".into(),
         ));
     }
 

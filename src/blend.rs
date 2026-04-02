@@ -426,8 +426,9 @@ unsafe fn blend_row_normal_neon(src: &[u8], dst: &mut [u8], opacity: u8) {
 /// assert_eq!(dst.len(), 8);
 /// ```
 pub fn blend_row_normal(src: &[u8], dst: &mut [u8], opacity: u8) {
-    debug_assert_eq!(src.len(), dst.len());
-    debug_assert_eq!(src.len() % 4, 0);
+    if src.len() != dst.len() || !dst.len().is_multiple_of(4) {
+        return;
+    }
 
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     {
@@ -450,6 +451,86 @@ pub fn blend_row_normal(src: &[u8], dst: &mut [u8], opacity: u8) {
     // Scalar fallback for non-SIMD targets or when simd feature is disabled
     #[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64"))))]
     blend_row_normal_scalar(src, dst, opacity);
+}
+
+// ---------------------------------------------------------------------------
+// SSE2 implementation for ARGB8 (x86_64)
+// ---------------------------------------------------------------------------
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "sse2")]
+unsafe fn blend_row_normal_argb_sse2(src: &[u8], dst: &mut [u8], opacity: u8) {
+    use std::arch::x86_64::*;
+
+    let pixel_count = src.len() / 4;
+    let simd_pixels = pixel_count / 2 * 2; // round down to multiple of 2
+    let byte_count = simd_pixels * 4;
+
+    // SAFETY: All intrinsics below require SSE2, which is enabled via
+    // #[target_feature(enable = "sse2")] on this function.
+    unsafe {
+        let zero = _mm_setzero_si128();
+        let opacity_val = opacity as u16;
+        let ones_255 = _mm_set1_epi16(255);
+
+        let mut i = 0usize;
+        while i < byte_count {
+            // SAFETY: We process 2 pixels (8 bytes) per iteration. `i + 8 <= byte_count`
+            // is guaranteed because `byte_count` is aligned to 8-byte (2-pixel) boundaries
+            // and i advances by 8 each iteration.
+            let s_bytes = _mm_loadl_epi64(src.as_ptr().add(i) as *const __m128i);
+            let d_bytes = _mm_loadl_epi64(dst.as_ptr().add(i) as *const __m128i);
+
+            // Unpack u8 -> u16 (lower 8 bytes)
+            let s16 = _mm_unpacklo_epi8(s_bytes, zero);
+            let d16 = _mm_unpacklo_epi8(d_bytes, zero);
+
+            // Broadcast alpha for each pixel:
+            // ARGB layout is [A0 R0 G0 B0 A1 R1 G1 B1] as u16
+            // Mask 0x00 = 00_00_00_00 broadcasts element 0 across low 4 u16s
+            let alpha_lo = _mm_shufflelo_epi16(s16, 0x00);
+            let alpha = _mm_shufflehi_epi16(alpha_lo, 0x00);
+
+            // sa = div255(alpha * opacity)
+            let opacity_vec = _mm_set1_epi16(opacity_val as i16);
+            let round_128 = _mm_set1_epi16(128);
+            let raw = _mm_mullo_epi16(alpha, opacity_vec);
+            let tmp = _mm_add_epi16(raw, round_128);
+            let sa = _mm_srli_epi16(_mm_add_epi16(tmp, _mm_srli_epi16(tmp, 8)), 8);
+            let inv_sa = _mm_sub_epi16(ones_255, sa);
+
+            // result_rgb = div255(src * sa + dst * inv_sa)
+            let src_term = _mm_mullo_epi16(s16, sa);
+            let dst_term = _mm_mullo_epi16(d16, inv_sa);
+            let sum = _mm_add_epi16(src_term, dst_term);
+            let tmp2 = _mm_add_epi16(sum, round_128);
+            let blended = _mm_srli_epi16(_mm_add_epi16(tmp2, _mm_srli_epi16(tmp2, 8)), 8);
+
+            // Save original dst alpha before overwriting (index 0 and 4 for ARGB)
+            let orig_da = [dst[i], dst[i + 4]];
+
+            // Pack u16 -> u8
+            let packed = _mm_packus_epi16(blended, zero);
+
+            // SAFETY: Store 8 bytes back. Same bounds reasoning as the load above.
+            _mm_storel_epi64(dst.as_mut_ptr().add(i) as *mut __m128i, packed);
+
+            // Fix up alpha channel using Porter-Duff formula with div255.
+            // In ARGB layout, alpha is at offset 0 within each pixel.
+            for (px, &da) in orig_da.iter().enumerate() {
+                let px_off = i + px * 4;
+                let sa_px = div255(src[px_off] as u16 * opacity_val);
+                let inv_sa_px = 255u16 - sa_px;
+                dst[px_off] = div255(sa_px * 255 + da as u16 * inv_sa_px).min(255) as u8;
+            }
+
+            i += 8;
+        }
+    }
+
+    // Scalar fallback for remainder pixels
+    if simd_pixels < pixel_count {
+        blend_row_normal_argb_scalar(&src[byte_count..], &mut dst[byte_count..], opacity);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -494,10 +575,8 @@ pub fn blend_pixel_argb(src: [u8; 4], dst: [u8; 4], mode: BlendMode, opacity: u8
 /// blend_row_normal_argb(&src, &mut dst, 255);
 /// assert_eq!(dst.len(), 8);
 /// ```
-pub fn blend_row_normal_argb(src: &[u8], dst: &mut [u8], opacity: u8) {
-    debug_assert_eq!(src.len(), dst.len());
-    debug_assert_eq!(src.len() % 4, 0);
-
+/// Scalar fallback for ARGB Normal-mode row blending.
+fn blend_row_normal_argb_scalar(src: &[u8], dst: &mut [u8], opacity: u8) {
     let opacity_fp = opacity as u16;
     for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
         let sa = div255(s[0] as u16 * opacity_fp);
@@ -513,6 +592,70 @@ pub fn blend_row_normal_argb(src: &[u8], dst: &mut [u8], opacity: u8) {
         d[1] = div255(s[1] as u16 * sa + d[1] as u16 * inv_sa) as u8; // R
         d[2] = div255(s[2] as u16 * sa + d[2] as u16 * inv_sa) as u8; // G
         d[3] = div255(s[3] as u16 * sa + d[3] as u16 * inv_sa) as u8; // B
+    }
+}
+
+pub fn blend_row_normal_argb(src: &[u8], dst: &mut [u8], opacity: u8) {
+    if src.len() != dst.len() || !dst.len().is_multiple_of(4) {
+        return;
+    }
+
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    {
+        // SAFETY: SSE2 is baseline on x86_64
+        unsafe { blend_row_normal_argb_sse2(src, dst, opacity) };
+    }
+
+    // Scalar fallback for non-SIMD targets or when simd feature is disabled
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    blend_row_normal_argb_scalar(src, dst, opacity);
+}
+
+/// Blend an entire source row over a destination row using any blend mode.
+///
+/// This is more efficient than calling [`blend_pixel`] per pixel for
+/// row-based processing. For [`BlendMode::Normal`], dispatches to the
+/// optimised SIMD path; other modes use per-pixel blending with reduced
+/// call overhead.
+///
+/// Both slices must have equal length and be a multiple of 4 bytes.
+///
+/// # Examples
+///
+/// ```
+/// use ranga::blend::{BlendMode, blend_row};
+///
+/// let src = vec![255, 0, 0, 255, 0, 255, 0, 255];
+/// let mut dst = vec![0, 0, 255, 255, 0, 0, 255, 255];
+/// blend_row(&src, &mut dst, BlendMode::Normal, 128);
+/// assert_eq!(dst.len(), 8);
+///
+/// let src2 = vec![128, 128, 128, 255];
+/// let mut dst2 = vec![200, 200, 200, 255];
+/// blend_row(&src2, &mut dst2, BlendMode::Multiply, 255);
+/// assert!(dst2[0] < 200);
+/// ```
+pub fn blend_row(src: &[u8], dst: &mut [u8], mode: BlendMode, opacity: u8) {
+    if src.len() != dst.len() || !dst.len().is_multiple_of(4) {
+        return;
+    }
+
+    // For Normal mode, use the optimised SIMD path
+    if matches!(mode, BlendMode::Normal) {
+        blend_row_normal(src, dst, opacity);
+        return;
+    }
+
+    // For other modes, process per-pixel but avoid function call overhead
+    // by inlining the blend logic
+    for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+        let result = blend_pixel(
+            [s[0], s[1], s[2], s[3]],
+            [d[0], d[1], d[2], d[3]],
+            mode,
+            opacity,
+        );
+        d.copy_from_slice(&result);
     }
 }
 
@@ -620,5 +763,77 @@ mod tests {
         blend_row_normal_scalar(&src, &mut dst_scalar, 220);
         blend_row_normal(&src, &mut dst_simd, 220);
         assert_pixels_near(&dst_scalar, &dst_simd, 1, "blend_13px");
+    }
+
+    #[test]
+    fn simd_scalar_equivalence_argb_blend() {
+        let src: Vec<u8> = (0..256 * 4).map(|i| (i % 256) as u8).collect();
+        let mut dst_scalar = vec![128u8; 256 * 4];
+        let mut dst_simd = dst_scalar.clone();
+        blend_row_normal_argb_scalar(&src, &mut dst_scalar, 180);
+        blend_row_normal_argb(&src, &mut dst_simd, 180);
+        assert_pixels_near(&dst_scalar, &dst_simd, 1, "argb_blend_256px");
+    }
+
+    #[test]
+    fn simd_scalar_equivalence_argb_blend_odd_count() {
+        let src: Vec<u8> = (0..13 * 4).map(|i| (i % 256) as u8).collect();
+        let mut dst_scalar = vec![200u8; 13 * 4];
+        let mut dst_simd = dst_scalar.clone();
+        blend_row_normal_argb_scalar(&src, &mut dst_scalar, 220);
+        blend_row_normal_argb(&src, &mut dst_simd, 220);
+        assert_pixels_near(&dst_scalar, &dst_simd, 1, "argb_blend_13px");
+    }
+
+    #[test]
+    fn blend_row_normal_dispatches() {
+        let src = vec![255, 0, 0, 255, 0, 255, 0, 255];
+        let mut dst_row = vec![0, 0, 255, 255, 0, 0, 255, 255];
+        let mut dst_direct = dst_row.clone();
+        blend_row(&src, &mut dst_row, BlendMode::Normal, 128);
+        blend_row_normal(&src, &mut dst_direct, 128);
+        assert_eq!(dst_row, dst_direct);
+    }
+
+    #[test]
+    fn blend_row_non_normal_modes() {
+        let modes = [
+            BlendMode::Multiply,
+            BlendMode::Screen,
+            BlendMode::Overlay,
+            BlendMode::Darken,
+            BlendMode::Lighten,
+            BlendMode::Difference,
+            BlendMode::Exclusion,
+        ];
+        for mode in modes {
+            let src = vec![128, 64, 200, 200, 50, 100, 150, 255];
+            let mut dst_row = vec![50, 100, 150, 255, 200, 100, 50, 255];
+            let mut dst_pixel = dst_row.clone();
+            blend_row(&src, &mut dst_row, mode, 180);
+            for (s, d) in src.chunks_exact(4).zip(dst_pixel.chunks_exact_mut(4)) {
+                let result = blend_pixel(
+                    [s[0], s[1], s[2], s[3]],
+                    [d[0], d[1], d[2], d[3]],
+                    mode,
+                    180,
+                );
+                d.copy_from_slice(&result);
+            }
+            assert_eq!(dst_row, dst_pixel, "blend_row mismatch for {mode}");
+        }
+    }
+
+    #[test]
+    fn blend_row_empty_and_mismatched() {
+        let src = vec![];
+        let mut dst = vec![];
+        blend_row(&src, &mut dst, BlendMode::Normal, 255);
+        assert!(dst.is_empty());
+
+        let src = vec![1, 2, 3, 4];
+        let mut dst = vec![5, 6, 7];
+        blend_row(&src, &mut dst, BlendMode::Normal, 255);
+        assert_eq!(dst, vec![5, 6, 7]); // unchanged
     }
 }

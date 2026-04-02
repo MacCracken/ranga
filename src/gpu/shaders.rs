@@ -19,10 +19,10 @@ fn unpack_rgba(packed: u32) -> vec4<f32> {
 }
 
 fn pack_rgba(c: vec4<f32>) -> u32 {
-    let r = u32(clamp(c.r * 255.0 + 0.5, 0.0, 255.0));
-    let g = u32(clamp(c.g * 255.0 + 0.5, 0.0, 255.0));
-    let b = u32(clamp(c.b * 255.0 + 0.5, 0.0, 255.0));
-    let a = u32(clamp(c.a * 255.0 + 0.5, 0.0, 255.0));
+    let r = u32(clamp(round(c.r * 255.0), 0.0, 255.0));
+    let g = u32(clamp(round(c.g * 255.0), 0.0, 255.0));
+    let b = u32(clamp(round(c.b * 255.0), 0.0, 255.0));
+    let a = u32(clamp(round(c.a * 255.0), 0.0, 255.0));
     return r | (g << 8u) | (b << 16u) | (a << 24u);
 }
 "#;
@@ -190,7 +190,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 /// Saturation adjustment shader.
 ///
-/// Adjusts saturation using BT.601 luminance coefficients.
+/// Adjusts saturation using BT.709 luminance coefficients.
 ///
 /// Bindings:
 /// - `@binding(0)`: pixels (`array<u32>`, read-write)
@@ -211,7 +211,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x;
     if idx >= params.count { return; }
     let px = unpack_rgba(pixels[idx]);
-    let lum = 0.299 * px.r + 0.587 * px.g + 0.114 * px.b;
+    let lum = 0.2126 * px.r + 0.7152 * px.g + 0.0722 * px.b;
     let f = params.factor;
     let r = clamp(lum + f * (px.r - lum), 0.0, 1.0);
     let g = clamp(lum + f * (px.g - lum), 0.0, 1.0);
@@ -585,20 +585,25 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if idx >= params.count { return; }
     let px = unpack_rgba(pixels[idx]);
 
-    // Generate two uniform random values for Box-Muller
-    let u1 = max(rand_uniform(idx * 2u + params.seed), 0.0001);
-    let u2 = rand_uniform(idx * 2u + params.seed + 1u);
+    // Generate independent Gaussian noise per channel via Box-Muller.
+    // First pair: u1/u2 -> g1 (R), g2 (G)
+    let u1 = max(rand_uniform(idx * 4u + params.seed), 0.0001);
+    let u2 = rand_uniform(idx * 4u + params.seed + 1u);
+    let mag1 = sqrt(-2.0 * log(u1)) * params.strength;
+    let angle1 = 6.283185307 * u2;
+    let g1 = mag1 * cos(angle1);
+    let g2 = mag1 * sin(angle1);
 
-    // Box-Muller transform for Gaussian distribution
-    let mag = sqrt(-2.0 * log(u1)) * params.strength;
-    let angle = 6.283185307 * u2;
-    let g1 = mag * cos(angle);
-    let g2 = mag * sin(angle);
+    // Second pair: u3/u4 -> g3 (B)
+    let u3 = max(rand_uniform(idx * 4u + params.seed + 2u), 0.0001);
+    let u4 = rand_uniform(idx * 4u + params.seed + 3u);
+    let mag2 = sqrt(-2.0 * log(u3)) * params.strength;
+    let g3 = mag2 * cos(6.283185307 * u4);
 
-    // Apply noise using g1 for R/B and g2 for G
+    // Apply independent noise per channel
     let r = clamp(px.r + g1, 0.0, 1.0);
     let g = clamp(px.g + g2, 0.0, 1.0);
-    let b = clamp(px.b + g1 * 0.7 + g2 * 0.3, 0.0, 1.0);
+    let b = clamp(px.b + g3, 0.0, 1.0);
 
     pixels[idx] = pack_rgba(vec4<f32>(r, g, b, px.a));
 }
