@@ -4,7 +4,7 @@
 
 Enable the `gpu` feature:
 ```toml
-ranga = { version = "0.20", features = ["gpu"] }
+ranga = { version = "1", features = ["gpu"] }
 ```
 
 Create a context (one-time, reuse for all operations):

@@ -1,6 +1,7 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use ranga::convert;
 use ranga::pixel::{PixelBuffer, PixelFormat};
+use std::hint::black_box;
 
 fn bench_rgba_to_yuv_bt601(c: &mut Criterion) {
     let buf = PixelBuffer::new(vec![128; 1920 * 1080 * 4], 1920, 1080, PixelFormat::Rgba8).unwrap();

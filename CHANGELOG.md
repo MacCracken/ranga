@@ -2,6 +2,71 @@
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-08-13
+
+**Final Rust release.** ranga continues in Cyrius alongside the rest of the AGNOS
+stack (mabda, prakash, ai-hwaccel have already ported). This release brings the
+Rust line current on toolchain and dependencies and closes out the crates.io
+publishing pipeline. No API changes — 1.0.0 consumers upgrade in place.
+
+### Changed
+
+- **Toolchain**: verified against Rust 1.97.1 (was 1.96.0). MSRV stays **1.89**, edition stays 2024 — the floor is deliberately unchanged so consumers still on the Rust line can take this release during the port.
+- **Release pipeline**: `cargo publish` removed from `.github/workflows/release.yml`. The `publish` job is replaced by `verify`, which keeps the VERSION/Cargo.toml/tag consistency gate; `release` now depends on `[ci, build, verify]`. Releases are GitHub artifacts only.
+- **Dependencies** — direct:
+  - `ai-hwaccel` 1.0.0 → 1.2.0
+  - `criterion` 0.5.1 → 0.8.2 (dev)
+  - `rayon` 1.11.0 → 1.12.0
+  - `serde` 1.0.228 → 1.0.229, `serde_json` 1.0.149 → 1.0.151
+  - `thiserror` 2.0.18 → 2.0.20
+  - `wgpu` 29.0.1 → 29.0.4 (patch only — see below)
+- **Dependencies** — transitive: `naga`/`wgpu-core`/`wgpu-hal`/`wgpu-types` 29.0.1 → 29.0.4, `bytemuck` 1.25.0 → 1.25.2, `getrandom` 0.4.2 → 0.4.3, plus 60+ others. Dependency graph shrank from 210 to 196 crates.
+- **`hwaccel::probe`**: migrated to the ai-hwaccel 1.2 iterator API — `AcceleratorRegistry::available()` and `by_family()` now return `impl Iterator` rather than slices, so the `.iter()` hops are gone. Both already filter on `available`, so probe results are unchanged.
+- **Benchmarks**: `black_box` imported from `std::hint` instead of `criterion::black_box`, which criterion deprecated in 0.6. Applies to all 10 bench suites.
+
+### Added
+
+- `median_r5_512x512` benchmark. The 1.0.0 Huang rewrite made `median` O(n·r) per channel instead of O(n·r²·log r²), but only r=1 was ever measured — the one radius where a 256-bin-per-channel histogram costs more to set up than sorting the 9-sample window outright. Measuring a second radius keeps the tradeoff visible in the record rather than leaving a bare regression.
+
+### Fixed
+
+- **RUSTSEC-2026-0204** (vulnerability): invalid pointer dereference in `crossbeam-epoch`'s `fmt::Pointer` impl, reached through `rayon` → `crossbeam-deque`. Resolved by 0.9.18 → 0.9.20. This was the one hard `cargo audit`/`cargo deny` failure on 1.0.0's lockfile.
+- **RUSTSEC-2026-0097** (unsoundness): `rand` unsound with a custom logger using `rand::rng()`. Resolved by 0.9.2 → 0.9.5.
+- **RUSTSEC-2026-0190** (unsoundness): `anyhow` `Error::downcast_mut()`. `anyhow` dropped from the graph entirely by the criterion 0.8 upgrade.
+- **Benchmarks measuring nothing**: `hsl_roundtrip`, `xyz_conversion_roundtrip`, and `pixel_view_create` bound their results to `_` instead of returning them from the `iter` closure, so nothing black-boxed the output and the optimizer was free to delete the work being timed. `hsl_roundtrip` was recording **257 picoseconds** — under one clock cycle — against a real cost of 19.6ns. The bug predates this release but was masked by criterion 0.5's weaker `black_box`; `std::hint::black_box` let the optimizer see through it completely. All three now return their values.
+- **Docs**: README listed `ai-hwaccel 0.23.3` in the feature and capability tables (actual: 1.2); the GPU compute guide's install snippet still said `version = "0.20"`. The median benchmark comment still described the pre-1.0.0 O(n·radius²) complexity.
+
+### Performance
+
+Neutral. Full 134-benchmark sweep recorded to `benches/history.csv`. The last
+recorded sweep was `04f74df` (2026-04-02), eight commits back, so a naive diff
+against it attributes that intervening work to this release — it shows 50
+benchmarks >10% faster (the SIMD conversion and blur paths) and 21 >10% slower.
+Neither belongs to 1.0.1.
+
+An A/B against HEAD-without-these-changes, same machine and session, confirms the
+dependency and toolchain moves are performance-neutral:
+
+| benchmark | Apr baseline | HEAD today | 1.0.1 today |
+|---|---|---|---|
+| `median_r1_512x512` | 15.347 ms | 30.549 ms | 29.341 ms |
+| `affine_rotate_512x512` | 5.9141 ms | 7.2336 ms | 7.2699 ms |
+| `resize_bicubic_1080p_to_720p` | 91.485 ms | 105.37 ms | 104.83 ms |
+| `cmyk_roundtrip` | 10.155 ns | 13.417 ns | 13.076 ns |
+
+Every apparent regression reproduces at HEAD without this release's changes. The
+`median_r1` movement is the 1.0.0 Huang rewrite's small-radius tradeoff, which
+landed in `2aa3b82` after the last recorded sweep; `median_r5_512x512` (40.317 ms)
+is added to show the radius scaling the rewrite was for. The remainder tracks the
+other post-baseline commits and machine conditions — this run was taken under a
+`powersave` governor at load ~4.5, so absolute figures are not comparable to the
+April run's unknown conditions. Sweeps for the port should be taken on a quiesced
+machine.
+
+### Pinned
+
+- `wgpu` stays on **29** and `pollster` on **0.4**. mabda 1.0.0 — the last Rust release of the AGNOS GPU foundation — links `wgpu ^29` and `pollster ^0.4`. Moving ranga to wgpu 30 / pollster 1.0 would resolve a second copy of wgpu into the tree and `mabda::GpuContext`'s types would no longer unify with ours. Since mabda's Rust line is frozen, these majors are frozen with it. Rationale recorded inline in `Cargo.toml`.
+
 ## [1.0.0] — 2026-04-02
 
 P(-1) scaffold hardening pass — full audit and fix cycle across all modules.

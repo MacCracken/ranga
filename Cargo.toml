@@ -1,6 +1,6 @@
 [package]
 name = "ranga"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 rust-version = "1.89"
 license = "GPL-3.0-only"
@@ -30,11 +30,15 @@ thiserror = "2"
 tracing = "0.1"
 prakash = { version = "1.2", features = ["spectral"], optional = true }
 mabda = { version = "1", default-features = false, features = ["compute"], optional = true }
+# pollster and wgpu are pinned to the majors mabda 1.0 links against (pollster ^0.4,
+# wgpu ^29). Bumping either past mabda would resolve two copies of wgpu into the tree
+# and the `mabda::GpuContext` types would no longer unify with ours. mabda's Rust line
+# is frozen at 1.0.0, so these majors are frozen with it.
 pollster = { version = "0.4", optional = true }
 wgpu = { version = "29", optional = true }
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 proptest = "1"
 
 [[bench]]

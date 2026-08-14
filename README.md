@@ -6,6 +6,11 @@ Ranga provides shared image processing primitives for the [AGNOS](https://github
 
 **Pure Rust core** — no C FFI. SIMD acceleration via `std::arch`, GPU compute via wgpu.
 
+> **Status: 1.0.1 is the final Rust release.** Development continues in Cyrius,
+> following mabda, prakash, and ai-hwaccel. The Rust line is feature-complete and
+> closes in a known-good state — toolchain current, advisories clear, tests and
+> benchmarks green. See [ADR 007](docs/decisions/007-final-rust-release.md).
+
 ## Features
 
 | Area | Capabilities |
@@ -21,7 +26,7 @@ Ranga provides shared image processing primitives for the [AGNOS](https://github
 | **Spectral** | SPD, CIE 1931 CMFs, standard illuminants, CRI, inverse CCT (via prakash) |
 | **Histograms** | Luminance, per-channel RGB, chi-squared, equalization, auto-levels |
 | **GPU compute** | wgpu shaders for blend, filters, noise, transitions, crop/resize/flip, `GpuChain` batched dispatch |
-| **Hardware** | GPU detection via ai-hwaccel 0.23.3, VRAM/utilization-aware offload |
+| **Hardware** | GPU detection via ai-hwaccel 1.2, VRAM/utilization-aware offload |
 
 ## Quick Start
 
@@ -91,7 +96,7 @@ let view = PixelView::new(&existing_bytes, 1920, 1080, PixelFormat::Rgba8)?;
 |------|---------|-------------|
 | `simd` | Yes | SSE2/AVX2/NEON acceleration for blend operations |
 | `gpu` | No | wgpu compute shaders with `GpuChain` batched dispatch |
-| `hwaccel` | No | GPU detection via ai-hwaccel 0.23.3 |
+| `hwaccel` | No | GPU detection via ai-hwaccel 1.2 |
 | `parallel` | No | Rayon row-parallel blur |
 | `spectral` | No | Physically-based color science via prakash (SPD, CIE CMFs, illuminants) |
 | `full` | No | All features |
@@ -134,7 +139,7 @@ Run benchmarks: `cargo bench` or `cargo bench --all-features`
 ### Reference
 - [API Reference](https://docs.rs/ranga) — rustdoc for all public items
 - [Threat Model](docs/development/threat-model.md) — security trust boundaries
-- Architecture Decisions: [001](docs/decisions/001-pure-rust-core.md), [002](docs/decisions/002-semver-versioning.md), [003](docs/decisions/003-packed-u32-gpu-shaders.md), [004](docs/decisions/004-feature-gated-optional-deps.md), [005](docs/decisions/005-mabda-gpu-foundation.md), [006](docs/decisions/006-pixelbuffer-encapsulation.md)
+- Architecture Decisions: [001](docs/decisions/001-pure-rust-core.md), [002](docs/decisions/002-semver-versioning.md), [003](docs/decisions/003-packed-u32-gpu-shaders.md), [004](docs/decisions/004-feature-gated-optional-deps.md), [005](docs/decisions/005-mabda-gpu-foundation.md), [006](docs/decisions/006-pixelbuffer-encapsulation.md), [007](docs/decisions/007-final-rust-release.md)
 
 ## Minimum Supported Rust Version
 

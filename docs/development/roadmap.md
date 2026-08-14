@@ -4,72 +4,73 @@
 
 ---
 
-## Next Release: 1.0.0
+## Status: Rust line closed at 1.0.1 (2026-08-13)
 
-### Pre-1.0 — Must Complete
+1.0.0 shipped 2026-04-02 after the P(-1) scaffold hardening pass. **1.0.1 is the
+final Rust release.** ranga continues in Cyrius, following mabda, prakash, and
+ai-hwaccel, which have already ported.
 
-#### API Hardening
+What 1.0.1 covered:
 
-- [ ] Add `#[must_use]` to all pure functions and functions returning values (~40+ missing across transform, convert, composite, filter, histogram, gpu, pixel modules)
-- [ ] Document `Perspective` struct public fields (`a00`–`a12`)
-- [ ] Final public API review — ensure every `pub` item has rustdoc with examples
-- [ ] Run `cargo semver-checks` against 0.29.3 baseline before tagging 1.0
+- Toolchain current (verified on Rust 1.97.1), MSRV held at 1.89 so consumers can take it mid-port
+- Dependencies refreshed; three RUSTSEC advisories cleared (0204 vulnerability, 0097 + 0190 unsoundness)
+- crates.io publishing removed from the release pipeline — GitHub artifacts only
 
-#### Testing
+`wgpu` is frozen at 29 and `pollster` at 0.4 for the life of the Rust line, because
+mabda 1.0.0 (the last Rust release of the AGNOS GPU foundation) links those majors.
+See the note in `Cargo.toml` and the 1.0.1 CHANGELOG entry.
 
-- [ ] Feature flag isolation tests in CI — dedicated jobs for `--features gpu`, `--features spectral`, `--features hwaccel`, `--features parallel` (currently only default, none, and all are tested)
-- [ ] Feature interaction matrix — test `gpu+hwaccel`, `parallel+simd`, `spectral+parallel` combinations
-- [ ] ICC `IccLutProfile` parsing coverage — currently minimal
-- [ ] Fuzz testing in CI — add nightly job running all 8 fuzz targets (currently only 3 in `make fuzz`)
-- [ ] Edge case tests for malformed/adversarial inputs on all conversion functions
-- [ ] GPU error propagation tests for `GpuChain` chaining failures
-
-#### Benchmarks
-
-- [ ] Add missing benchmarks: `auto_white_balance`, `delta_e_cie94`, `fill_solid`, `nv12_to_rgba`
-- [ ] Benchmark `GpuContext::new()` creation overhead
-- [ ] Benchmark `hwaccel::probe()` and `should_use_gpu()` heuristics
-- [ ] Baseline all benchmarks — final pre-1.0 `bench-history.sh` run
-
-#### Documentation
-
-- [ ] Specify benchmark hardware in README performance table (CPU/GPU model)
-- [ ] Document feature flag interactions explicitly (which features compose, which are independent)
-- [ ] MIGRATION.md — upgrade guide from 0.x to 1.0 for downstream consumers (rasa, tazama, aethersafta, soorat)
-
-#### CI / Tooling
-
-- [ ] Benchmark regression detection — compare against stored baseline, fail on >10% degradation
-- [ ] Extend `make fuzz` to run all 8 fuzz targets (currently runs blend, convert, filter only)
-- [ ] Add `make msrv` target for local MSRV verification
+No further Rust feature work is planned. Bug fixes would only be cut if a consumer
+hits a blocker before completing its own port.
 
 ---
 
-### Post-1.0 — Backlog
+## Carried to the Cyrius port
 
-#### Features
+These were open against the Rust line and were never completed. They are recorded
+here as input to the port, not as Rust commitments.
 
-- [ ] Additional examples: `gpu_blur.rs`, `crop_and_resize.rs`, `histogram_equalize.rs`, `spectral_analysis.rs`
-- [ ] More granular error types — split `RangaError::Other` catch-all where patterns emerge
-- [ ] GPU `block_on` timeout mechanism — prevent theoretical infinite spin on wgpu futures
-- [ ] Async GPU readback patterns — benchmark and document async vs sync tradeoffs
+### API and correctness
 
-#### Testing & Quality
+- Document `Perspective` struct public fields (`a00`–`a12`)
+- More granular error types — split the `RangaError::Other` catch-all where patterns emerge
+- GPU `block_on` timeout mechanism — prevent theoretical infinite spin on GPU futures
 
-- [ ] Large-buffer stress tests (>1GB) for memory safety under pressure
-- [ ] Spectral + ICC interaction tests (cross-feature integration)
-- [ ] Filter combination property tests (sequential filter application correctness)
-- [ ] Doc-test coverage tracking and gating in CI
-- [ ] Visual regression test baseline images (golden master approach)
+### Testing
 
-#### Performance
+- Feature flag isolation tests — dedicated jobs per feature (`gpu`, `spectral`, `hwaccel`, `parallel`); the Rust CI only ever tested default, none, and all
+- Feature interaction matrix — `gpu+hwaccel`, `parallel+simd`, `spectral+parallel`
+- ICC `IccLutProfile` parsing coverage — minimal in the Rust implementation
+- Fuzzing in CI — all 8 targets; `make fuzz` ran them locally but CI never gated on it
+- GPU error propagation tests for chained dispatch failures
+- Large-buffer stress tests (>1GB) for memory safety under pressure
+- Visual regression baseline images (golden master approach)
 
-- [ ] SIMD paths for NEON (ARM) — verify coverage parity with SSE2/AVX2
-- [ ] Parallel (rayon) benchmarks — explicit parallel vs serial comparison
-- [ ] GPU pipeline warm-up profiling — quantify first-run vs cached dispatch cost
+### Benchmarks
 
-#### Documentation
+- Missing coverage: `auto_white_balance`, `delta_e_cie94`, `fill_solid`, `nv12_to_rgba`
+- GPU context creation overhead
+- `hwaccel::probe()` and `should_use_gpu()` heuristics
+- Benchmark regression detection — fail the build on >10% degradation against stored baseline
+- Explicit parallel vs serial comparison
+- GPU pipeline warm-up profiling — first-run vs cached dispatch cost
 
-- [ ] Architecture decision records for 1.0 stability guarantees
-- [ ] Consumer integration cookbook (rasa editor patterns, tazama video pipeline patterns)
-- [ ] HWAccel decision-making heuristics guide
+### Performance
+
+- NEON (ARM) SIMD parity with SSE2/AVX2 — the Rust line hardened SSE2 in 1.0.0 but never verified NEON coverage matched
+
+### Documentation
+
+- Benchmark hardware specified in the performance table (CPU/GPU model)
+- Explicit feature flag interaction documentation
+- Consumer integration cookbook (rasa editor patterns, tazama video pipeline patterns)
+- HWAccel decision-making heuristics guide
+
+---
+
+## Historical
+
+`benches/history.csv` holds the full benchmark record across the Rust line
+(0.20.3 → 1.0.1). Worth carrying forward as the port's performance target — the
+Cyrius implementation should be measured against these numbers, not against a
+fresh baseline.

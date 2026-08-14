@@ -1,6 +1,7 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use ranga::histogram;
 use ranga::pixel::{PixelBuffer, PixelFormat};
+use std::hint::black_box;
 
 fn make_varied_buf() -> PixelBuffer {
     let data: Vec<u8> = (0..1920 * 1080 * 4).map(|i| (i % 256) as u8).collect();

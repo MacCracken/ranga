@@ -1,9 +1,10 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use ranga::blend::BlendMode;
 use ranga::gpu::{self, GpuContext};
 use ranga::pixel::{PixelBuffer, PixelFormat};
 use ranga::transform::ScaleFilter;
 use ranga::{blend, composite, filter, transform};
+use std::hint::black_box;
 
 fn get_ctx() -> Option<GpuContext> {
     GpuContext::new().ok()

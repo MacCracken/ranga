@@ -51,10 +51,11 @@ pub fn probe() -> HwReport {
     let registry = ai_hwaccel::AcceleratorRegistry::detect();
 
     let best = registry.best_available();
-    let has_gpu = registry.available().iter().any(|p| p.accelerator.is_gpu());
+    // ai-hwaccel 1.2 returns lazy iterators from `available()`/`by_family()`
+    // (both already filter on `p.available`).
+    let has_gpu = registry.available().any(|p| p.accelerator.is_gpu());
     let has_vulkan = registry
         .by_family(ai_hwaccel::AcceleratorFamily::Gpu)
-        .iter()
         .any(|p| p.available);
 
     let (gpu_name, gpu_memory_mb, gpu_free_memory_mb, gpu_utilization_percent, temperature_c) =

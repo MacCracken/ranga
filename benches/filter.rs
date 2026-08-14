@@ -1,6 +1,7 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use ranga::filter;
 use ranga::pixel::{PixelBuffer, PixelFormat};
+use std::hint::black_box;
 
 fn make_buf() -> PixelBuffer {
     PixelBuffer::new(vec![128; 1920 * 1080 * 4], 1920, 1080, PixelFormat::Rgba8).unwrap()
@@ -150,10 +151,16 @@ fn bench_noise_salt_pepper(c: &mut Criterion) {
 }
 
 fn bench_median(c: &mut Criterion) {
-    // Smaller size for median — it's O(n * radius^2) per pixel
+    // Smaller size for median — histogram-based Huang, O(n * radius) per channel.
+    // Both radii are measured on purpose: the histogram approach maintains 256 bins
+    // per channel, so at r=1 (a 9-sample window) that setup costs more than sorting
+    // the window outright, and it only pays off as the radius grows.
     let buf = PixelBuffer::new(vec![128; 512 * 512 * 4], 512, 512, PixelFormat::Rgba8).unwrap();
     c.bench_function("median_r1_512x512", |b| {
         b.iter(|| filter::median(black_box(&buf), 1).unwrap())
+    });
+    c.bench_function("median_r5_512x512", |b| {
+        b.iter(|| filter::median(black_box(&buf), 5).unwrap())
     });
 }
 

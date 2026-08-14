@@ -1,7 +1,8 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use ranga::blend::{
     BlendMode, blend_pixel, blend_pixel_argb, blend_row_normal, blend_row_normal_argb,
 };
+use std::hint::black_box;
 
 fn bench_blend_pixel(c: &mut Criterion) {
     c.bench_function("blend_pixel_normal", |b| {

@@ -1,6 +1,7 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use ranga::composite;
 use ranga::pixel::{PixelBuffer, PixelFormat};
+use std::hint::black_box;
 
 fn make_buf() -> PixelBuffer {
     PixelBuffer::new(vec![128; 1920 * 1080 * 4], 1920, 1080, PixelFormat::Rgba8).unwrap()

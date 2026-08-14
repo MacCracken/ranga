@@ -1,5 +1,6 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use ranga::color::*;
+use std::hint::black_box;
 
 fn bench_srgb_to_lab(c: &mut Criterion) {
     let color = Srgba {
@@ -98,7 +99,10 @@ fn bench_hsl_roundtrip(c: &mut Criterion) {
     c.bench_function("hsl_roundtrip", |b| {
         b.iter(|| {
             let hsl: Hsl = black_box(color).into();
-            let _back: Srgba = hsl.into();
+            // Returned, not discarded — criterion black-boxes the closure's output.
+            // Dropping it lets the optimizer delete the whole roundtrip.
+            let back: Srgba = hsl.into();
+            back
         })
     });
 }
@@ -127,10 +131,8 @@ fn bench_pixel_view(c: &mut Criterion) {
     use ranga::pixel::{PixelBuffer, PixelFormat, PixelView};
     let buf = PixelBuffer::zeroed(1920, 1080, PixelFormat::Rgba8);
     c.bench_function("pixel_view_create", |b| {
-        b.iter(|| {
-            let view = PixelView::new(black_box(buf.data()), 1920, 1080, PixelFormat::Rgba8);
-            let _ = view;
-        })
+        // Returned, not bound to `_` — criterion black-boxes the closure's output.
+        b.iter(|| PixelView::new(black_box(buf.data()), 1920, 1080, PixelFormat::Rgba8))
     });
 }
 

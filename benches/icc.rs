@@ -1,5 +1,6 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use ranga::icc::{IccProfile, ToneCurve, srgb_v2_profile};
+use std::hint::black_box;
 
 fn bench_srgb_v2_generation(c: &mut Criterion) {
     c.bench_function("srgb_v2_profile_generation", |b| b.iter(srgb_v2_profile));

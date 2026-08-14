@@ -1,6 +1,7 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use ranga::color::CieXyz;
 use ranga::spectral::*;
+use std::hint::black_box;
 
 fn bench_spd_to_xyz(c: &mut Criterion) {
     let d65_spd = illuminant_d65();
@@ -50,7 +51,10 @@ fn bench_xyz_conversion_roundtrip(c: &mut Criterion) {
     c.bench_function("xyz_conversion_roundtrip", |b| {
         b.iter(|| {
             let p: PrakashXyz = black_box(xyz).into();
-            let _back: CieXyz = p.into();
+            // Returned, not discarded — criterion black-boxes the closure's output.
+            // Dropping it lets the optimizer delete the whole roundtrip.
+            let back: CieXyz = p.into();
+            back
         })
     });
 }
