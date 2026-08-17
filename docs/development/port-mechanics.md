@@ -113,7 +113,8 @@ Each of these cost a compile cycle or a wrong guess this round.
 | available asserts | `assert`, `assert_eq`, `assert_neq`, `assert_lt/lte/gt/gte`, `assert_streq`, `assert_nonnull`, `assert_fatal`, `assert_summary` | that is the whole list |
 | `a <= b` on f64 | `f64_le(a, b) == 1` | stdlib `lib/math.cyr:437` — do not hand-roll as `f64_lt` + `f64_eq` |
 | `a >= b` on f64 | `f64_ge(a, b) == 1` | same |
-| float constant | `0.4124564` | **decimal literals lex as f64.** prakash's plan prescribes hex bit patterns; that is obsolete |
+| float constant ≤ 9 sig digits | `0.4124564` | decimal literals lex as f64 and are exact here — more readable than a bit pattern |
+| float constant > 9 sig digits | `0x3FDA61D629F2E197; # 0.4122214708` | ⚠ **decimals are SILENTLY WRONG past ~9 digits** — see below. prakash's hex style is right after all, just not needed everywhere |
 | f32 arithmetic | bare `+ - * /` on a `: f32` binding | there is no callable `f32_add`; **annotate every f32 param** or it silently emits integer ops |
 | f32 math | `ganita_f32_*` (23 fns) | ships in cycc 6.5.24 |
 | f64 cbrt | `_rg_cbrt` (ours) | there is **no** f64 cbrt in the tree |
@@ -121,6 +122,40 @@ Each of these cost a compile cycle or a wrong guess this round.
 | byte from a buffer | `load8` | zero-extends, so `0xFF` reads back 255 |
 | `[lib] modules = []` | invalid | `distlib` fails; needs ≥1 real module |
 | line length | ≤ 120 chars | lint warns; hoist long assertion args into locals |
+
+### Two silent-corruption traps, both hit while porting `color.cyr`
+
+Neither errors, neither warns, and both produce plausible-looking output. They
+are the reason the assertions in §4 matter.
+
+**1. f32 arithmetic on an untyped operand becomes an integer multiply.**
+The operators dispatch through `EMIT_F32_BINOP` only when the operand carries
+`F32_TYID`, which comes from a typed binding or a typed parameter. A **call
+result is untyped**:
+
+```
+var r: f32 = load32(c);
+var x = f32_from(3.0) * r;      # ← integer multiply. measured: 0, not 6.
+```
+
+The fix is to route matrix rows through a helper with typed parameters —
+`fn _rg_f32_dot3(m0: f32, m1: f32, m2: f32, x: f32, y: f32, z: f32)`. Annotating
+the *parameters* is what makes the body single-precision. I documented this trap
+in the plan and then walked straight into it anyway; assume you will too.
+
+**2. Decimal float literals past ~9 significant digits parse to a wrong value.**
+Exact through `3.14159265`; `3.1415926535` becomes `0.95822` and
+`3.141592653589793` becomes `0.061575`. Filed upstream as
+`cyrius/docs/development/issues/2026-08-17-decimal-float-literal-silent-precision-loss.md`.
+
+This produced an Oklab lightness of **6.447** for linear white instead of 1.0.
+Use hex bit patterns above ~9 digits (`struct.unpack('<Q', struct.pack('<d', v))`),
+decimals below. Prefer stdlib constants (`F64_PI`) over retyping them, and
+`f64_from(n)` for integer-valued constants like 25⁷ — exact below 2⁵³.
+
+**Both were caught only by an identity assertion** — white → Oklab l == 1, and
+`cos(180°) == -1`. Neither would have been caught by a round-trip test, because
+a wrong-but-consistent matrix round-trips perfectly.
 
 **Test-local helpers pay for themselves immediately.** `f32c(n)` /`f32i(x)` for
 f32 round-tripping and `approx(a, b, eps)` for float comparison turned

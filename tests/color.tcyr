@@ -167,6 +167,243 @@ cie_xyz_free(d65);
 srgba_free(white);
 
 # ================================================================
+# HSL
+# ================================================================
+test_group("hsl");
+
+var red = srgba_new(255, 0, 0, 255);
+var hsl_red = srgba_to_hsl(red);
+assert_eq(approx(f32_to(hsl_h(hsl_red)), 0, 0.01), 1, "pure red is hue 0");
+assert_eq(approx(f32_to(hsl_s(hsl_red)), F64_ONE, 0.01), 1, "pure red is fully saturated");
+assert_eq(approx(f32_to(hsl_l(hsl_red)), 0.5, 0.01), 1, "pure red is lightness 0.5");
+
+var green = srgba_new(0, 255, 0, 255);
+var hsl_green = srgba_to_hsl(green);
+assert_eq(approx(f32_to(hsl_h(hsl_green)), 120.0, 0.01), 1, "pure green is hue 120");
+
+var blue = srgba_new(0, 0, 255, 255);
+var hsl_blue = srgba_to_hsl(blue);
+assert_eq(approx(f32_to(hsl_h(hsl_blue)), 240.0, 0.01), 1, "pure blue is hue 240");
+
+# Grey is achromatic: saturation 0, and hue pinned to 0 rather than left to a
+# division by a zero delta.
+var grey = srgba_new(128, 128, 128, 255);
+var hsl_grey = srgba_to_hsl(grey);
+assert_eq(approx(f32_to(hsl_s(hsl_grey)), 0, 0.001), 1, "grey has zero saturation");
+assert_eq(approx(f32_to(hsl_h(hsl_grey)), 0, 0.001), 1, "grey hue is pinned to 0");
+
+# The g < b branch: magenta sits in the red sector but needs the +6 wrap, so a
+# missing wrap shows up as a negative hue here.
+var magenta = srgba_new(255, 0, 255, 255);
+var hsl_mag = srgba_to_hsl(magenta);
+assert_eq(approx(f32_to(hsl_h(hsl_mag)), 300.0, 0.01), 1, "magenta is hue 300 (the g < b wrap)");
+assert_eq(f64_ge(f32_to(hsl_h(hsl_mag)), 0), 1, "hue is never negative");
+
+# Round-trips.
+var red_back = hsl_to_srgba(hsl_red);
+assert_eq(srgba_r(red_back), 255, "red round-trips r");
+assert_eq(srgba_g(red_back), 0, "red round-trips g");
+assert_eq(srgba_b(red_back), 0, "red round-trips b");
+var grey_back = hsl_to_srgba(hsl_grey);
+assert_eq(srgba_r(grey_back), 128, "grey round-trips through the achromatic path");
+var mag_back = hsl_to_srgba(hsl_mag);
+assert_eq(srgba_r(mag_back), 255, "magenta round-trips r");
+assert_eq(srgba_b(mag_back), 255, "magenta round-trips b");
+
+srgba_free(red_back); srgba_free(grey_back); srgba_free(mag_back);
+hsl_free(hsl_red); hsl_free(hsl_green); hsl_free(hsl_blue);
+hsl_free(hsl_grey); hsl_free(hsl_mag);
+
+# ================================================================
+# CMYK
+# ================================================================
+test_group("cmyk");
+
+# Doctest: pure cyan is (0, 255, 255).
+var cyan = cmyk_new(f32_from(F64_ONE), f32_from(0), f32_from(0), f32_from(0));
+var cyan_rgb = cmyk_to_srgba(cyan);
+assert_eq(srgba_r(cyan_rgb), 0, "cyan r == 0 (doctest)");
+assert_eq(srgba_g(cyan_rgb), 255, "cyan g == 255 (doctest)");
+assert_eq(srgba_b(cyan_rgb), 255, "cyan b == 255 (doctest)");
+
+# Doctest: white has k == 0.
+var cmyk_white = srgba_to_cmyk(white);
+assert_eq(approx(f32_to(cmyk_k(cmyk_white)), 0, 0.01), 1, "white has k == 0 (doctest)");
+assert_eq(approx(f32_to(cmyk_c(cmyk_white)), 0, 0.01), 1, "white has c == 0");
+
+# Pure black takes the guarded branch — inv_k would divide by zero.
+var black_srgb = srgba_new(0, 0, 0, 255);
+var cmyk_black = srgba_to_cmyk(black_srgb);
+assert_eq(approx(f32_to(cmyk_k(cmyk_black)), F64_ONE, 0.001), 1, "black has k == 1");
+assert_eq(approx(f32_to(cmyk_c(cmyk_black)), 0, 0.001), 1, "black has c == 0, not NaN");
+
+var cmyk_red = srgba_to_cmyk(red);
+var red_rt = cmyk_to_srgba(cmyk_red);
+assert_eq(srgba_r(red_rt), 255, "red round-trips through cmyk r");
+assert_eq(srgba_g(red_rt), 0, "red round-trips through cmyk g");
+
+srgba_free(red_rt); cmyk_free(cmyk_red); cmyk_free(cmyk_black);
+srgba_free(black_srgb); cmyk_free(cmyk_white); srgba_free(cyan_rgb); cmyk_free(cyan);
+
+# ================================================================
+# Display P3
+# ================================================================
+test_group("display p3");
+
+var trip = fl_alloc(24);
+# Doctest: sRGB red fits inside P3, so the P3 red coordinate is below 1.0.
+linear_srgb_to_p3(F64_ONE, 0, 0, trip);
+assert_eq(f64_lt(load64(trip), F64_ONE), 1, "sRGB red fits within P3 (doctest)");
+assert_eq(f64_gt(load64(trip), 0.8), 1, "sRGB red is most of P3 red");
+
+# The two matrices are inverses: round-tripping white returns white.
+var trip2 = fl_alloc(24);
+linear_srgb_to_p3(F64_ONE, F64_ONE, F64_ONE, trip);
+p3_to_linear_srgb(load64(trip), load64(trip + 8), load64(trip + 16), trip2);
+assert_eq(approx(load64(trip2), F64_ONE, 0.0001), 1, "P3 round-trip preserves white r");
+assert_eq(approx(load64(trip2 + 8), F64_ONE, 0.0001), 1, "P3 round-trip preserves white g");
+assert_eq(approx(load64(trip2 + 16), F64_ONE, 0.0001), 1, "P3 round-trip preserves white b");
+
+# ================================================================
+# Oklab / Oklch
+# ================================================================
+test_group("oklab");
+
+# Doctest: linear red has 0 < l < 1.
+var lin_red = lin_rgba_new(f32_from(F64_ONE), f32_from(0), f32_from(0), f32_from(F64_ONE));
+var ok_red = lin_rgba_to_oklab(lin_red);
+assert_eq(f64_gt(f32_to(oklab_l(ok_red)), 0), 1, "oklab red l > 0 (doctest)");
+assert_eq(f64_lt(f32_to(oklab_l(ok_red)), F64_ONE), 1, "oklab red l < 1 (doctest)");
+
+# Oklab is built so that neutral grey has a == b == 0. Linear white must land
+# at l == 1 with no chroma — the tightest single check on both matrices.
+var lin_white2 = lin_rgba_new(f32_from(F64_ONE), f32_from(F64_ONE), f32_from(F64_ONE), f32_from(F64_ONE));
+var ok_white = lin_rgba_to_oklab(lin_white2);
+assert_eq(approx(f32_to(oklab_l(ok_white)), F64_ONE, 0.001), 1, "linear white is Oklab l == 1");
+assert_eq(approx(f32_to(oklab_a(ok_white)), 0, 0.001), 1, "linear white is achromatic in a");
+assert_eq(approx(f32_to(oklab_b(ok_white)), 0, 0.001), 1, "linear white is achromatic in b");
+
+# Round-trip through the inverse matrices.
+var lin_back2 = oklab_to_lin_rgba(ok_red);
+assert_eq(approx(f32_to(lin_rgba_r(lin_back2)), F64_ONE, 0.001), 1, "oklab -> linear round-trips r");
+assert_eq(approx(f32_to(lin_rgba_g(lin_back2)), 0, 0.001), 1, "oklab -> linear round-trips g");
+assert_eq(approx(f32_to(lin_rgba_b(lin_back2)), 0, 0.001), 1, "oklab -> linear round-trips b");
+
+var ok_from_srgb = srgba_to_oklab(red);
+assert_eq(f64_gt(f32_to(oklab_l(ok_from_srgb)), 0), 1, "sRGB red -> Oklab l > 0 (doctest)");
+
+test_group("oklch");
+
+# Doctest: grey is achromatic, so chroma < 1e-5.
+var ok_grey = oklab_new(f32_from(0.5), f32_from(0), f32_from(0));
+var lch_grey = oklab_to_oklch(ok_grey);
+assert_eq(f64_lt(f32_to(oklch_c(lch_grey)), 0.00001), 1, "grey is achromatic (doctest)");
+assert_eq(approx(f32_to(oklch_h(lch_grey)), 0, 0.001), 1, "achromatic hue is pinned to 0");
+
+# Doctest: Oklch(0.7, 0.15, 180) is Oklab a == -0.15, b == 0.
+var lch = oklch_new(f32_from(0.7), f32_from(0.15), f32_from(180.0));
+var lab_from_lch = oklch_to_oklab(lch);
+assert_eq(approx(f32_to(oklab_a(lab_from_lch)), f64_neg(0.15), 0.00001), 1, "hue 180 gives a == -0.15 (doctest)");
+assert_eq(approx(f32_to(oklab_b(lab_from_lch)), 0, 0.00001), 1, "hue 180 gives b == 0 (doctest)");
+
+# Hue wraps into [0, 360): a negative atan2 result must come back positive.
+var ok_neg_b = oklab_new(f32_from(0.5), f32_from(0.1), f32_from(f64_neg(0.1)));
+var lch_neg = oklab_to_oklch(ok_neg_b);
+assert_eq(f64_ge(f32_to(oklch_h(lch_neg)), 0), 1, "negative-b hue wraps non-negative");
+assert_eq(f64_lt(f32_to(oklch_h(lch_neg)), 360.0), 1, "hue stays below 360");
+
+oklab_free(ok_neg_b); oklch_free(lch_neg); oklab_free(lab_from_lch); oklch_free(lch);
+oklch_free(lch_grey); oklab_free(ok_grey); oklab_free(ok_from_srgb);
+lin_rgba_free(lin_back2); oklab_free(ok_white); lin_rgba_free(lin_white2);
+oklab_free(ok_red); lin_rgba_free(lin_red);
+
+# ================================================================
+# Colour temperature
+# ================================================================
+test_group("color temperature");
+
+var rgb3 = fl_alloc(12);
+
+# 6600K is the branch boundary and is near-neutral daylight.
+color_temperature(f32_from(6600.0), rgb3);
+assert_eq(approx(f32_to(load32(rgb3)), F64_ONE, 0.001), 1, "6600K red is 1.0");
+assert_eq(f64_gt(f32_to(load32(rgb3 + 4)), 0.9), 1, "6600K green is near 1.0");
+
+# Warm light is red-dominant; cool light is blue-dominant. Direction matters
+# more than exact values here.
+color_temperature(f32_from(2000.0), rgb3);
+var warm_r = f32_to(load32(rgb3));
+var warm_b = f32_to(load32(rgb3 + 8));
+assert_eq(f64_gt(warm_r, warm_b), 1, "2000K is red-dominant");
+
+# The blue cutoff is temp <= 19, i.e. 1900K — not 2000K, which is temp 20 and
+# does carry a little blue. Getting this boundary wrong in the port would be
+# invisible without pinning both sides of it.
+color_temperature(f32_from(1900.0), rgb3);
+assert_eq(approx(f32_to(load32(rgb3 + 8)), 0, 0.001), 1, "1900K has no blue (at the 19 cutoff)");
+color_temperature(f32_from(2000.0), rgb3);
+assert_eq(f64_gt(f32_to(load32(rgb3 + 8)), 0), 1, "2000K is just past the cutoff and has some blue");
+
+color_temperature(f32_from(20000.0), rgb3);
+assert_eq(approx(f32_to(load32(rgb3 + 8)), F64_ONE, 0.001), 1, "20000K blue saturates at 1.0");
+assert_eq(f64_lt(f32_to(load32(rgb3)), F64_ONE), 1, "20000K red falls below 1.0");
+
+# Clamping: out-of-range input saturates rather than extrapolating.
+color_temperature(f32_from(500.0), rgb3);
+var lo_r = f32_to(load32(rgb3));
+color_temperature(f32_from(1000.0), rgb3);
+assert_eq(approx(lo_r, f32_to(load32(rgb3)), 0.0001), 1, "below 1000K clamps to the 1000K value");
+
+# NaN gives neutral white. 1.0.0 fixed this — a NaN kelvin previously survived
+# the clamp and propagated into every channel.
+color_temperature(f32_from(_RG_NAN), rgb3);
+assert_eq(approx(f32_to(load32(rgb3)), F64_ONE, 0.0001), 1, "NaN kelvin gives neutral r");
+assert_eq(approx(f32_to(load32(rgb3 + 4)), F64_ONE, 0.0001), 1, "NaN kelvin gives neutral g");
+assert_eq(approx(f32_to(load32(rgb3 + 8)), F64_ONE, 0.0001), 1, "NaN kelvin gives neutral b");
+
+# ================================================================
+# Delta-E CIE94 and CIEDE2000
+# ================================================================
+test_group("delta-e cie94");
+
+var c94a = cie_lab_new(50.0, 25.0, 0);
+var c94b = cie_lab_new(50.0, 0, 0);
+assert_eq(f64_gt(delta_e_cie94(c94a, c94b), 0), 1, "cie94 of distinct colours is positive (doctest)");
+assert_eq(approx(delta_e_cie94(c94a, c94a), 0, 0.00001), 1, "cie94 of a colour with itself is 0");
+
+# CIE94 down-weights chroma differences, so for the same pair it reads lower
+# than the plain Euclidean CIE76. That relationship is the point of the formula.
+assert_eq(f64_lt(delta_e_cie94(c94a, c94b), delta_e_cie76(c94a, c94b)), 1, "cie94 < cie76 for a chromatic difference");
+
+test_group("delta-e ciede2000");
+
+# The Sharma et al. reference pair. The doctest pins 2.0 < dE < 3.0; the
+# published value for this pair is 2.0425. Getting this right exercises the
+# G factor, the hue-difference wrap, the T weighting, and the RT rotation
+# term all at once — it is the strongest single assertion in this file.
+var sharma1 = cie_lab_new(50.0, 2.6772, f64_neg(79.7751));
+var sharma2 = cie_lab_new(50.0, 0, f64_neg(82.7485));
+var de2000 = delta_e_ciede2000(sharma1, sharma2);
+assert_eq(f64_gt(de2000, 2.0), 1, "CIEDE2000 Sharma pair > 2.0 (doctest)");
+assert_eq(f64_lt(de2000, 3.0), 1, "CIEDE2000 Sharma pair < 3.0 (doctest)");
+assert_eq(approx(de2000, 2.0425, 0.01), 1, "CIEDE2000 Sharma pair == 2.0425 (published reference)");
+
+assert_eq(approx(delta_e_ciede2000(sharma1, sharma1), 0, 0.00001), 1, "CIEDE2000 of a colour with itself is 0");
+
+# Neutral greys drive c_bar to 0, which is the input that breaks a pow-based
+# x^7 — hence _rg_pow7 by repeated multiplication.
+var grey1 = cie_lab_new(50.0, 0, 0);
+var grey2 = cie_lab_new(60.0, 0, 0);
+var de_grey = delta_e_ciede2000(grey1, grey2);
+assert_eq(f64_gt(de_grey, 0), 1, "CIEDE2000 handles zero-chroma pairs without NaN");
+assert_eq(f64_lt(de_grey, 20.0), 1, "zero-chroma delta stays bounded");
+
+cie_lab_free(grey1); cie_lab_free(grey2);
+cie_lab_free(sharma1); cie_lab_free(sharma2);
+cie_lab_free(c94a); cie_lab_free(c94b);
+srgba_free(red); srgba_free(green); srgba_free(blue); srgba_free(grey); srgba_free(magenta);
+
+# ================================================================
 # ColorSpace display
 # ================================================================
 test_group("color space");

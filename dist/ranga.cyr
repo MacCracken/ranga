@@ -812,9 +812,17 @@ fn buffer_pool_free(p) {
 # and the Lab transfer are f64 in the original, and widening the f32 side would
 # move results that the ported Delta-E assertions pin.
 #
-# FLOAT LITERALS. Written as ordinary decimals (`0.4124564`). Cyrius lexes a
-# decimal with a fractional part as an f64, so the hex-bit-pattern style
-# prakash's port plan prescribes is no longer necessary — verified on 6.5.27.
+# FLOAT LITERALS. Cyrius lexes a decimal with a fractional part as an f64, and
+# for the 7-8 significant digits the sRGB/P3 matrices and Lab thresholds need
+# that is exact and far more readable than a bit pattern.
+#
+# ⚠ It is NOT safe past ~9 significant digits. Measured on 6.5.27, the lexer is
+# exact through `3.14159265`, then goes silently wrong: `3.1415926535` parses as
+# 0.95822 and `3.141592653589793` as 0.061575, with no diagnostic. The Oklab
+# coefficients carry 10-11 digits and are therefore written as hex bit patterns
+# with the decimal in a trailing comment — see `_OK_M1_*` below. This is also
+# why the stdlib spells its own constants that way (`F64_PI`). Filed upstream as
+# cyrius/docs/development/issues/2026-08-17-decimal-float-literal-silent-precision-loss.md
 
 # ── ColorSpace ────────
 var CS_SRGB       = 0;
@@ -1016,15 +1024,23 @@ fn lin_rgba_to_srgba(c) {
 
 # ── LinRgba <-> CieXyz (sRGB D65 primaries) ────────
 # SRGB_TO_XYZ / XYZ_TO_SRGB from rust-old/src/color.rs:451,458.
+
+# One row of a 3x3 matrix times a colour vector. Every colour-space matrix in
+# this file is three of these, and spelling the nested f64_add/f64_mul out at
+# each site runs past the 120-column lint and buries which coefficient is which.
+#must_use
+fn _rg_dot3(m0, m1, m2, x, y, z) {
+    return f64_add(f64_add(f64_mul(m0, x), f64_mul(m1, y)), f64_mul(m2, z));
+}
+
 #must_use
 fn lin_rgba_to_cie_xyz(c) {
     var r = f32_to(load32(c));
     var g = f32_to(load32(c + 4));
     var b = f32_to(load32(c + 8));
-    var x = f64_add(f64_add(f64_mul(0.4124564, r), f64_mul(0.3575761, g)), f64_mul(0.1804375, b));
-    var y = f64_add(f64_add(f64_mul(0.2126729, r), f64_mul(0.7151522, g)), f64_mul(0.0721750, b));
-    var z = f64_add(f64_add(f64_mul(0.0193339, r), f64_mul(0.1191920, g)), f64_mul(0.9503041, b));
-    return cie_xyz_new(x, y, z);
+    return cie_xyz_new(_rg_dot3(0.4124564, 0.3575761, 0.1804375, r, g, b),
+                       _rg_dot3(0.2126729, 0.7151522, 0.0721750, r, g, b),
+                       _rg_dot3(0.0193339, 0.1191920, 0.9503041, r, g, b));
 }
 
 # Alpha is set to 1.0 (fully opaque) — CieXyz carries no alpha.
@@ -1033,9 +1049,9 @@ fn cie_xyz_to_lin_rgba(c) {
     var x = load64(c);
     var y = load64(c + 8);
     var z = load64(c + 16);
-    var r = f64_add(f64_add(f64_mul(3.2404542, x), f64_mul(f64_neg(1.5371385), y)), f64_mul(f64_neg(0.4985314), z));
-    var g = f64_add(f64_add(f64_mul(f64_neg(0.9692660), x), f64_mul(1.8760108, y)), f64_mul(0.0415560, z));
-    var b = f64_add(f64_add(f64_mul(0.0556434, x), f64_mul(f64_neg(0.2040259), y)), f64_mul(1.0572252, z));
+    var r = _rg_dot3(3.2404542, f64_neg(1.5371385), f64_neg(0.4985314), x, y, z);
+    var g = _rg_dot3(f64_neg(0.9692660), 1.8760108, 0.0415560, x, y, z);
+    var b = _rg_dot3(0.0556434, f64_neg(0.2040259), 1.0572252, x, y, z);
     return lin_rgba_new(f32_from(r), f32_from(g), f32_from(b), f32_from(F64_ONE));
 }
 
@@ -1093,6 +1109,450 @@ fn srgba_to_cie_lab(c) {
     return lab;
 }
 
+# ── Hsl (3 x f32) ────────
+var _HSL_SIZE = 12;
+
+#must_use
+fn hsl_new(h, s, l) {
+    var c = fl_alloc(_HSL_SIZE);
+    if (c == 0) { return 0; }
+    store32(c, h);
+    store32(c + 4, s);
+    store32(c + 8, l);
+    return c;
+}
+
+#must_use
+fn hsl_h(c) { return load32(c); }
+#must_use
+fn hsl_s(c) { return load32(c + 4); }
+#must_use
+fn hsl_l(c) { return load32(c + 8); }
+fn hsl_free(c) { if (c != 0) { fl_free(c); } return RG_ERR_NONE; }
+
+var _RG_EPS6 = 0.000001;   # 1e-6, the achromatic threshold Rust uses
+
+#must_use
+fn srgba_to_hsl(c) {
+    var r = f64_div(f64_from(load8(c)), 255.0);
+    var g = f64_div(f64_from(load8(c + 1)), 255.0);
+    var b = f64_div(f64_from(load8(c + 2)), 255.0);
+
+    var max = f64_max(f64_max(r, g), b);
+    var min = f64_min(f64_min(r, g), b);
+    var d = f64_sub(max, min);
+    var l = f64_div(f64_add(max, min), 2.0);
+
+    # Achromatic: hue is undefined, so Rust pins it to 0 rather than dividing
+    # by a zero delta.
+    if (f64_lt(d, _RG_EPS6) == 1) {
+        return hsl_new(f32_from(0), f32_from(0), f32_from(l));
+    }
+
+    var s = 0;
+    if (f64_gt(l, 0.5) == 1) {
+        s = f64_div(d, f64_sub(f64_sub(2.0, max), min));
+    }
+    if (f64_gt(l, 0.5) == 0) {
+        s = f64_div(d, f64_add(max, min));
+    }
+
+    var h = 0;
+    if (f64_lt(f64_abs(f64_sub(max, r)), _RG_EPS6) == 1) {
+        h = f64_div(f64_sub(g, b), d);
+        # The +6 wrap keeps hue positive when g < b; without it the red sector
+        # comes out negative and *60 lands outside [0, 360).
+        if (f64_lt(g, b) == 1) { h = f64_add(h, 6.0); }
+    }
+    if (f64_lt(f64_abs(f64_sub(max, r)), _RG_EPS6) == 0) {
+        if (f64_lt(f64_abs(f64_sub(max, g)), _RG_EPS6) == 1) {
+            h = f64_add(f64_div(f64_sub(b, r), d), 2.0);
+        }
+        if (f64_lt(f64_abs(f64_sub(max, g)), _RG_EPS6) == 0) {
+            h = f64_add(f64_div(f64_sub(r, g), d), 4.0);
+        }
+    }
+    return hsl_new(f32_from(f64_mul(h, 60.0)), f32_from(s), f32_from(l));
+}
+
+#must_use
+fn _hue_to_rgb(p, q, t) {
+    var u = t;
+    if (f64_lt(u, 0) == 1) { u = f64_add(u, F64_ONE); }
+    if (f64_gt(u, F64_ONE) == 1) { u = f64_sub(u, F64_ONE); }
+    var sixth = f64_div(F64_ONE, f64_from(6));
+    var twothirds = f64_div(f64_from(2), f64_from(3));
+    if (f64_lt(u, sixth) == 1) {
+        return f64_add(p, f64_mul(f64_mul(f64_sub(q, p), 6.0), u));
+    }
+    if (f64_lt(u, 0.5) == 1) { return q; }
+    if (f64_lt(u, twothirds) == 1) {
+        return f64_add(p, f64_mul(f64_mul(f64_sub(q, p), f64_sub(twothirds, u)), 6.0));
+    }
+    return p;
+}
+
+# Round-half-up then clamp to a byte — the same shape as linear_to_srgb.
+#must_use
+fn _f64_to_u8_round(v) {
+    var scaled = f64_add(f64_mul(v, 255.0), 0.5);
+    if (f64_lt(scaled, 0) == 1) { return 0; }
+    if (f64_gt(scaled, 255.0) == 1) { return 255; }
+    return f64_to(scaled);
+}
+
+#must_use
+fn hsl_to_srgba(c) {
+    var h = f32_to(load32(c));
+    var s = f32_to(load32(c + 4));
+    var l = f32_to(load32(c + 8));
+
+    # Zero saturation is grey; the hue term would otherwise divide meaninglessly.
+    if (f64_lt(s, _RG_EPS6) == 1) {
+        var v = _f64_to_u8_round(l);
+        return srgba_new(v, v, v, 255);
+    }
+    var q = 0;
+    if (f64_lt(l, 0.5) == 1) {
+        q = f64_mul(l, f64_add(F64_ONE, s));
+    }
+    if (f64_lt(l, 0.5) == 0) {
+        q = f64_sub(f64_add(l, s), f64_mul(l, s));
+    }
+    var p = f64_sub(f64_mul(2.0, l), q);
+    var hn = f64_div(h, 360.0);
+    var third = f64_div(F64_ONE, f64_from(3));
+    return srgba_new(_f64_to_u8_round(_hue_to_rgb(p, q, f64_add(hn, third))),
+                     _f64_to_u8_round(_hue_to_rgb(p, q, hn)),
+                     _f64_to_u8_round(_hue_to_rgb(p, q, f64_sub(hn, third))),
+                     255);
+}
+
+# ── Cmyk (4 x f32) ────────
+var _CMYK_SIZE = 16;
+
+#must_use
+fn cmyk_new(c, m, y, k) {
+    var v = fl_alloc(_CMYK_SIZE);
+    if (v == 0) { return 0; }
+    store32(v, c);
+    store32(v + 4, m);
+    store32(v + 8, y);
+    store32(v + 12, k);
+    return v;
+}
+
+#must_use
+fn cmyk_c(v) { return load32(v); }
+#must_use
+fn cmyk_m(v) { return load32(v + 4); }
+#must_use
+fn cmyk_y(v) { return load32(v + 8); }
+#must_use
+fn cmyk_k(v) { return load32(v + 12); }
+fn cmyk_free(v) { if (v != 0) { fl_free(v); } return RG_ERR_NONE; }
+
+# Naive CMYK, no ICC profile — for print-accurate conversion use icc.cyr.
+#must_use
+fn cmyk_to_srgba(v) {
+    var k = f32_to(load32(v + 12));
+    var ik = f64_sub(F64_ONE, k);
+    return srgba_new(_f64_to_u8_round(f64_mul(f64_sub(F64_ONE, f32_to(load32(v))), ik)),
+                     _f64_to_u8_round(f64_mul(f64_sub(F64_ONE, f32_to(load32(v + 4))), ik)),
+                     _f64_to_u8_round(f64_mul(f64_sub(F64_ONE, f32_to(load32(v + 8))), ik)),
+                     255);
+}
+
+#must_use
+fn srgba_to_cmyk(c) {
+    var r = f64_div(f64_from(load8(c)), 255.0);
+    var g = f64_div(f64_from(load8(c + 1)), 255.0);
+    var b = f64_div(f64_from(load8(c + 2)), 255.0);
+    var k = f64_sub(F64_ONE, f64_max(f64_max(r, g), b));
+    # Pure black: every chromatic channel is undefined (inv_k would divide by
+    # zero), so Rust returns 0,0,0,1 outright.
+    if (f64_ge(k, f64_sub(F64_ONE, _RG_EPS6)) == 1) {
+        return cmyk_new(f32_from(0), f32_from(0), f32_from(0), f32_from(F64_ONE));
+    }
+    var inv_k = f64_div(F64_ONE, f64_sub(F64_ONE, k));
+    return cmyk_new(f32_from(f64_mul(f64_sub(f64_sub(F64_ONE, r), k), inv_k)),
+                    f32_from(f64_mul(f64_sub(f64_sub(F64_ONE, g), k), inv_k)),
+                    f32_from(f64_mul(f64_sub(f64_sub(F64_ONE, b), k), inv_k)),
+                    f32_from(k));
+}
+
+# ── Display P3 ────────
+# P3_TO_SRGB / SRGB_TO_P3 from rust-old/src/color.rs:564,571. Both take and
+# return f64 triples through out-pointers, since Cyrius has no tuple return.
+fn p3_to_linear_srgb(r, g, b, out) {
+    store64(out, _rg_dot3(1.2249401, f64_neg(0.2249402), 0.0000001, r, g, b));
+    store64(out + 8, _rg_dot3(f64_neg(0.0420569), 1.0420571, f64_neg(0.0000002), r, g, b));
+    store64(out + 16, _rg_dot3(f64_neg(0.0196376), f64_neg(0.0786361), 1.0982735, r, g, b));
+    return RG_ERR_NONE;
+}
+
+fn linear_srgb_to_p3(r, g, b, out) {
+    store64(out, _rg_dot3(0.8224622, 0.1775380, f64_neg(0.0000002), r, g, b));
+    store64(out + 8, _rg_dot3(0.0331942, 0.9668058, 0, r, g, b));
+    store64(out + 16, _rg_dot3(0.0170608, 0.0723740, 0.9105650, r, g, b));
+    return RG_ERR_NONE;
+}
+
+# ── Oklab / Oklch (Björn Ottosson, 2020) ────────
+# Rust computes these in f32 throughout, so this does too — the M1/M2 matrices
+# are f32 literals there. Widening to f64 would move results the ported
+# assertions pin.
+var _OKLAB_SIZE = 12;
+
+#must_use
+fn oklab_new(l, a, b) {
+    var c = fl_alloc(_OKLAB_SIZE);
+    if (c == 0) { return 0; }
+    store32(c, l);
+    store32(c + 4, a);
+    store32(c + 8, b);
+    return c;
+}
+
+#must_use
+fn oklab_l(c) { return load32(c); }
+#must_use
+fn oklab_a(c) { return load32(c + 4); }
+#must_use
+fn oklab_b(c) { return load32(c + 8); }
+fn oklab_free(c) { if (c != 0) { fl_free(c); } return RG_ERR_NONE; }
+
+var _OKLCH_SIZE = 12;
+
+#must_use
+fn oklch_new(l, c, h) {
+    var v = fl_alloc(_OKLCH_SIZE);
+    if (v == 0) { return 0; }
+    store32(v, l);
+    store32(v + 4, c);
+    store32(v + 8, h);
+    return v;
+}
+
+#must_use
+fn oklch_l(v) { return load32(v); }
+#must_use
+fn oklch_c(v) { return load32(v + 4); }
+#must_use
+fn oklch_h(v) { return load32(v + 8); }
+fn oklch_free(v) { if (v != 0) { fl_free(v); } return RG_ERR_NONE; }
+
+# One row of a 3x3 matrix, in SINGLE precision.
+#
+# ⚠ The `: f32` annotations on the parameters are load-bearing, not
+# documentation. Cyrius dispatches f32 arithmetic through EMIT_F32_BINOP only
+# when the operand carries F32_TYID, which it gets from a typed binding or a
+# typed parameter. Written inline as `f32_from(0.41) * r`, the left operand is a
+# CALL RESULT — untyped — and the `*` silently becomes an INTEGER multiply of
+# the two bit patterns. It compiles clean, lints clean, and returns garbage:
+# measured `f32_from(3.0) * r` where r = 2.0 yields 0, not 6. Routing every
+# f32 matrix row through this typed helper is what makes the Oklab matrices
+# actually single-precision. See port-mechanics.md §3.
+#must_use
+fn _rg_f32_dot3(m0: f32, m1: f32, m2: f32, x: f32, y: f32, z: f32) {
+    return m0 * x + m1 * y + m2 * z;
+}
+
+# Ottosson's M1/M2 matrices, as f64 BIT PATTERNS.
+#
+# ⚠ These must NOT be written as decimal literals. The Cyrius lexer is exact to
+# about 9 significant digits and goes SILENTLY WRONG beyond ~11 — measured on
+# 6.5.27, `3.1415926535` parses as 0.95822 and `3.141592653589793` as 0.061575,
+# with no diagnostic. Every Ottosson coefficient carries 10-11 digits, which is
+# squarely in that range: written as decimals they produced an Oklab lightness
+# of 6.447 for linear white instead of 1.0. This is why the stdlib itself spells
+# its constants in hex (`F64_PI = 0x4009_21FB_5444_2D18`).
+#
+# Decimal is fine for the 7-8 digit constants elsewhere in this file (the sRGB
+# and P3 matrices, the Lab thresholds) and much more readable there.
+var _OK_M1_00 = 0x3FDA61D629F2E197;   # 0.4122214708
+var _OK_M1_01 = 0x3FE129A2D9E60E32;   # 0.5363325363
+var _OK_M1_02 = 0x3FAA572112081026;   # 0.0514459929
+var _OK_M1_10 = 0x3FCB1FA76156A7C5;   # 0.2119034982
+var _OK_M1_11 = 0x3FE5C84A69936914;   # 0.6806995451
+var _OK_M1_12 = 0x3FBB7E5DF0497455;   # 0.1073969566
+var _OK_M1_20 = 0x3FB69AFD7A044C17;   # 0.0883024619
+var _OK_M1_21 = 0x3FD207AE728A2F45;   # 0.2817188376
+var _OK_M1_22 = 0x3FE428C9177A5EDB;   # 0.6299787005
+
+var _OK_M2_00 = 0x3FCAF02A3FE8A4FA;   # 0.2104542553
+var _OK_M2_01 = 0x3FE9655120032AAD;   # 0.7936177850
+var _OK_M2_02 = 0x3F70ADD9BD572B38;   # 0.0040720468
+var _OK_M2_10 = 0x3FFFA5E1BFFFDE12;   # 1.9779984951
+var _OK_M2_11 = 0x40036DC1BFFE5D3E;   # 2.4285922050
+var _OK_M2_12 = 0x3FDCD686FFF371A5;   # 0.4505937099
+var _OK_M2_20 = 0x3F9A869680B729E0;   # 0.0259040371
+var _OK_M2_21 = 0x3FE90C776001F502;   # 0.7827717662
+var _OK_M2_22 = 0x3FE9E0AC0001353D;   # 0.8086757660
+
+# M1: linear sRGB -> LMS, cube root, M2: LMS' -> Oklab.
+#must_use
+fn lin_rgba_to_oklab(c) {
+    var r = load32(c);
+    var g = load32(c + 4);
+    var b = load32(c + 8);
+
+    var l = _rg_f32_dot3(f32_from(_OK_M1_00), f32_from(_OK_M1_01), f32_from(_OK_M1_02), r, g, b);
+    var m = _rg_f32_dot3(f32_from(_OK_M1_10), f32_from(_OK_M1_11), f32_from(_OK_M1_12), r, g, b);
+    var s = _rg_f32_dot3(f32_from(_OK_M1_20), f32_from(_OK_M1_21), f32_from(_OK_M1_22), r, g, b);
+
+    var lc = ganita_f32_cbrt(l);
+    var mc = ganita_f32_cbrt(m);
+    var sc = ganita_f32_cbrt(s);
+
+    var ol = _rg_f32_dot3(f32_from(_OK_M2_00), f32_from(_OK_M2_01), f32_from(f64_neg(_OK_M2_02)), lc, mc, sc);
+    var oa = _rg_f32_dot3(f32_from(_OK_M2_10), f32_from(f64_neg(_OK_M2_11)), f32_from(_OK_M2_12), lc, mc, sc);
+    var ob = _rg_f32_dot3(f32_from(_OK_M2_20), f32_from(_OK_M2_21), f32_from(f64_neg(_OK_M2_22)), lc, mc, sc);
+    return oklab_new(ol, oa, ob);
+}
+
+# Cube a single-precision value. Same typed-parameter requirement as the dot
+# product above — `lc * lc * lc` on an untyped local is an integer multiply.
+#must_use
+fn _rg_f32_cube(x: f32) {
+    return x * x * x;
+}
+
+# Inverse matrices, same hex-bit-pattern requirement as M1/M2 above.
+var _OK_I2_01 = 0x3FD95D9920068C8A;   # 0.3963377774
+var _OK_I2_02 = 0x3FCB9F751FFA8CC8;   # 0.2158037573
+var _OK_I2_11 = 0x3FBB06117FEEC881;   # 0.1055613458
+var _OK_I2_12 = 0x3FB058BF3FE39E34;   # 0.0638541728
+var _OK_I2_21 = 0x3FB6E86F5FDF38B5;   # 0.0894841775
+var _OK_I2_22 = 0x3FF4A9ECBFFEAA8D;   # 1.2914855480
+
+var _OK_I1_00 = 0x40104E955DC3D73A;   # 4.0767416621
+var _OK_I1_01 = 0x400A76317EA9DE73;   # 3.3077115913
+var _OK_I1_02 = 0x3FCD906C3222FFEF;   # 0.2309699292
+var _OK_I1_10 = 0x3FF44B85A62C2AFF;   # 1.2684380046
+var _OK_I1_11 = 0x4004E0C87D01BF65;   # 2.6097574011
+var _OK_I1_12 = 0x3FD5D82D4F5D4F2A;   # 0.3413193965
+var _OK_I1_20 = 0x3F712FEA56E00671;   # 0.0041960863
+var _OK_I1_21 = 0x3FE68267C131178D;   # 0.7034186147
+var _OK_I1_22 = 0x3FFB5263CAEF6BCD;   # 1.7076147010
+
+# Inverse M2, cube to recover LMS, inverse M1. Alpha is opaque — Oklab carries none.
+#must_use
+fn oklab_to_lin_rgba(c) {
+    var ol = load32(c);
+    var oa = load32(c + 4);
+    var ob = load32(c + 8);
+
+    var lc = _rg_f32_dot3(f32_from(F64_ONE), f32_from(_OK_I2_01), f32_from(_OK_I2_02), ol, oa, ob);
+    var mc = _rg_f32_dot3(f32_from(F64_ONE), f32_from(f64_neg(_OK_I2_11)), f32_from(f64_neg(_OK_I2_12)), ol, oa, ob);
+    var sc = _rg_f32_dot3(f32_from(F64_ONE), f32_from(f64_neg(_OK_I2_21)), f32_from(f64_neg(_OK_I2_22)), ol, oa, ob);
+
+    var l = _rg_f32_cube(lc);
+    var m = _rg_f32_cube(mc);
+    var s = _rg_f32_cube(sc);
+
+    var r = _rg_f32_dot3(f32_from(_OK_I1_00), f32_from(f64_neg(_OK_I1_01)), f32_from(_OK_I1_02), l, m, s);
+    var g = _rg_f32_dot3(f32_from(f64_neg(_OK_I1_10)), f32_from(_OK_I1_11), f32_from(f64_neg(_OK_I1_12)), l, m, s);
+    var b = _rg_f32_dot3(f32_from(f64_neg(_OK_I1_20)), f32_from(f64_neg(_OK_I1_21)), f32_from(_OK_I1_22), l, m, s);
+    return lin_rgba_new(r, g, b, f32_from(F64_ONE));
+}
+
+# Euclidean modulo — Rust's rem_euclid, which unlike `%` always returns a
+# non-negative result. Hue angles from atan2 are in (-180, 180]; without this
+# the negative half stays negative instead of wrapping into [0, 360).
+#must_use
+fn _rg_rem_euclid(a, m) {
+    var r = f64_sub(a, f64_mul(m, f64_floor(f64_div(a, m))));
+    if (f64_lt(r, 0) == 1) { return f64_add(r, m); }
+    return r;
+}
+
+# F64_PI from lib/math.cyr — a 16-digit decimal literal parses as 0.061575.
+var _RG_PI = F64_PI;
+
+#must_use
+fn _rg_to_degrees(rad) { return f64_div(f64_mul(rad, 180.0), _RG_PI); }
+#must_use
+fn _rg_to_radians(deg) { return f64_div(f64_mul(deg, _RG_PI), 180.0); }
+
+# Polar form. Chroma is |(a, b)|; hue is its angle in degrees, wrapped.
+#must_use
+fn oklab_to_oklch(c) {
+    var a = f32_to(load32(c + 4));
+    var b = f32_to(load32(c + 8));
+    var chroma = f64_sqrt(f64_add(f64_mul(a, a), f64_mul(b, b)));
+    var hue = 0;
+    # Below the threshold the colour is achromatic and atan2(0, 0) is
+    # meaningless, so hue is pinned to 0 rather than left to the libm.
+    if (f64_ge(chroma, 0.00000001) == 1) {
+        hue = _rg_rem_euclid(_rg_to_degrees(ganita_f64_atan2(b, a)), 360.0);
+    }
+    return oklch_new(load32(c), f32_from(chroma), f32_from(hue));
+}
+
+#must_use
+fn oklch_to_oklab(v) {
+    var h = _rg_to_radians(f32_to(load32(v + 8)));
+    var chroma = f32_to(load32(v + 4));
+    return oklab_new(load32(v),
+                     f32_from(f64_mul(chroma, _rg_cos(h))),
+                     f32_from(f64_mul(chroma, _rg_sin(h))));
+}
+
+# Convenience: sRGB byte -> Oklab, through LinRgba.
+#must_use
+fn srgba_to_oklab(c) {
+    var lin = srgba_to_lin_rgba(c);
+    if (lin == 0) { return 0; }
+    var lab = lin_rgba_to_oklab(lin);
+    lin_rgba_free(lin);
+    return lab;
+}
+
+# ── Colour temperature ────────
+# Tanner Helland's blackbody approximation. Writes 3 f32 bit patterns to `out`.
+#
+# NaN in gives neutral white out rather than propagating: 1.0.0 fixed this,
+# where a NaN kelvin previously survived the clamp and poisoned every channel.
+fn color_temperature(kelvin, out) {
+    var k = f32_to(kelvin);
+    # NaN is the one value not equal to itself.
+    if (f64_eq(k, k) == 0) {
+        store32(out, f32_from(F64_ONE));
+        store32(out + 4, f32_from(F64_ONE));
+        store32(out + 8, f32_from(F64_ONE));
+        return RG_ERR_NONE;
+    }
+    var temp = f64_div(f64_clamp(k, 1000.0, 40000.0), 100.0);
+
+    var r = F64_ONE;
+    if (f64_gt(temp, 66.0) == 1) {
+        r = f64_clamp(f64_div(f64_mul(329.699, _rg_pow(f64_sub(temp, 60.0), f64_neg(0.133205))), 255.0), 0, F64_ONE);
+    }
+
+    var g = 0;
+    if (f64_le(temp, 66.0) == 1) {
+        g = f64_clamp(f64_div(f64_sub(f64_mul(99.4708, f64_ln(temp)), 161.1196), 255.0), 0, F64_ONE);
+    }
+    if (f64_le(temp, 66.0) == 0) {
+        g = f64_clamp(f64_div(f64_mul(288.1222, _rg_pow(f64_sub(temp, 60.0), f64_neg(0.075515))), 255.0), 0, F64_ONE);
+    }
+
+    var b = 0;
+    if (f64_ge(temp, 66.0) == 1) { b = F64_ONE; }
+    if (f64_ge(temp, 66.0) == 0) {
+        if (f64_le(temp, 19.0) == 0) {
+            var bl = f64_sub(f64_mul(138.5177, f64_ln(f64_sub(temp, 10.0))), 305.0448);
+            b = f64_clamp(f64_div(bl, 255.0), 0, F64_ONE);
+        }
+    }
+
+    store32(out, f32_from(r));
+    store32(out + 4, f32_from(g));
+    store32(out + 8, f32_from(b));
+    return RG_ERR_NONE;
+}
+
 # ── Delta-E ────────
 # CIE76: plain Euclidean distance in Lab.
 #must_use
@@ -1101,5 +1561,131 @@ fn delta_e_cie76(a, b) {
     var da = f64_sub(load64(a + 8), load64(b + 8));
     var db = f64_sub(load64(a + 16), load64(b + 16));
     var sum = f64_add(f64_add(f64_mul(dl, dl), f64_mul(da, da)), f64_mul(db, db));
+    return f64_sqrt(sum);
+}
+
+# CIE94, graphic-arts weighting.
+#must_use
+fn delta_e_cie94(a, b) {
+    var dl = f64_sub(load64(a), load64(b));
+    var da = f64_sub(load64(a + 8), load64(b + 8));
+    var db = f64_sub(load64(a + 16), load64(b + 16));
+    var c1 = f64_sqrt(f64_add(f64_mul(load64(a + 8), load64(a + 8)), f64_mul(load64(a + 16), load64(a + 16))));
+    var c2 = f64_sqrt(f64_add(f64_mul(load64(b + 8), load64(b + 8)), f64_mul(load64(b + 16), load64(b + 16))));
+    var dc = f64_sub(c1, c2);
+    # dh^2 is a difference of squares that is mathematically non-negative but
+    # can go slightly negative through rounding; sqrt of that is NaN, so Rust
+    # clamps at 0 and this must too.
+    var dh_sq = f64_max(f64_sub(f64_sub(f64_add(f64_mul(da, da), f64_mul(db, db)), f64_mul(dc, dc)), 0), 0);
+
+    var sl = F64_ONE;
+    var sc = f64_add(F64_ONE, f64_mul(0.045, c1));
+    var sh = f64_add(F64_ONE, f64_mul(0.015, c1));
+
+    var tl = f64_div(dl, sl);
+    var tc = f64_div(dc, sc);
+    return f64_sqrt(f64_add(f64_add(f64_mul(tl, tl), f64_mul(tc, tc)), f64_div(dh_sq, f64_mul(sh, sh))));
+}
+
+# x^7 by repeated multiplication rather than pow. Integer exponents through
+# exp(7*ln x) lose precision and hit the zero-base edge case; c_bar is 0 for a
+# pair of neutral greys, which is an ordinary input here.
+#must_use
+fn _rg_pow7(x) {
+    var x2 = f64_mul(x, x);
+    var x4 = f64_mul(x2, x2);
+    return f64_mul(f64_mul(x4, x2), x);
+}
+
+# CIEDE2000 — the full Sharma et al. (2005) formulation.
+# 25^7. f64_from(int) is exact below 2^53; the decimal form is 10 digits and
+# sits in the range where the lexer starts losing precision.
+var _RG_25_POW7 = f64_from(6103515625);
+
+#must_use
+fn delta_e_ciede2000(lab1, lab2) {
+    var l1 = load64(lab1);
+    var a1 = load64(lab1 + 8);
+    var b1 = load64(lab1 + 16);
+    var l2 = load64(lab2);
+    var a2 = load64(lab2 + 8);
+    var b2 = load64(lab2 + 16);
+
+    var c1_star = f64_sqrt(f64_add(f64_mul(a1, a1), f64_mul(b1, b1)));
+    var c2_star = f64_sqrt(f64_add(f64_mul(a2, a2), f64_mul(b2, b2)));
+    var c_bar = f64_div(f64_add(c1_star, c2_star), 2.0);
+
+    var c_bar_7 = _rg_pow7(c_bar);
+    var g = f64_mul(0.5, f64_sub(F64_ONE, f64_sqrt(f64_div(c_bar_7, f64_add(c_bar_7, _RG_25_POW7)))));
+
+    var a1p = f64_mul(a1, f64_add(F64_ONE, g));
+    var a2p = f64_mul(a2, f64_add(F64_ONE, g));
+
+    var c1p = f64_sqrt(f64_add(f64_mul(a1p, a1p), f64_mul(b1, b1)));
+    var c2p = f64_sqrt(f64_add(f64_mul(a2p, a2p), f64_mul(b2, b2)));
+
+    var h1p = _rg_rem_euclid(_rg_to_degrees(ganita_f64_atan2(b1, a1p)), 360.0);
+    var h2p = _rg_rem_euclid(_rg_to_degrees(ganita_f64_atan2(b2, a2p)), 360.0);
+
+    var dlp = f64_sub(l2, l1);
+    var dcp = f64_sub(c2p, c1p);
+
+    # Hue difference takes the short way round the circle. The chroma guard
+    # comes first: with either chroma at zero the hue is undefined and the
+    # difference must be 0, not whatever atan2 returned for a null vector.
+    var dhp_deg = 0;
+    var cprod = f64_mul(c1p, c2p);
+    if (f64_ge(cprod, 0.0000000001) == 1) {
+        var hdiff = f64_sub(h2p, h1p);
+        if (f64_le(f64_abs(hdiff), 180.0) == 1) { dhp_deg = hdiff; }
+        if (f64_le(f64_abs(hdiff), 180.0) == 0) {
+            if (f64_gt(hdiff, 180.0) == 1) { dhp_deg = f64_sub(hdiff, 360.0); }
+            if (f64_gt(hdiff, 180.0) == 0) { dhp_deg = f64_add(hdiff, 360.0); }
+        }
+    }
+    var dhp = f64_mul(f64_mul(2.0, f64_sqrt(cprod)), _rg_sin(_rg_to_radians(f64_div(dhp_deg, 2.0))));
+
+    var lbp = f64_div(f64_add(l1, l2), 2.0);
+    var cbp = f64_div(f64_add(c1p, c2p), 2.0);
+
+    var hbp = 0;
+    if (f64_lt(cprod, 0.0000000001) == 1) {
+        hbp = f64_add(h1p, h2p);
+    }
+    if (f64_lt(cprod, 0.0000000001) == 0) {
+        var hsum = f64_add(h1p, h2p);
+        if (f64_le(f64_abs(f64_sub(h1p, h2p)), 180.0) == 1) {
+            hbp = f64_div(hsum, 2.0);
+        }
+        if (f64_le(f64_abs(f64_sub(h1p, h2p)), 180.0) == 0) {
+            if (f64_lt(hsum, 360.0) == 1) { hbp = f64_div(f64_add(hsum, 360.0), 2.0); }
+            if (f64_lt(hsum, 360.0) == 0) { hbp = f64_div(f64_sub(hsum, 360.0), 2.0); }
+        }
+    }
+
+    var t = f64_sub(f64_add(f64_add(f64_sub(F64_ONE,
+                f64_mul(0.17, _rg_cos(_rg_to_radians(f64_sub(hbp, 30.0))))),
+                f64_mul(0.24, _rg_cos(_rg_to_radians(f64_mul(2.0, hbp))))),
+                f64_mul(0.32, _rg_cos(_rg_to_radians(f64_add(f64_mul(3.0, hbp), 6.0))))),
+                f64_mul(0.20, _rg_cos(_rg_to_radians(f64_sub(f64_mul(4.0, hbp), 63.0)))));
+
+    var ldiff = f64_sub(lbp, 50.0);
+    var ld2 = f64_mul(ldiff, ldiff);
+    var sl = f64_add(F64_ONE, f64_div(f64_mul(0.015, ld2), f64_sqrt(f64_add(20.0, ld2))));
+    var sc = f64_add(F64_ONE, f64_mul(0.045, cbp));
+    var sh = f64_add(F64_ONE, f64_mul(f64_mul(0.015, cbp), t));
+
+    var hterm = f64_div(f64_sub(hbp, 275.0), 25.0);
+    var dtheta = f64_mul(30.0, _rg_exp(f64_neg(f64_mul(hterm, hterm))));
+    var cbp7 = _rg_pow7(cbp);
+    var rc = f64_mul(2.0, f64_sqrt(f64_div(cbp7, f64_add(cbp7, _RG_25_POW7))));
+    var rt = f64_mul(f64_neg(_rg_sin(_rg_to_radians(f64_mul(2.0, dtheta)))), rc);
+
+    var lt = f64_div(dlp, sl);
+    var ct = f64_div(dcp, sc);
+    var ht = f64_div(dhp, sh);
+
+    var sum = f64_add(f64_add(f64_add(f64_mul(lt, lt), f64_mul(ct, ct)), f64_mul(ht, ht)),
+                      f64_mul(f64_mul(rt, ct), ht));
     return f64_sqrt(sum);
 }

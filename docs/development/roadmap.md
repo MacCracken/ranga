@@ -58,11 +58,17 @@ Settles the raw-byte-offset accessor pattern that every later module follows
 - [x] `src/pixel.cyr` — `PixelFormat` (6 formats, overflow-checked sizing),
       `PixelBuffer`, `PixelView`/`PixelViewMut`, `BufferPool` (best-fit).
       102 assertions.
-- [x] `src/color.cyr` — sRGB transfer, `Srgba`/`LinRgba`/`CieXyz`/`CieLab`,
-      the sRGB↔XYZ matrices, XYZ↔Lab, Delta-E CIE76. 44 assertions.
-- [ ] `src/color.cyr` remainder — Hsl, Cmyk, Oklab/Oklch, Display P3,
-      `color_temperature`, Delta-E CIE94 + CIEDE2000.
+- [x] `src/color.cyr` — **complete.** sRGB transfer, `Srgba`/`LinRgba`/`CieXyz`/
+      `CieLab`/`Hsl`/`Cmyk`/`Oklab`/`Oklch`, sRGB↔XYZ, XYZ↔Lab, Display P3,
+      `color_temperature`, Delta-E CIE76/CIE94/CIEDE2000. 108 assertions,
+      including the Sharma et al. CIEDE2000 reference pair at 2.0425.
 - [ ] `src/constants.cyr` — shared EPS and matrices, once a second module needs them.
+
+Two silent-corruption traps hit here and written up in
+[`port-mechanics.md`](port-mechanics.md): untyped f32 operands emit integer
+multiplies, and decimal float literals past ~9 significant digits parse wrong
+(filed upstream as
+`cyrius/docs/development/issues/2026-08-17-decimal-float-literal-silent-precision-loss.md`).
 
 ### M2 — Pixel ops
 
