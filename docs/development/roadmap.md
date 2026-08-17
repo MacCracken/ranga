@@ -1,76 +1,92 @@
-# Ranga Development Roadmap
+# ranga — Roadmap
 
-> Ranga (रंग, Sanskrit: color/hue) — Core image processing library for the AGNOS creative suite.
+> Milestone plan through the Cyrius port. State lives in [`state.md`](state.md);
+> this file is the sequencing — what ships, in what order, against what
+> dependency gates. The detailed capability analysis, module map, and
+> internalizing list live in [`cyrius-port-plan.md`](cyrius-port-plan.md).
 
----
+## Versioning
 
-## Status: Rust line closed at 1.0.1 (2026-08-13)
+`VERSION` stays **1.0.1** for the whole port and bumps to **2.0.0** at M8, when
+the Cyrius tree reaches parity with what Rust 1.0.1 shipped. `distlib` stamping
+`v1.0.1` in the meantime is correct — claiming 2.0.0 earlier would advertise a
+library that does not exist yet.
 
-1.0.0 shipped 2026-04-02 after the P(-1) scaffold hardening pass. **1.0.1 is the
-final Rust release.** ranga continues in Cyrius, following mabda, prakash, and
-ai-hwaccel, which have already ported.
+This continues ranga's existing numbering with a major bump rather than resetting
+to 0.x, matching every AGNOS port (vidya 1.x→2.0.0, prakash 1.2.0→2.0.0, mabda
+1.0.0→2.0.0, ai-hwaccel 1.2.0→2.0.0, hisab 1.4.0→2.0.0) and prakash's practice of
+deferring the bump to the final milestone.
 
-What 1.0.1 covered:
+_This file replaces the generic `v0.1.0 → v1.0` template the `cyrius port`
+scaffold wrote, which assumed a fresh project rather than a port._
 
-- Toolchain current (verified on Rust 1.97.1), MSRV held at 1.89 so consumers can take it mid-port
-- Dependencies refreshed; three RUSTSEC advisories cleared (0204 vulnerability, 0097 + 0190 unsoundness)
-- crates.io publishing removed from the release pipeline — GitHub artifacts only
+## 2.0.0 criteria
 
-`wgpu` is frozen at 29 and `pollster` at 0.4 for the life of the Rust line, because
-mabda 1.0.0 (the last Rust release of the AGNOS GPU foundation) links those majors.
-See the note in `Cargo.toml` and the 1.0.1 CHANGELOG entry.
+- [ ] Rust → Cyrius surface parity verified (function-level diff against `rust-old/`)
+- [ ] Test coverage at parity — 214 unit + 123 integration + 161 doctest assertions ported
+- [ ] All 134 benchmarks recorded in [`benchmarks-rust-v-cyrius.md`](../benchmarks-rust-v-cyrius.md)
+- [ ] All 8 fuzz targets ported to `tests/ranga.fcyr`
+- [ ] At least one downstream consumer green (rasa, tazama, aethersafta, soorat)
+- [ ] CHANGELOG entry for 2.0.0 naming the language change as the breaking change
+- [ ] Security audit pass (`docs/audit/YYYY-MM-DD-audit.md`)
+- [ ] `VERSION` → 2.0.0, distlib drift gate green
 
-No further Rust feature work is planned. Bug fixes would only be cut if a consumer
-hits a blocker before completing its own port.
+## Milestones
 
----
+Full module map and difficulty ratings: [`cyrius-port-plan.md`](cyrius-port-plan.md) §6.
 
-## Carried to the Cyrius port
+### M0 — Port scaffold — ✅ shipped 2026-08-17
 
-These were open against the Rust line and were never completed. They are recorded
-here as input to the port, not as Rust commitments.
+- Benchmark history lifted out before `_port_move` swept `benches/`
+- `cyrius port` scaffold landed; 13,958 Rust lines moved to `rust-old/`
+- Manifest converted from the scaffold's binary shape to library shape
+  (`${file:VERSION}`, `[lib] modules`, `distlib` → `dist/ranga.cyr`)
+- `.gitignore` repaired — the port's move broke every root-anchored Rust rule,
+  leaving 7.6 GB of `rust-old/target/` unignored
+- Doc-tree per [first-party-documentation.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-documentation.md)
 
-### API and correctness
+### M1 — Foundation
 
-- Document `Perspective` struct public fields (`a00`–`a12`)
-- More granular error types — split the `RangaError::Other` catch-all where patterns emerge
-- GPU `block_on` timeout mechanism — prevent theoretical infinite spin on GPU futures
+`error` ✅, `constants`, byte-vec, `pixel`, `color`. Settles the raw-byte-offset
+accessor pattern that every later module follows (plan §2).
 
-### Testing
+- [x] `src/error.cyr` — 8 error codes + `is_err`/`is_ok`, plus the Rust-semantics
+      shims `_rg_pow`/`_rg_exp`/`_rg_sin`/`_rg_cos`. 37 assertions green.
 
-- Feature flag isolation tests — dedicated jobs per feature (`gpu`, `spectral`, `hwaccel`, `parallel`); the Rust CI only ever tested default, none, and all
-- Feature interaction matrix — `gpu+hwaccel`, `parallel+simd`, `spectral+parallel`
-- ICC `IccLutProfile` parsing coverage — minimal in the Rust implementation
-- Fuzzing in CI — all 8 targets; `make fuzz` ran them locally but CI never gated on it
-- GPU error propagation tests for chained dispatch failures
-- Large-buffer stress tests (>1GB) for memory safety under pressure
-- Visual regression baseline images (golden master approach)
+### M2 — Pixel ops
 
-### Benchmarks
+`composite`, `histogram`, `transform`, `filter`.
 
-- Missing coverage: `auto_white_balance`, `delta_e_cie94`, `fill_solid`, `nv12_to_rgba`
-- GPU context creation overhead
-- `hwaccel::probe()` and `should_use_gpu()` heuristics
-- Benchmark regression detection — fail the build on >10% degradation against stored baseline
-- Explicit parallel vs serial comparison
-- GPU pipeline warm-up profiling — first-run vs cached dispatch cost
+### M3 — SIMD modules
 
-### Performance
+`convert`, `blend`. Scalar path first for correctness parity, then the `asm { }`
+kernels — SIMD ships in 2.0.0, not deferred.
 
-- NEON (ARM) SIMD parity with SSE2/AVX2 — the Rust line hardened SSE2 in 1.0.0 but never verified NEON coverage matched
+### M4 — ICC
 
-### Documentation
+`icc` + the 5 parametric curve types.
 
-- Benchmark hardware specified in the performance table (CPU/GPU model)
-- Explicit feature flag interaction documentation
-- Consumer integration cookbook (rasa editor patterns, tazama video pipeline patterns)
-- HWAccel decision-making heuristics guide
+### M5 — External deps
 
----
+`spectral` (prakash, verified 18/18 covered), `hwaccel` (ai-hwaccel v2.3.16).
 
-## Historical
+### M6 — GPU
 
-`benches/history.csv` holds the full benchmark record across the Rust line
-(0.20.3 → 1.0.1). Worth carrying forward as the port's performance target — the
-Cyrius implementation should be measured against these numbers, not against a
-fresh baseline.
+`gpu_shaders`, `gpu_buffer`, `gpu_context`, `gpu_pipeline` against mabda's
+**native** backends; wgpu is the fallback and leaves mabda's tree at v5.1.
+
+### M7 — Parity
+
+Surface count against `rust-old/`, full benchmark sweep on a quiesced machine,
+`benchmarks-rust-v-cyrius.md` filled in.
+
+### M8 — Release
+
+distlib, docs, CHANGELOG, CI gates, **`VERSION` → 2.0.0**.
+
+## Out of scope (for 2.0.0)
+
+- Async GPU readback — mabda has no non-blocking buffer map
+- WASM / WebGPU — blocked on the Cyrius WASM backend
+- Retiring `rust-old/` — kept 1–3 releases past 2.0.0, then deleted per the
+  AGNOS standard (only after Cyrius has equal or better coverage and benchmarks)

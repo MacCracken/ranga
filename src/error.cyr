@@ -1,0 +1,130 @@
+# error.cyr -- ranga error codes and Rust-semantics math shims
+# Ported from rust-old/src/error.rs (RangaError).
+#
+# Replaces Rust's RangaError enum with integer error codes. Functions return
+# RG_ERR_NONE (0) on success or a negative RG_ERR_* code on failure. Where a
+# function also returns a value, it takes an `err_out` pointer and writes the
+# code there. The detailed context Rust carried in the variant payloads
+# (expected/actual sizes, format names) is logged at the failure site rather
+# than carried in the return value.
+#
+# Rust variant                          -> code
+#   InvalidFormat(String)               -> RG_ERR_INVALID_FORMAT
+#   DimensionMismatch{expected,actual}  -> RG_ERR_DIMENSION_MISMATCH
+#   BufferTooSmall{need,have}           -> RG_ERR_BUFFER_TOO_SMALL
+#   UnsupportedConversion{from,to}      -> RG_ERR_UNSUPPORTED_CONVERSION
+#   Other(String)                       -> RG_ERR_OTHER
+#
+# Pairs with tagged.cyr for Result-like patterns when an Option is needed.
+
+var RG_ERR_NONE                   = 0;
+
+# The pixel format is invalid or unsupported for this operation.
+var RG_ERR_INVALID_FORMAT         = (0 - 1);
+# Buffer dimensions do not match the expected size.
+var RG_ERR_DIMENSION_MISMATCH     = (0 - 2);
+# The provided buffer is too small for the operation.
+var RG_ERR_BUFFER_TOO_SMALL       = (0 - 3);
+# The requested conversion between formats is not supported.
+var RG_ERR_UNSUPPORTED_CONVERSION = (0 - 4);
+# A parameter is outside the valid range. Covers the cases 1.0.0 hardening
+# turned from silent misbehaviour into errors: bilateral sigma = 0 (was a
+# -inf coefficient) and levels gamma = 0 (was powf(infinity)).
+var RG_ERR_INVALID_PARAMETER      = (0 - 5);
+# An allocation was refused — the request exceeds ALLOC_MAX, the size
+# computation overflowed, or the heap is exhausted. Distinct from
+# RG_ERR_INVALID_PARAMETER: the arguments were sane, the memory was not there.
+# This is the code checked_buffer_size() guards against on the Rust side.
+var RG_ERR_ALLOCATION             = (0 - 6);
+# Malformed input bytes — an ICC profile that fails structural validation, or
+# a .cube LUT that is not well-formed.
+var RG_ERR_PARSE                  = (0 - 7);
+# A generic failure with no more specific code (Rust's Other(String)).
+var RG_ERR_OTHER                  = (0 - 8);
+
+# 1 if `code` is an error (negative), else 0.
+#must_use
+fn ranga_is_err(code) {
+    if (code < 0) { return 1; }
+    return 0;
+}
+
+# 1 if `code` is success (RG_ERR_NONE), else 0.
+#must_use
+fn ranga_is_ok(code) {
+    if (code == 0) { return 1; }
+    return 0;
+}
+
+# ── Rust-semantics math shims ────────
+# The Cyrius math builtins diverge from Rust's f64 methods at the zero and
+# infinite boundaries, because `ganita_f64_pow` is implemented as
+# exp(n*ln(base)) and the x87 `exp` returns NaN for an infinite argument. Every
+# ported call site that can reach those boundaries goes through these shims so
+# the port keeps matching `rust-old/`. Same divergence prakash hit and shimmed
+# in its own error.cyr — see prakash/src/error.cyr `_prk_pow` / `_prk_exp`.
+#
+#   expression              Cyrius builtin   Rust           shim
+#   ganita_f64_pow(0.0, 2)  NaN              0.0            0.0
+#   f64_exp(-inf)           NaN              0.0            0.0
+#   f64_exp(+inf)           NaN              +inf           +inf
+#
+# Finite arguments are delegated unchanged, so no in-range result moves.
+
+var _RG_INF     = 0x7FF0000000000000;
+var _RG_NEG_INF = 0xFFF0000000000000;
+var _RG_NAN     = 0x7FF8000000000000;
+
+# Rust `f64::exp` semantics. Only the infinite arguments are special-cased;
+# NaN in still gives NaN out, matching Rust.
+#
+# This is load-bearing for the filters, not theoretical: the Gaussian and
+# bilateral kernels evaluate exp(-d^2 / 2*sigma^2), and a large spatial or
+# range distance drives that argument to -inf. Rust yields a 0.0 weight — the
+# sample simply does not contribute; the unshimmed builtin yields NaN, which
+# then poisons the whole accumulator for that pixel.
+#must_use
+fn _rg_exp(x) {
+    if (x == _RG_INF) { return _RG_INF; }
+    if (x == _RG_NEG_INF) { return 0; }
+    return f64_exp(x);
+}
+
+# Rust `f64::powf` semantics for a non-negative base. `ganita_f64_pow` computes
+# exp(n*ln(base)), so a zero base gives exp(-inf) = NaN where Rust gives 0.0
+# (positive exponent), 1.0 (zero exponent) or +inf (negative exponent).
+#
+# ranga reaches the zero base through the ICC tone curves and the sRGB transfer
+# function, which raise a channel value to a gamma — and a fully black channel
+# is exactly 0.0, so this is hit by ordinary image data, not an edge case.
+#
+# A negative base is delegated unchanged: Rust's powf is also NaN there for a
+# non-integer exponent, and no ranga call site raises a negative base.
+#must_use
+fn _rg_pow(base, exp) {
+    if (f64_abs(base) == 0) {
+        if (f64_gt(exp, 0) == 1) { return 0; }
+        if (f64_lt(exp, 0) == 1) { return _RG_INF; }
+        return F64_ONE;
+    }
+    return ganita_f64_pow(base, exp);
+}
+
+# Sine/cosine with an explicit domain guard. The x86 `fsin`/`fcos` instructions
+# are undefined for |x| >= 2^63 and return the ARGUMENT UNCHANGED there, so
+# `f64_sin(1e300)` yields 1e300. ranga takes a caller-supplied angle in
+# hue_rotate and color_balance, so an unclamped user value can reach this.
+# Below the limit both delegate unchanged, so no in-range result moves.
+var _RG_TRIG_LIMIT = 0x43E0000000000000;   # 2^63
+
+#must_use
+fn _rg_sin(x) {
+    if (f64_lt(f64_abs(x), _RG_TRIG_LIMIT) == 0) { return _RG_NAN; }
+    return f64_sin(x);
+}
+
+#must_use
+fn _rg_cos(x) {
+    if (f64_lt(f64_abs(x), _RG_TRIG_LIMIT) == 0) { return _RG_NAN; }
+    return f64_cos(x);
+}

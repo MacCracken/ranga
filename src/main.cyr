@@ -1,0 +1,15 @@
+# ranga — Cyrius port
+# Ported from 13958 lines of Rust
+
+# Stdlib auto-included via cyrius.cyml
+
+fn main() {
+    alloc_init();
+    println("ranga ready");
+    return 0;
+}
+
+var r = main();
+# sys_exit_group, not syscall(SYS_EXIT, ...): SYS_EXIT ends only the calling
+# thread, so the bare syscall hangs once this program spawns its first worker.
+sys_exit_group(r);

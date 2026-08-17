@@ -1,7 +1,34 @@
-# Build artifacts
-/target/
+# ── Build artifacts ────────
+# Unanchored on purpose. These were root-anchored (`/target/`, `fuzz/target/`)
+# for the Rust layout; `cyrius port` moved the whole Rust tree under `rust-old/`
+# and every one of those rules silently stopped matching — `rust-old/target/`
+# alone is 7.6 GB and was staged by `git add -A` until this was fixed. Matching
+# at any depth survives the next move too.
+target/
+build/
 
-# Editor / IDE
+# `lib/` (cyrius deps-vendored stdlib) and `dist/` (the published bundle plus
+# its .deps sidecar) are deliberately TRACKED, matching prakash and mabda —
+# `cyrius deps` validates a consumer's `[deps] stdlib` against the sidecar, so
+# it is part of the published contract. Do not add them here.
+
+# Cyrius toolchain tarball (fetched during CI)
+cyrius-*.tar.gz
+
+# ── rust-old/ ────────
+# The frozen Rust 1.0.1 archive is kept 1–3 releases as the translation
+# reference, then deleted with a CHANGELOG entry naming the
+# `git checkout 1.0.1 -- rust-old/` recovery incantation. Its source, manifests,
+# Cargo.lock, and supply-chain audits are all TRACKED — Cargo.lock in particular
+# records the exact audited dependency set that 1.0.1 shipped against, which is
+# the point of keeping the archive. Only its build output is ignored, by the
+# `target/` rule above.
+#
+# Nothing else here: the Rust-era coverage, criterion, proptest and cargo-vet
+# cache rules were dropped when the port ran. None of those tools run against a
+# Cyrius tree, and their paths no longer exist.
+
+# ── Editor / IDE ────────
 *.swp
 *.swo
 *~
@@ -9,34 +36,18 @@
 .vscode/
 *.iml
 
-# OS files
+# ── OS files ────────
 .DS_Store
 Thumbs.db
 
-# Debugging
+# ── Debugging ────────
 *.pdb
 core
 core.*
 
-# Coverage
-lcov.info
-tarpaulin-report.html
-coverage/
+# ── Claude Code ────────
+.claude/
 
-# Benchmark output (criterion generates large HTML reports)
-criterion/
-
-# Fuzz artifacts
-fuzz/target/
-fuzz/corpus/
-fuzz/artifacts/
-
-# Proptest persistence (regressions are committed, but not other state)
-proptest-regressions/
-
-# cargo-vet downloads
-supply-chain/.cache/
-
-# Environment / secrets
+# ── Environment / secrets ────────
 .env
 .env.*

@@ -240,13 +240,36 @@ there is exactly one shot at the pre-port state.
    Rust source is preserved as a git-tagged snapshot per the
    retirement-via-git-tag pattern, and it is the only way back once `_port_move`
    runs.
-3. Run `cyrius port /home/macro/Repos/ranga`.
-4. **Convert the scaffolded manifest from binary to library shape.** The port
-   path emits a binary-shaped `cyrius.cyml` — hardcoded `version = "0.1.0"`, no
-   `[lib]`, no `dist/`. The `cyrius-cyml-lib` template exists but is reachable
-   only from `cyrius init --lib`. Restore `${file:VERSION}` as SSOT, add the
-   `[lib] modules` list, and wire `cyrius distlib` → `dist/ranga.cyr`.
-5. Re-add this plan if the scaffold's `docs/` templates clobbered it.
+3. ✅ **DONE — `cyrius port /home/macro/Repos/ranga`.** 13,958 Rust lines moved to
+   `rust-old/`; scaffolded `src/main.cyr`, `cyrius.cyml`, the `docs/` tree,
+   `CLAUDE.md`, CI + release workflows, and `.tcyr`/`.bcyr`/`.fcyr` skeletons.
+4. ✅ **DONE — manifest converted from binary to library shape.** `${file:VERSION}`
+   restored as SSOT (the scaffolded `release.yml` explicitly checks for it),
+   `repository` added, `output` → `build/ranga`, `[lib] modules` added and wired
+   to `cyrius distlib` → `dist/ranga.cyr`. `[deps] stdlib` extended with `math`,
+   `ganita`, `slice`, `freelist`, `tagged`.
+   ⚠ `[lib] modules = []` is **not** valid — `cyrius distlib` fails with
+   "no [build] modules or [lib] modules found in manifest", so the list needs a
+   real module from the start. `src/error.cyr` is that module (M1's first).
+5. ✅ **DONE — docs survived.** The scaffold added to `docs/` without clobbering;
+   this plan, `benchmarks-rust-v-cyrius.md`, `rust-v1-bench-history.csv`, and
+   `docs/decisions/` are all intact. It did overwrite `docs/development/roadmap.md`
+   with its own template.
+6. ✅ **DONE — `.gitignore`.** The port does **not** append its ignore entries, and
+   `_port_move` swept the Rust build directory to `rust-old/target/` — **7.6 GB**
+   that the pre-existing root-anchored `/target/` rule no longer matches. Added
+   `rust-old/target/`, `/build/`, `cyrius-*.tar.gz`, `.claude/`. `lib/` and
+   `dist/` stay tracked, matching prakash (108 tracked files under `lib/`).
+
+**Settled — VERSION stays `1.0.1` through the port, bumps to `2.0.0` at M8.**
+`distlib` stamps the bundle `v1.0.1` in the meantime, which is correct — the
+Cyrius tree is not yet at parity with what 1.0.1 shipped, so claiming 2.0.0
+before M8 would advertise a library that does not exist yet. This matches
+prakash, which deferred its own `VERSION` → 2.0.0 to M8 "when the port
+completed", and preserves the AGNOS precedent that ports continue numbering with
+a major bump rather than resetting to 0.x. The scaffolded
+`docs/development/roadmap.md` shipped a generic `v0.1.0 → v1.0` template; its
+milestone numbering has been rewritten to match this decision.
 
 `cyrius port` is a **scaffold-and-move tool, not a translator** — grepping
 `programs/cyrius-init.cyr` and `cbt/cyrius.cyr` for
@@ -321,8 +344,9 @@ guarded by the ported test suite.
 
 ## 11. Milestones
 
-- [ ] **M0 Pre-port** — extract bench history, tag, `cyrius port`, fix manifest to library shape, smoke `.tcyr` green.
-- [ ] **M1 Foundation** — `error`, `constants`, byte-vec, `ranga_f32_*` + `ranga_f64_powf` shims, `pixel`, `color`. Settles the §2 accessor pattern.
+- [x] **M0 Pre-port** — ✅ bench history extracted, tagged (`79acc52`), `cyrius port` run, manifest converted to library shape, `.gitignore` fixed, `distlib` → `dist/ranga.cyr` (130 lines), smoke `.tcyr` green.
+- [ ] **M1 Foundation** — `error` ✅, `constants`, byte-vec, `pixel`, `color`. Settles the §2 accessor pattern.
+      - [x] `src/error.cyr` — 8 error codes replacing `RangaError`'s 5 variants + `is_err`/`is_ok`, plus the Rust-semantics shims `_rg_pow`/`_rg_exp`/`_rg_sin`/`_rg_cos` (§3 item 1, modelled on prakash's `_prk_*`). **37 assertions green, lint clean.** The shim assertions are parity locks — each one fails against the bare Cyrius builtin and passes against Rust.
 - [ ] **M2 Pixel ops** — `composite`, `histogram`, `transform`, `filter`.
 - [ ] **M3 SIMD modules** — `convert`, `blend`. Scalar path first to establish correctness parity, then the `asm { }` kernels (items §3.4–3.6) in the same milestone — SIMD ships in 2.0.0.
 - [ ] **M4 ICC** — `icc` + the 5 parametric curve types.

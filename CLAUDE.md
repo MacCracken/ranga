@@ -1,65 +1,69 @@
-# Ranga — Claude Code Instructions
+# ranga — Claude Code Instructions
+
+> **Core rule**: this file is **preferences, process, and procedures** —
+> durable rules that change rarely. Volatile state (current version,
+> module line counts, port progress, test counts, consumers) lives in
+> [`docs/development/state.md`](docs/development/state.md).
+> Do not inline state here.
 
 ## Project Identity
 
-**Ranga** (Sanskrit: color) — Core image processing — color spaces, blend modes, pixel buffers, filters, GPU compute
+**ranga** — Cyrius port of a Rust project (13958 lines preserved at `rust-old/`).
 
-- **Type**: Flat library crate
+- **Type**: Port (Rust → Cyrius)
 - **License**: GPL-3.0-only
-- **MSRV**: 1.89
-- **Version**: SemVer 0.D.M pre-1.0
+- **Language**: Cyrius (toolchain pinned in `cyrius.cyml [package].cyrius`)
+- **Version**: `VERSION` at the project root is the source of truth — do not inline the number here
+- **Standards**: [First-Party Standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md) · [First-Party Documentation](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-documentation.md)
 
-## Consumers
+## Goal
 
-rasa (image editor), tazama (video), aethersafta (compositing), soorat (textures)
+_TODO: one-or-two-sentence mission statement. What does ranga OWN in the stack? Durable — doesn't change per release._
 
-## Development Process
+## Current State
 
-### P(-1): Scaffold Hardening (before any new features)
+> Volatile state lives in [`docs/development/state.md`](docs/development/state.md) —
+> port progress, surface parity, in-flight work. Refreshed every release.
 
-1. Test + benchmark sweep of existing code
-2. Cleanliness check: `cargo fmt --check`, `cargo clippy --all-features --all-targets -- -D warnings`, `cargo audit`, `cargo deny check`
-3. Get baseline benchmarks (`./scripts/bench-history.sh`)
-4. Initial refactor + audit (performance, memory, security, edge cases)
-5. Cleanliness check — must be clean after audit
-6. Additional tests/benchmarks from observations
-7. Post-audit benchmarks — prove the wins
-8. Repeat audit if heavy
+This file (`CLAUDE.md`) is durable rules.
 
-### Development Loop (continuous)
+## Scaffolding
 
-1. Work phase — new features, roadmap items, bug fixes
-2. Cleanliness check: `cargo fmt --check`, `cargo clippy --all-features --all-targets -- -D warnings`, `cargo audit`, `cargo deny check`
-3. Test + benchmark additions for new code
-4. Run benchmarks (`./scripts/bench-history.sh`)
-5. Audit phase — review performance, memory, security, throughput, correctness
-6. Cleanliness check — must be clean after audit
-7. Deeper tests/benchmarks from audit observations
-8. Run benchmarks again — prove the wins
-9. If audit heavy → return to step 5
-10. Documentation — update CHANGELOG, roadmap, docs
-11. Return to step 1
+Project was scaffolded with `cyrius port`. Original Rust at `rust-old/` is the reference oracle — do not modify it; cross-check the port against it.
 
-### Key Principles
+## Quick Start
 
-- **Never skip benchmarks.** Numbers don't lie. The CSV history is the proof.
-- **Tests + benchmarks are the way.** Minimum 80%+ coverage target.
-- **Own the stack.** If an AGNOS crate wraps an external lib, depend on the AGNOS crate.
-- **No magic.** Every operation is measurable, auditable, traceable.
-- **`#[non_exhaustive]`** on all public enums.
-- **`#[must_use]`** on all pure functions.
-- **`#[inline]`** on hot-path functions.
-- **`write!` over `format!`** — avoid temporary allocations.
-- **Cow over clone** — borrow when you can, allocate only when you must.
-- **Vec arena over HashMap** — when indices are known, direct access beats hashing.
-- **Feature-gate optional deps** — consumers pull only what they need.
-- **tracing on all operations** — structured logging for audit trail.
+```sh
+cyrius deps                              # resolve dependencies
+cyrius build src/main.cyr build/ranga    # compile
+cyrius test                              # run tests/*.tcyr
+```
 
-## DO NOT
-- **Do not commit or push** — the user handles all git operations (commit, push, tag)
+## Key Principles
 
-- **NEVER use `gh` CLI** — use `curl` to GitHub API only
-- Do not add unnecessary dependencies — keep it lean
-- Do not `unwrap()` or `panic!()` in library code
-- Do not skip benchmarks before claiming performance improvements
-- Do not commit `target/` or `Cargo.lock` (library crates only)
+- **Cross-check against `rust-old/`** — the port's correctness bar is "matches what Rust did". Diverge only with an ADR.
+- **Correctness over cleverness** — if the Cyrius behavior diverges silently from Rust, the bugs win
+- Test after every change, not after the feature is "done"
+- ONE change at a time — never bundle unrelated changes
+- Build with `cyrius build`, not raw `cat file | cc5` — the manifest auto-resolves deps
+- Source files only need project includes — stdlib auto-resolves from `cyrius.cyml`
+- `var buf[N]` = N **bytes**, not N entries
+
+## Rules (Hard Constraints)
+
+- **Do not commit or push** — the user handles all git operations
+- **Never use `gh` CLI** — use `curl` to the GitHub API if needed
+- Do not modify `rust-old/` — it's the parity oracle
+- Do not skip tests before claiming changes work
+- Do not modify `lib/` files (vendored stdlib / dep symlinks)
+- Do not hardcode toolchain versions in CI YAML — `cyrius = "X.Y.Z"` in `cyrius.cyml` is the source of truth
+
+## Documentation
+
+- [`docs/adr/`](docs/adr/) — Architecture Decision Records (*why X over Y?*)
+- [`docs/architecture/`](docs/architecture/) — Non-obvious constraints
+- [`docs/guides/`](docs/guides/) — Task-oriented how-tos
+- [`docs/examples/`](docs/examples/) — Runnable examples
+- [`docs/development/state.md`](docs/development/state.md) — Live state
+- [`docs/development/roadmap.md`](docs/development/roadmap.md) — Milestones through v1.0
+

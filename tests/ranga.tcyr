@@ -1,0 +1,118 @@
+# ranga smoke test suite
+# Proves the scaffold builds and the error module resolves. Grows into the full
+# image-processing coverage as modules are ported — see
+# docs/development/cyrius-port-plan.md §6 for the sequence, §8 for the target
+# (214 unit + 123 integration + 161 doctest assertions from rust-old/).
+
+include "src/error.cyr"
+
+alloc_init();
+
+# Test-local helpers. Constructing an f32 from an integer literal is
+# f32_from(f64_from(n)) and reading one back is f64_to(f32_to(x)); spelled out
+# at every call site those assertions run past the 120-column lint.
+fn f32c(n) { return f32_from(f64_from(n)); }
+fn f32i(x) { return f64_to(f32_to(x)); }
+fn negf(n) { return f64_from(0) - f64_from(n); }
+
+# ================================================================
+# error codes — parity with rust-old/src/error.rs RangaError
+# ================================================================
+test_group("error codes");
+
+assert_eq(RG_ERR_NONE, 0, "RG_ERR_NONE is 0");
+assert_eq(RG_ERR_INVALID_FORMAT, (0 - 1), "invalid format code");
+assert_eq(RG_ERR_DIMENSION_MISMATCH, (0 - 2), "dimension mismatch code");
+assert_eq(RG_ERR_BUFFER_TOO_SMALL, (0 - 3), "buffer too small code");
+assert_eq(RG_ERR_UNSUPPORTED_CONVERSION, (0 - 4), "unsupported conversion code");
+assert_eq(RG_ERR_INVALID_PARAMETER, (0 - 5), "invalid parameter code");
+assert_eq(RG_ERR_ALLOCATION, (0 - 6), "allocation code");
+assert_eq(RG_ERR_PARSE, (0 - 7), "parse code");
+assert_eq(RG_ERR_OTHER, (0 - 8), "other code");
+
+assert_eq(ranga_is_err(RG_ERR_NONE), 0, "RG_ERR_NONE is not an error");
+assert_eq(ranga_is_err(RG_ERR_INVALID_FORMAT), 1, "invalid format is an error");
+assert_eq(ranga_is_err(RG_ERR_OTHER), 1, "other is an error");
+assert_eq(ranga_is_ok(RG_ERR_NONE), 1, "RG_ERR_NONE is ok");
+assert_eq(ranga_is_ok(RG_ERR_BUFFER_TOO_SMALL), 0, "an error is not ok");
+
+# ================================================================
+# Rust-semantics math shims
+#
+# These assertions are the reason the shims exist: each one FAILS against the
+# bare Cyrius builtin and passes against Rust. They are parity locks — if a
+# future ganita release fixes the builtin, these still pass and the shim can
+# then be retired deliberately rather than by accident.
+# ================================================================
+test_group("rust-semantics shims");
+
+# --- _rg_pow: zero base ---
+# Rust: 0.0f64.powf(2.0) == 0.0 | bare ganita_f64_pow: NaN (exp(2*ln 0) = exp(-inf))
+# Reached by ordinary image data: a fully black channel raised to a gamma.
+assert_eq(_rg_pow(f64_from(0), f64_from(2)), 0, "pow(0, 2) == 0 (Rust), not NaN");
+assert_eq(_rg_pow(f64_from(0), f64_from(1)), 0, "pow(0, 1) == 0");
+
+# Rust: 0.0f64.powf(0.0) == 1.0
+assert_eq(f64_to(_rg_pow(f64_from(0), f64_from(0))), 1, "pow(0, 0) == 1 (Rust)");
+
+# Rust: 0.0f64.powf(-1.0) == +inf
+assert_eq(_rg_pow(f64_from(0), f64_from(0) - f64_from(1)), _RG_INF, "pow(0, -1) == +inf (Rust)");
+
+# Finite bases delegate unchanged — no in-range result moves.
+assert_eq(f64_to(_rg_pow(f64_from(2), f64_from(10))), 1024, "pow(2, 10) == 1024 delegates");
+assert_eq(f64_to(_rg_pow(f64_from(9), f64_from(2))), 81, "pow(9, 2) == 81 delegates");
+
+# --- _rg_exp: infinite arguments ---
+# Rust: (-inf).exp() == 0.0 | bare f64_exp: NaN.
+# Load-bearing for the Gaussian/bilateral kernels, where a large distance
+# drives exp(-d^2 / 2*sigma^2) to -inf; Rust contributes a 0.0 weight, the
+# unshimmed builtin poisons the accumulator with NaN.
+assert_eq(_rg_exp(_RG_NEG_INF), 0, "exp(-inf) == 0 (Rust), not NaN");
+assert_eq(_rg_exp(_RG_INF), _RG_INF, "exp(+inf) == +inf (Rust), not NaN");
+assert_eq(f64_to(_rg_exp(f64_from(0))), 1, "exp(0) == 1 delegates");
+
+# --- _rg_sin / _rg_cos: domain guard ---
+# x86 fsin/fcos are undefined for |x| >= 2^63 and return the argument
+# unchanged, so an unclamped caller angle would silently produce a "sine"
+# outside [-1, 1]. The shim reports the loss as NaN instead of fabricating.
+assert_eq(f64_to(_rg_sin(f64_from(0))), 0, "sin(0) == 0 delegates");
+assert_eq(f64_to(_rg_cos(f64_from(0))), 1, "cos(0) == 1 delegates");
+assert_eq(_rg_sin(_RG_INF), _RG_NAN, "sin(+inf) is NaN, not the argument");
+assert_eq(_rg_cos(_RG_INF), _RG_NAN, "cos(+inf) is NaN, not the argument");
+
+# ================================================================
+# ganita 1.1.0 f32 tier — the shim ranga does NOT have to write
+#
+# Locks the dependency that closed the f32 gap (cycc 6.5.24). If a future
+# toolchain bump regresses or renames these, it fails here rather than in the
+# middle of the colour port.
+# ================================================================
+test_group("ganita f32 tier");
+
+assert_eq(f32i(ganita_f32_sqrt(f32c(9))), 3, "f32 sqrt(9) == 3");
+assert_eq(f32i(ganita_f32_cbrt(f32c(27))), 3, "f32 cbrt(27) == 3 (Lab/Oklab)");
+assert_eq(f32i(ganita_f32_pow(f32c(2), f32c(10))), 1024, "f32 pow(2, 10) == 1024");
+assert_eq(f32i(ganita_f32_min(f32c(9), f32c(4))), 4, "f32 min(9, 4) == 4");
+assert_eq(f32i(ganita_f32_max(f32c(9), f32c(4))), 9, "f32 max(9, 4) == 9");
+assert_eq(f32i(ganita_f32_abs(f32_from(negf(7)))), 7, "f32 abs(-7) == 7");
+
+# The sign-magnitude case the ganita triage flagged: a naive raw-pattern
+# unsigned compare gets this backwards, because IEEE-754 orders negatives in
+# reverse and ranks any negative above every positive. ranga's Difference and
+# Subtract blend modes produce negatives before clamping, so this is the case
+# that would have shipped broken. See cyrius-port-plan.md §3 ⚠.
+var neg2 = f32_from(negf(2));
+var neg1 = f32_from(negf(1));
+var neg3 = f32_from(negf(3));
+assert_eq(f32i(ganita_f32_min(neg2, neg1)), (0 - 2), "f32 min(-2, -1) == -2 (both negative)");
+assert_eq(f32i(ganita_f32_max(neg2, neg1)), (0 - 1), "f32 max(-2, -1) == -1 (both negative)");
+assert_eq(f32i(ganita_f32_min(neg3, f32c(5))), (0 - 3), "f32 min(-3, 5) == -3 (mixed sign)");
+assert_eq(f32i(ganita_f32_max(neg3, f32c(5))), 5, "f32 max(-3, 5) == 5 (mixed sign)");
+
+var exit_code = assert_summary();
+# Clamp before exiting: assert_summary() returns the raw failure COUNT, and a
+# wait status is only 8 bits — an unclamped 256 / 512 / 768 failures would exit
+# 0 and score PASS. Any failure at all is exit 1. (Kept from the 6.5.27 port
+# scaffold; prakash's tcyr predates this and does not clamp.)
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

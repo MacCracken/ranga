@@ -1,0 +1,65 @@
+[package]
+name = "ranga"
+version = "${file:VERSION}"
+description = "ranga — core image processing: colour spaces, blend modes, pixel buffers, filters, GPU compute"
+license = "GPL-3.0-only"
+repository = "https://github.com/MacCracken/ranga"
+language = "cyrius"
+cyrius = "6.5.27"
+
+[build]
+entry = "src/main.cyr"
+output = "build/ranga"
+
+# `[lib]` declares the bundle layout that `cyrius distlib` writes into
+# `dist/ranga.cyr`. Image-processing modules live in `src/`; `lib/` holds only
+# vendored stdlib + first-party deps managed by `cyrius deps` — never our own
+# code. The bundler strips `include` lines, so every module listed here must be
+# self-contained and resolve stdlib from the consumer's `[deps] stdlib` list.
+#
+# Order is dependency order, and modules are appended **as the Rust→Cyrius port
+# lands them** — only ported modules are listed, matching prakash. See
+# docs/development/cyrius-port-plan.md §6 for the full sequence:
+#   error/constants → pixel → colour → convert/blend → composite/histogram
+#   → transform/filter → icc → spectral/hwaccel → gpu_*
+#
+# The `gpu_*` modules will land as a separate `[lib.gpu]` bundle rather than in
+# the core list — they pull mabda, and CPU-only consumers should not compile it.
+# That mirrors how prakash keeps `ai.cyr` out of its core bundle.
+[lib]
+modules = [
+    "src/error.cyr",
+]
+
+# Kept deliberately minimal: add a module here only when a ported `src/*.cyr`
+# actually calls into it, so the dependency surface stays legible and DCE has
+# less to prune.
+#
+#   math    — f64_clamp/min/max/lerp + the F64_* constants ganita needs
+#   ganita  — f64 transcendentals AND the 1.1.0 f32 scalar tier (23 fns,
+#             cycc 6.5.24) that replaces ranga's planned f32 shim
+#   slice   — bounds-checked [u8] over pixel data
+#   freelist— fl_alloc/fl_free; the >4 KB path is a direct mmap/munmap, which
+#             is what PixelBuffer and BufferPool want
+#   tagged  — Option/sum-type shapes
+#
+# Not yet listed, added when their modules land: simd (blend/convert kernels),
+# bench (tests/ranga.bcyr), bayan (serde replacement), sakshi (tracing
+# replacement), mabda (gpu_* bundle).
+[deps]
+stdlib = [
+    "syscalls",
+    "string",
+    "alloc",
+    "str",
+    "fmt",
+    "vec",
+    "io",
+    "args",
+    "assert",
+    "math",
+    "ganita",
+    "slice",
+    "freelist",
+    "tagged",
+]
