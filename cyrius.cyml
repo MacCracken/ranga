@@ -29,6 +29,9 @@ output = "build/ranga"
 [lib]
 modules = [
     "src/error.cyr",
+    "src/bytevec.cyr",
+    "src/pixel.cyr",
+    "src/color.cyr",
 ]
 
 # Kept deliberately minimal: add a module here only when a ported `src/*.cyr`

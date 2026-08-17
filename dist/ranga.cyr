@@ -117,6 +117,25 @@ fn _rg_pow(base, exp) {
     return ganita_f64_pow(base, exp);
 }
 
+# Rust `f64::cbrt`. There is NO f64 cbrt anywhere in the Cyrius tree —
+# `ganita_f32_cbrt` is the only one, and dropping to single precision would cost
+# ~8 significant digits in the CIE Lab transfer, where ranga's Delta-E tests
+# assert against tight tolerances.
+#
+# Built from pow, and the sign split is REQUIRED rather than decorative: pow
+# goes through exp(y*ln x), and ln of a negative is undefined, so a bare
+# _rg_pow returns garbage for every negative input while looking correct for
+# the positives a naive test would use. Same reasoning ganita applies in
+# ganita_f32_cbrt.
+#must_use
+fn _rg_cbrt(x) {
+    var third = f64_div(F64_ONE, f64_from(3));
+    if (f64_lt(x, 0) == 1) {
+        return f64_neg(_rg_pow(f64_abs(x), third));
+    }
+    return _rg_pow(x, third);
+}
+
 # Sine/cosine with an explicit domain guard. The x86 `fsin`/`fcos` instructions
 # are undefined for |x| >= 2^63 and return the ARGUMENT UNCHANGED there, so
 # `f64_sin(1e300)` yields 1e300. ranga takes a caller-supplied angle in
@@ -134,4 +153,953 @@ fn _rg_sin(x) {
 fn _rg_cos(x) {
     if (f64_lt(f64_abs(x), _RG_TRIG_LIMIT) == 0) { return _RG_NAN; }
     return f64_cos(x);
+}
+
+# --- bytevec.cyr ---
+
+# bytevec.cyr -- byte-granular growable buffer
+#
+# Cyrius `lib/vec.cyr` stores i64 SLOTS: every accessor is hardcoded to
+# `data + idx * 8`, so a 4-byte RGBA pixel would occupy 32 bytes and `bv_get`
+# would read past its neighbours. Image data is bytes, so ranga needs its own.
+# This is internalizing item 2 in docs/development/cyrius-port-plan.md §3 —
+# a candidate to upstream once a second consumer wants it.
+#
+# LAYOUT. A 24-byte header, separate from the payload:
+#   +0  data     pointer to the byte payload (0 for a zero-capacity vec)
+#   +8  len      bytes in use
+#   +16 cap      bytes allocated
+#
+# ALLOCATOR. fl_alloc / fl_free, not the bump allocator. The freelist routes
+# anything over 4 KB straight to mmap and gives it back with munmap on free
+# (lib/freelist.cyr:268), so a 1080p RGBA8 frame — 8,294,400 bytes — is one
+# syscall to acquire and one to release. The bump allocator has no individual
+# free at all, which would make BufferPool pointless.
+
+var _BV_HDR = 24;
+
+# Allocate a byte vector with `cap` bytes of capacity and length 0.
+# Returns 0 if either allocation fails.
+#must_use
+fn bv_new(cap) {
+    var v = fl_alloc(_BV_HDR);
+    if (v == 0) { return 0; }
+    var data = 0;
+    if (cap > 0) {
+        data = fl_alloc(cap);
+        if (data == 0) { fl_free(v); return 0; }
+    }
+    store64(v, data);
+    store64(v + 8, 0);
+    store64(v + 16, cap);
+    return v;
+}
+
+# Allocate a byte vector of `n` zeroed bytes, with length ALREADY set to n.
+# This is the PixelBuffer::zeroed path — the caller wants n addressable bytes,
+# not an empty vec with capacity.
+#must_use
+fn bv_zeroed(n) {
+    var v = fl_alloc(_BV_HDR);
+    if (v == 0) { return 0; }
+    var data = 0;
+    if (n > 0) {
+        data = fl_calloc(n);
+        if (data == 0) { fl_free(v); return 0; }
+    }
+    store64(v, data);
+    store64(v + 8, n);
+    store64(v + 16, n);
+    return v;
+}
+
+#must_use
+fn bv_data(v) { return load64(v); }
+#must_use
+fn bv_len(v) { return load64(v + 8); }
+#must_use
+fn bv_cap(v) { return load64(v + 16); }
+
+# Set the length without touching the payload. The caller is asserting that
+# `n` bytes are initialised; used after writing through bv_data directly.
+# Refuses to grow past capacity — returns RG_ERR_INVALID_PARAMETER rather than
+# handing back a vec whose len exceeds its allocation.
+fn bv_set_len(v, n) {
+    if (n < 0) { return RG_ERR_INVALID_PARAMETER; }
+    if (n > load64(v + 16)) { return RG_ERR_INVALID_PARAMETER; }
+    store64(v + 8, n);
+    return RG_ERR_NONE;
+}
+
+# Byte at `idx`, or 0 if out of range. Zero-extends — load8 does not sign-extend,
+# so a 0xFF byte reads back as 255, not -1.
+#must_use
+fn bv_get(v, idx) {
+    if (idx < 0) { return 0; }
+    if (idx >= load64(v + 8)) { return 0; }
+    return load8(load64(v) + idx);
+}
+
+# Write a byte at `idx`. Returns 1 on success, 0 if out of range — mirroring
+# PixelBuffer::set_rgba's bool rather than trapping, because the Rust original
+# reports out-of-bounds to the caller instead of panicking.
+fn bv_set(v, idx, val) {
+    if (idx < 0) { return 0; }
+    if (idx >= load64(v + 8)) { return 0; }
+    store8(load64(v) + idx, val & 255);
+    return 1;
+}
+
+# Unchecked read for hot loops where the caller has already bounds-checked the
+# whole row. Mirrors slice_unchecked_get_8.
+#must_use
+fn bv_get_unchecked(v, idx) {
+    return load8(load64(v) + idx);
+}
+
+fn bv_set_unchecked(v, idx, val) {
+    store8(load64(v) + idx, val & 255);
+    return RG_ERR_NONE;
+}
+
+# Grow capacity to at least `want`, preserving the first `len` bytes.
+# Doubling, so repeated pushes stay amortised O(1).
+fn bv_reserve(v, want) {
+    var cap = load64(v + 16);
+    if (want <= cap) { return RG_ERR_NONE; }
+    var ncap = cap;
+    if (ncap == 0) { ncap = 16; }
+    while (ncap < want) { ncap = ncap * 2; }
+    var ndata = fl_alloc(ncap);
+    if (ndata == 0) { return RG_ERR_ALLOCATION; }
+    var old = load64(v);
+    var len = load64(v + 8);
+    if (old != 0) {
+        if (len > 0) { memcpy(ndata, old, len); }
+        fl_free(old);
+    }
+    store64(v, ndata);
+    store64(v + 16, ncap);
+    return RG_ERR_NONE;
+}
+
+fn bv_push(v, val) {
+    var len = load64(v + 8);
+    var rc = bv_reserve(v, len + 1);
+    if (rc != RG_ERR_NONE) { return rc; }
+    store8(load64(v) + len, val & 255);
+    store64(v + 8, len + 1);
+    return RG_ERR_NONE;
+}
+
+# Set every byte in [0, len) to `val`. The memset path, for fill_solid.
+fn bv_fill(v, val) {
+    var len = load64(v + 8);
+    if (len > 0) { memset(load64(v), val & 255, len); }
+    return RG_ERR_NONE;
+}
+
+# Copy `n` bytes from a raw pointer into the vec at `off`. Bounds-checked
+# against len, not cap.
+fn bv_write(v, off, src, n) {
+    if (off < 0) { return RG_ERR_INVALID_PARAMETER; }
+    if (n < 0) { return RG_ERR_INVALID_PARAMETER; }
+    if (off + n > load64(v + 8)) { return RG_ERR_BUFFER_TOO_SMALL; }
+    if (n > 0) { memcpy(load64(v) + off, src, n); }
+    return RG_ERR_NONE;
+}
+
+# Deep copy. Length and capacity of the clone are both the source's length —
+# a clone is not expected to be pushed to.
+#must_use
+fn bv_clone(v) {
+    var len = load64(v + 8);
+    var c = bv_new(len);
+    if (c == 0) { return 0; }
+    if (len > 0) { memcpy(load64(c), load64(v), len); }
+    store64(c + 8, len);
+    return c;
+}
+
+# Truncate to length 0, keeping the allocation for reuse. This is the
+# BufferPool::acquire path — Vec::clear in the Rust original.
+fn bv_clear(v) {
+    store64(v + 8, 0);
+    return RG_ERR_NONE;
+}
+
+# Set length to `n`, zeroing any newly exposed bytes. Grows the allocation if
+# needed. Rust's Vec::resize(n, 0).
+fn bv_resize_zero(v, n) {
+    if (n < 0) { return RG_ERR_INVALID_PARAMETER; }
+    var rc = bv_reserve(v, n);
+    if (rc != RG_ERR_NONE) { return rc; }
+    var len = load64(v + 8);
+    if (n > len) { memset(load64(v) + len, 0, n - len); }
+    store64(v + 8, n);
+    return RG_ERR_NONE;
+}
+
+# Release the payload and the header. Safe on 0.
+fn bv_free(v) {
+    if (v == 0) { return RG_ERR_NONE; }
+    var data = load64(v);
+    if (data != 0) { fl_free(data); }
+    fl_free(v);
+    return RG_ERR_NONE;
+}
+
+# --- pixel.cyr ---
+
+# pixel.cyr -- pixel formats, buffers, views, and the buffer pool
+# Ported from rust-old/src/pixel.rs (783 lines).
+#
+# STRUCT LAYOUT. Cyrius struct FIELDS carry only i8/i16/i32/i64/struct/Str/Vec
+# sids — there is no u8, u32, or f32 field type, and `#derive(accessors)` emits
+# load64/store64 unconditionally, which is wrong for anything narrower. So these
+# are raw byte-offset records with hand-written width-correct accessors. This is
+# the pattern every later module follows; see cyrius-port-plan.md §2.
+#
+# PixelBuffer (32 bytes)          PixelView / PixelViewMut (32 bytes)
+#   +0  data    bytevec ptr         +0  data    raw byte pointer (borrowed)
+#   +8  width   i64                 +8  width   i64
+#   +16 height  i64                 +16 height  i64
+#   +24 format  i64                 +24 format  i64
+#
+# Rust's PixelView<'a> / PixelViewMut<'a> differ only by borrow mutability,
+# which Cyrius has no way to express — they share one representation here, and
+# the split survives as naming plus the mutating accessors being defined only
+# for the Mut form. The lifetime is the caller's responsibility: a view does not
+# own its bytes and must not outlive the buffer it came from.
+
+# ── PixelFormat ────────
+# Rust's `enum PixelFormat` — discriminants are the declaration order, matching
+# the Serialize/Deserialize wire form the Rust version emitted.
+var PF_RGBA8   = 0;
+var PF_ARGB8   = 1;
+var PF_RGB8    = 2;
+var PF_YUV420P = 3;
+var PF_NV12    = 4;
+var PF_RGBAF32 = 5;
+
+# Display impl. Hand-written because #derive(Serialize) on a Cyrius enum
+# compiles clean and emits a misnamed, crashing codec — see §3 item 6.
+#must_use
+fn pixel_format_name(f) {
+    if (f == PF_RGBA8) { return "RGBA8"; }
+    if (f == PF_ARGB8) { return "ARGB8"; }
+    if (f == PF_RGB8) { return "RGB8"; }
+    if (f == PF_YUV420P) { return "YUV420p"; }
+    if (f == PF_NV12) { return "NV12"; }
+    if (f == PF_RGBAF32) { return "RgbaF32"; }
+    return "unknown";
+}
+
+#must_use
+fn pixel_format_is_valid(f) {
+    if (f < 0) { return 0; }
+    if (f > PF_RGBAF32) { return 0; }
+    return 1;
+}
+
+# Planar formats have no meaningful interleaved row stride, so rows()/rows_mut()
+# reject them — the Rust version debug_asserts here, having previously produced
+# silently wrong slices.
+#must_use
+fn pixel_format_is_planar(f) {
+    if (f == PF_YUV420P) { return 1; }
+    if (f == PF_NV12) { return 1; }
+    return 0;
+}
+
+# Ceiling division, for the 4:2:0 chroma planes: an odd dimension still needs a
+# full chroma sample. Rust's usize::div_ceil.
+#must_use
+fn _div_ceil2(n) {
+    return (n + 1) / 2;
+}
+
+# Buffer size in bytes, or RG_ERR_ALLOCATION if the computation would overflow.
+# Rust returns Option<usize>; the error code takes the place of None, which is
+# safe because a real size is always >= 0 and every error code is negative.
+#
+# The overflow guard is not decorative: `Rgba8.checked_buffer_size(u32::MAX,
+# u32::MAX)` is None in Rust, and before 1.0.0 the unchecked version silently
+# wrapped. i64 is wide enough that u32*u32*16 cannot overflow it, so the guard
+# here is a range check against the same limit rather than a carry check.
+var _RG_SIZE_MAX = 0x7FFFFFFFFFFFFFF;
+
+#must_use
+fn pixel_format_checked_buffer_size(f, width, height) {
+    if (width < 0) { return RG_ERR_INVALID_PARAMETER; }
+    if (height < 0) { return RG_ERR_INVALID_PARAMETER; }
+    if (pixel_format_is_valid(f) == 0) { return RG_ERR_INVALID_FORMAT; }
+
+    var w = width;
+    var h = height;
+    if (w != 0) {
+        if (h > _RG_SIZE_MAX / w) { return RG_ERR_ALLOCATION; }
+    }
+    var px = w * h;
+
+    if (f == PF_RGBA8) { return px * 4; }
+    if (f == PF_ARGB8) { return px * 4; }
+    if (f == PF_RGB8) { return px * 3; }
+    if (f == PF_RGBAF32) { return px * 16; }
+    # Yuv420p and Nv12 share a size: a full Y plane plus two half-resolution
+    # chroma planes (Nv12 interleaves them, which does not change the total).
+    var chroma = _div_ceil2(w) * _div_ceil2(h) * 2;
+    return px + chroma;
+}
+
+# Bytes per pixel for the interleaved formats. 0 for the planar ones, which
+# have no single per-pixel stride.
+#must_use
+fn pixel_format_bytes_per_pixel(f) {
+    if (f == PF_RGBA8) { return 4; }
+    if (f == PF_ARGB8) { return 4; }
+    if (f == PF_RGB8) { return 3; }
+    if (f == PF_RGBAF32) { return 16; }
+    return 0;
+}
+
+# ── PixelBuffer ────────
+var _PB_SIZE = 32;
+
+# Take ownership of `bv` (a bytevec) as a buffer of the given shape, validating
+# that its length matches the format exactly. Writes an error code through
+# `err_out` and returns 0 on mismatch. On success the buffer OWNS bv — do not
+# free bv separately.
+#
+# Rust returns Result<Self, RangaError>; the err_out pointer is the Cyrius
+# equivalent (cyrius-port-plan.md §7 error model).
+#must_use
+fn pixel_buffer_new(bv, width, height, format, err_out) {
+    var want = pixel_format_checked_buffer_size(format, width, height);
+    if (ranga_is_err(want) == 1) { store64(err_out, want); return 0; }
+    if (bv_len(bv) != want) {
+        store64(err_out, RG_ERR_DIMENSION_MISMATCH);
+        return 0;
+    }
+    var b = fl_alloc(_PB_SIZE);
+    if (b == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    store64(b, bv);
+    store64(b + 8, width);
+    store64(b + 16, height);
+    store64(b + 24, format);
+    store64(err_out, RG_ERR_NONE);
+    return b;
+}
+
+# Allocate a zero-filled buffer of the given shape. Rust's PixelBuffer::zeroed,
+# which is infallible there; here an allocation can fail, so it reports through
+# err_out like pixel_buffer_new.
+#must_use
+fn pixel_buffer_zeroed(width, height, format, err_out) {
+    var want = pixel_format_checked_buffer_size(format, width, height);
+    if (ranga_is_err(want) == 1) { store64(err_out, want); return 0; }
+    var bv = bv_zeroed(want);
+    if (bv == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    var b = fl_alloc(_PB_SIZE);
+    if (b == 0) { bv_free(bv); store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    store64(b, bv);
+    store64(b + 8, width);
+    store64(b + 16, height);
+    store64(b + 24, format);
+    store64(err_out, RG_ERR_NONE);
+    return b;
+}
+
+#must_use
+fn pixel_buffer_bv(b) { return load64(b); }
+# Raw pointer to the first pixel byte — the hot-loop entry point.
+#must_use
+fn pixel_buffer_data(b) { return bv_data(load64(b)); }
+#must_use
+fn pixel_buffer_len(b) { return bv_len(load64(b)); }
+#must_use
+fn pixel_buffer_width(b) { return load64(b + 8); }
+#must_use
+fn pixel_buffer_height(b) { return load64(b + 16); }
+#must_use
+fn pixel_buffer_format(b) { return load64(b + 24); }
+
+#must_use
+fn pixel_buffer_pixel_count(b) {
+    return load64(b + 8) * load64(b + 16);
+}
+
+# Byte offset of row `y`. Returns RG_ERR_INVALID_FORMAT for planar formats,
+# matching rows()/rows_mut() rejecting them.
+#must_use
+fn pixel_buffer_row_offset(b, y) {
+    var f = load64(b + 24);
+    if (pixel_format_is_planar(f) == 1) { return RG_ERR_INVALID_FORMAT; }
+    if (y < 0) { return RG_ERR_INVALID_PARAMETER; }
+    if (y >= load64(b + 16)) { return RG_ERR_INVALID_PARAMETER; }
+    return y * load64(b + 8) * pixel_format_bytes_per_pixel(f);
+}
+
+#must_use
+fn pixel_buffer_row_bytes(b) {
+    var f = load64(b + 24);
+    if (pixel_format_is_planar(f) == 1) { return RG_ERR_INVALID_FORMAT; }
+    return load64(b + 8) * pixel_format_bytes_per_pixel(f);
+}
+
+# Read the RGBA pixel at (x, y) into the 4 bytes at `out`. Requires Rgba8.
+# Returns 1 on success, 0 for a wrong format or out-of-bounds coordinate —
+# Rust returns Option<[u8; 4]>, and 0 stands in for None.
+fn pixel_buffer_get_rgba(b, x, y, out) {
+    if (load64(b + 24) != PF_RGBA8) { return 0; }
+    if (x < 0) { return 0; }
+    if (y < 0) { return 0; }
+    if (x >= load64(b + 8)) { return 0; }
+    if (y >= load64(b + 16)) { return 0; }
+    var p = bv_data(load64(b)) + (y * load64(b + 8) + x) * 4;
+    store8(out, load8(p));
+    store8(out + 1, load8(p + 1));
+    store8(out + 2, load8(p + 2));
+    store8(out + 3, load8(p + 3));
+    return 1;
+}
+
+# Write the 4 bytes at `px` to the pixel at (x, y). Requires Rgba8.
+# Returns 1 on success, 0 for a wrong format or out-of-bounds coordinate.
+fn pixel_buffer_set_rgba(b, x, y, px) {
+    if (load64(b + 24) != PF_RGBA8) { return 0; }
+    if (x < 0) { return 0; }
+    if (y < 0) { return 0; }
+    if (x >= load64(b + 8)) { return 0; }
+    if (y >= load64(b + 16)) { return 0; }
+    var p = bv_data(load64(b)) + (y * load64(b + 8) + x) * 4;
+    store8(p, load8(px));
+    store8(p + 1, load8(px + 1));
+    store8(p + 2, load8(px + 2));
+    store8(p + 3, load8(px + 3));
+    return 1;
+}
+
+#must_use
+fn pixel_buffer_clone(b) {
+    var bv = bv_clone(load64(b));
+    if (bv == 0) { return 0; }
+    var c = fl_alloc(_PB_SIZE);
+    if (c == 0) { bv_free(bv); return 0; }
+    store64(c, bv);
+    store64(c + 8, load64(b + 8));
+    store64(c + 16, load64(b + 16));
+    store64(c + 24, load64(b + 24));
+    return c;
+}
+
+fn pixel_buffer_free(b) {
+    if (b == 0) { return RG_ERR_NONE; }
+    bv_free(load64(b));
+    fl_free(b);
+    return RG_ERR_NONE;
+}
+
+# ── PixelView / PixelViewMut ────────
+# Borrowed, non-owning. `data` is a raw pointer, not a bytevec, so a view can
+# wrap memory ranga did not allocate (a consumer's frame buffer).
+var _PV_SIZE = 32;
+
+#must_use
+fn _pixel_view_make(data, width, height, format, len, err_out) {
+    var want = pixel_format_checked_buffer_size(format, width, height);
+    if (ranga_is_err(want) == 1) { store64(err_out, want); return 0; }
+    if (len < want) { store64(err_out, RG_ERR_BUFFER_TOO_SMALL); return 0; }
+    var v = fl_alloc(_PV_SIZE);
+    if (v == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    store64(v, data);
+    store64(v + 8, width);
+    store64(v + 16, height);
+    store64(v + 24, format);
+    store64(err_out, RG_ERR_NONE);
+    return v;
+}
+
+#must_use
+fn pixel_view_new(data, len, width, height, format, err_out) {
+    return _pixel_view_make(data, width, height, format, len, err_out);
+}
+
+#must_use
+fn pixel_view_mut_new(data, len, width, height, format, err_out) {
+    return _pixel_view_make(data, width, height, format, len, err_out);
+}
+
+#must_use
+fn pixel_view_data(v) { return load64(v); }
+#must_use
+fn pixel_view_width(v) { return load64(v + 8); }
+#must_use
+fn pixel_view_height(v) { return load64(v + 16); }
+#must_use
+fn pixel_view_format(v) { return load64(v + 24); }
+#must_use
+fn pixel_view_pixel_count(v) { return load64(v + 8) * load64(v + 16); }
+
+# Borrow a buffer as a view. The view must not outlive `b`.
+#must_use
+fn pixel_buffer_as_view(b, err_out) {
+    return _pixel_view_make(bv_data(load64(b)), load64(b + 8), load64(b + 16),
+                            load64(b + 24), bv_len(load64(b)), err_out);
+}
+
+#must_use
+fn pixel_buffer_as_view_mut(b, err_out) {
+    return _pixel_view_make(bv_data(load64(b)), load64(b + 8), load64(b + 16),
+                            load64(b + 24), bv_len(load64(b)), err_out);
+}
+
+# Copy a view into a new owned buffer. Rust's PixelBuffer::from_view.
+#must_use
+fn pixel_buffer_from_view(v, err_out) {
+    var w = load64(v + 8);
+    var h = load64(v + 16);
+    var f = load64(v + 24);
+    var want = pixel_format_checked_buffer_size(f, w, h);
+    if (ranga_is_err(want) == 1) { store64(err_out, want); return 0; }
+    var bv = bv_zeroed(want);
+    if (bv == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    if (want > 0) { memcpy(bv_data(bv), load64(v), want); }
+    var b = fl_alloc(_PB_SIZE);
+    if (b == 0) { bv_free(bv); store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    store64(b, bv);
+    store64(b + 8, w);
+    store64(b + 16, h);
+    store64(b + 24, f);
+    store64(err_out, RG_ERR_NONE);
+    return b;
+}
+
+# A view owns nothing but its own 32-byte header.
+fn pixel_view_free(v) {
+    if (v == 0) { return RG_ERR_NONE; }
+    fl_free(v);
+    return RG_ERR_NONE;
+}
+
+# ── BufferPool ────────
+# Recycles pixel-sized allocations across frames. Backed by fl_alloc, so a
+# released 1080p buffer is a real munmap rather than a leak.
+#
+#   +0  slots       pointer to max_buffers i64 bytevec handles (0 = empty slot)
+#   +8  count       occupied slots
+#   +16 max_buffers capacity
+var _BP_SIZE = 24;
+
+#must_use
+fn buffer_pool_new(max_buffers) {
+    if (max_buffers < 0) { return 0; }
+    var p = fl_alloc(_BP_SIZE);
+    if (p == 0) { return 0; }
+    var slots = 0;
+    if (max_buffers > 0) {
+        slots = fl_calloc(max_buffers * 8);
+        if (slots == 0) { fl_free(p); return 0; }
+    }
+    store64(p, slots);
+    store64(p + 8, 0);
+    store64(p + 16, max_buffers);
+    return p;
+}
+
+#must_use
+fn buffer_pool_len(p) { return load64(p + 8); }
+
+#must_use
+fn buffer_pool_is_empty(p) {
+    if (load64(p + 8) == 0) { return 1; }
+    return 0;
+}
+
+# Acquire a zeroed buffer of at least `size` bytes.
+#
+# BEST-FIT, not first-fit: scan every occupied slot and take the SMALLEST one
+# that fits. 1.0.0 changed this from first-fit deliberately — first-fit hands a
+# 4K-sized buffer to a thumbnail request and then has nothing left for the next
+# 4K frame. Falls back to a fresh allocation when nothing fits.
+#must_use
+fn buffer_pool_acquire(p, size) {
+    var slots = load64(p);
+    var max = load64(p + 16);
+    var best = (0 - 1);
+    var best_cap = 0;
+    var i = 0;
+    while (i < max) {
+        var h = load64(slots + i * 8);
+        if (h != 0) {
+            var cap = bv_cap(h);
+            if (cap >= size) {
+                if (best < 0) { best = i; best_cap = cap; }
+                if (cap < best_cap) { best = i; best_cap = cap; }
+            }
+        }
+        i = i + 1;
+    }
+    if (best >= 0) {
+        var buf = load64(slots + best * 8);
+        store64(slots + best * 8, 0);
+        store64(p + 8, load64(p + 8) - 1);
+        bv_clear(buf);
+        bv_resize_zero(buf, size);
+        return buf;
+    }
+    return bv_zeroed(size);
+}
+
+# Return a buffer for reuse. If the pool is full the buffer is FREED, not
+# leaked — Rust dropped it here, and dropping is what fl_free does.
+fn buffer_pool_release(p, buf) {
+    if (buf == 0) { return RG_ERR_NONE; }
+    var slots = load64(p);
+    var max = load64(p + 16);
+    var i = 0;
+    while (i < max) {
+        if (load64(slots + i * 8) == 0) {
+            store64(slots + i * 8, buf);
+            store64(p + 8, load64(p + 8) + 1);
+            return RG_ERR_NONE;
+        }
+        i = i + 1;
+    }
+    bv_free(buf);
+    return RG_ERR_NONE;
+}
+
+fn buffer_pool_clear(p) {
+    var slots = load64(p);
+    var max = load64(p + 16);
+    var i = 0;
+    while (i < max) {
+        var h = load64(slots + i * 8);
+        if (h != 0) { bv_free(h); store64(slots + i * 8, 0); }
+        i = i + 1;
+    }
+    store64(p + 8, 0);
+    return RG_ERR_NONE;
+}
+
+fn buffer_pool_free(p) {
+    if (p == 0) { return RG_ERR_NONE; }
+    buffer_pool_clear(p);
+    var slots = load64(p);
+    if (slots != 0) { fl_free(slots); }
+    fl_free(p);
+    return RG_ERR_NONE;
+}
+
+# --- color.cyr ---
+
+# color.cyr -- colour spaces and conversions
+# Ported from rust-old/src/color.rs (1423 lines).
+#
+# STRUCT LAYOUT. Following the pattern settled in pixel.cyr: raw byte offsets
+# with width-correct accessors, because Cyrius struct fields have no f32, f64,
+# or u8 type and `#derive(accessors)` would emit load64/store64 for all of them.
+# See cyrius-port-plan.md §2.
+#
+#   Srgba   4 bytes    +0 r  +1 g  +2 b  +3 a          (u8 each, load8/store8)
+#   LinRgba 16 bytes   +0 r  +4 g  +8 b  +12 a         (f32 bits, load32/store32)
+#   CieXyz  24 bytes   +0 x  +8 y  +16 z               (f64 bits, load64/store64)
+#   CieLab  24 bytes   +0 l  +8 a  +16 b               (f64 bits)
+#
+# PRECISION. Rust carries LinRgba as f32 and XYZ/Lab as f64, and this port keeps
+# that split exactly rather than promoting everything to f64 — the sRGB matrices
+# and the Lab transfer are f64 in the original, and widening the f32 side would
+# move results that the ported Delta-E assertions pin.
+#
+# FLOAT LITERALS. Written as ordinary decimals (`0.4124564`). Cyrius lexes a
+# decimal with a fractional part as an f64, so the hex-bit-pattern style
+# prakash's port plan prescribes is no longer necessary — verified on 6.5.27.
+
+# ── ColorSpace ────────
+var CS_SRGB       = 0;
+var CS_LINEAR_RGB = 1;
+var CS_DISPLAY_P3 = 2;
+var CS_BT2020     = 3;
+var CS_CIE_XYZ    = 4;
+var CS_CIE_LAB    = 5;
+var CS_OKLAB      = 6;
+
+#must_use
+fn color_space_name(s) {
+    if (s == CS_SRGB) { return "sRGB"; }
+    if (s == CS_LINEAR_RGB) { return "Linear RGB"; }
+    if (s == CS_DISPLAY_P3) { return "Display P3"; }
+    if (s == CS_BT2020) { return "BT.2020"; }
+    if (s == CS_CIE_XYZ) { return "CIE XYZ"; }
+    if (s == CS_CIE_LAB) { return "CIE L*a*b*"; }
+    if (s == CS_OKLAB) { return "Oklab"; }
+    return "unknown";
+}
+
+# ── Srgba (4 x u8) ────────
+var _SRGBA_SIZE = 4;
+
+#must_use
+fn srgba_new(r, g, b, a) {
+    var c = fl_alloc(_SRGBA_SIZE);
+    if (c == 0) { return 0; }
+    store8(c, r & 255);
+    store8(c + 1, g & 255);
+    store8(c + 2, b & 255);
+    store8(c + 3, a & 255);
+    return c;
+}
+
+#must_use
+fn srgba_r(c) { return load8(c); }
+#must_use
+fn srgba_g(c) { return load8(c + 1); }
+#must_use
+fn srgba_b(c) { return load8(c + 2); }
+#must_use
+fn srgba_a(c) { return load8(c + 3); }
+
+fn srgba_set(c, r, g, b, a) {
+    store8(c, r & 255);
+    store8(c + 1, g & 255);
+    store8(c + 2, b & 255);
+    store8(c + 3, a & 255);
+    return RG_ERR_NONE;
+}
+
+fn srgba_free(c) { if (c != 0) { fl_free(c); } return RG_ERR_NONE; }
+
+# ── LinRgba (4 x f32) ────────
+var _LINRGBA_SIZE = 16;
+
+# Takes and returns f32 BIT PATTERNS, matching the f32_from / f32_to convention.
+#must_use
+fn lin_rgba_new(r, g, b, a) {
+    var c = fl_alloc(_LINRGBA_SIZE);
+    if (c == 0) { return 0; }
+    store32(c, r);
+    store32(c + 4, g);
+    store32(c + 8, b);
+    store32(c + 12, a);
+    return c;
+}
+
+#must_use
+fn lin_rgba_r(c) { return load32(c); }
+#must_use
+fn lin_rgba_g(c) { return load32(c + 4); }
+#must_use
+fn lin_rgba_b(c) { return load32(c + 8); }
+#must_use
+fn lin_rgba_a(c) { return load32(c + 12); }
+
+fn lin_rgba_free(c) { if (c != 0) { fl_free(c); } return RG_ERR_NONE; }
+
+# ── CieXyz (3 x f64) ────────
+var _CIEXYZ_SIZE = 24;
+
+#must_use
+fn cie_xyz_new(x, y, z) {
+    var c = fl_alloc(_CIEXYZ_SIZE);
+    if (c == 0) { return 0; }
+    store64(c, x);
+    store64(c + 8, y);
+    store64(c + 16, z);
+    return c;
+}
+
+#must_use
+fn cie_xyz_x(c) { return load64(c); }
+#must_use
+fn cie_xyz_y(c) { return load64(c + 8); }
+#must_use
+fn cie_xyz_z(c) { return load64(c + 16); }
+fn cie_xyz_free(c) { if (c != 0) { fl_free(c); } return RG_ERR_NONE; }
+
+# Rust's CieXyz::D65_WHITE / D50_WHITE associated consts. Functions rather than
+# globals because each call hands back a fresh heap record the caller owns.
+#must_use
+fn cie_xyz_d65_white() { return cie_xyz_new(0.95047, 1.00000, 1.08883); }
+#must_use
+fn cie_xyz_d50_white() { return cie_xyz_new(0.96422, 1.00000, 0.82521); }
+
+# ── CieLab (3 x f64) ────────
+var _CIELAB_SIZE = 24;
+
+#must_use
+fn cie_lab_new(l, a, b) {
+    var c = fl_alloc(_CIELAB_SIZE);
+    if (c == 0) { return 0; }
+    store64(c, l);
+    store64(c + 8, a);
+    store64(c + 16, b);
+    return c;
+}
+
+#must_use
+fn cie_lab_l(c) { return load64(c); }
+#must_use
+fn cie_lab_a(c) { return load64(c + 8); }
+#must_use
+fn cie_lab_b(c) { return load64(c + 16); }
+fn cie_lab_free(c) { if (c != 0) { fl_free(c); } return RG_ERR_NONE; }
+
+# ── sRGB transfer function ────────
+# The piecewise sRGB EOTF. Rust takes u8 and returns f32; this takes an integer
+# 0-255 and returns an f32 bit pattern.
+#
+# The f32 result is computed in f64 and narrowed once at the end. That is not a
+# shortcut: there is no f64 pow available at f32 width, and rounding at every
+# intermediate would drift from the Rust original, which also evaluates
+# `((s + 0.055) / 1.055).powf(2.4)` at full width before storing to f32.
+#must_use
+fn srgb_to_linear(c) {
+    var s = f64_div(f64_from(c & 255), 255.0);
+    # `<=`, matching Rust's `if s <= 0.04045`. f64_le is stdlib (lib/math.cyr:437);
+    # spelling it as a separate f64_lt then f64_eq works but evaluates twice.
+    if (f64_le(s, 0.04045) == 1) {
+        return f32_from(f64_div(s, 12.92));
+    }
+    return f32_from(_rg_pow(f64_div(f64_add(s, 0.055), 1.055), 2.4));
+}
+
+# Inverse sRGB transfer. Takes an f32 bit pattern, returns an integer 0-255.
+#
+# The +0.5 before the clamp is round-half-up, matching Rust's
+# `(s * 255.0 + 0.5).clamp(0.0, 255.0) as u8` — `as u8` truncates, so the
+# explicit +0.5 is what makes it round rather than floor. Dropping it darkens
+# every channel by up to one level.
+#must_use
+fn linear_to_srgb(c) {
+    var v = f32_to(c);
+    var s = 0;
+    if (f64_le(v, 0.0031308) == 1) {
+        s = f64_mul(v, 12.92);
+    }
+    if (f64_le(v, 0.0031308) == 0) {
+        var third = f64_div(F64_ONE, 2.4);
+        s = f64_sub(f64_mul(1.055, _rg_pow(v, third)), 0.055);
+    }
+    var scaled = f64_add(f64_mul(s, 255.0), 0.5);
+    if (f64_lt(scaled, 0) == 1) { return 0; }
+    if (f64_gt(scaled, 255.0) == 1) { return 255; }
+    return f64_to(scaled);
+}
+
+# ── Srgba <-> LinRgba ────────
+#must_use
+fn srgba_to_lin_rgba(c) {
+    return lin_rgba_new(srgb_to_linear(load8(c)),
+                        srgb_to_linear(load8(c + 1)),
+                        srgb_to_linear(load8(c + 2)),
+                        f32_from(f64_div(f64_from(load8(c + 3)), 255.0)));
+}
+
+#must_use
+fn lin_rgba_to_srgba(c) {
+    # Alpha is linear, not gamma-encoded — it goes through the plain scale,
+    # not linear_to_srgb. Running alpha through the transfer function is a
+    # classic compositing bug; the Rust original is explicit about it.
+    var av = f64_add(f64_mul(f32_to(load32(c + 12)), 255.0), 0.5);
+    var a = 0;
+    if (f64_gt(av, 255.0) == 1) { a = 255; }
+    if (f64_gt(av, 255.0) == 0) {
+        if (f64_lt(av, 0) == 1) { a = 0; }
+        if (f64_lt(av, 0) == 0) { a = f64_to(av); }
+    }
+    return srgba_new(linear_to_srgb(load32(c)),
+                     linear_to_srgb(load32(c + 4)),
+                     linear_to_srgb(load32(c + 8)),
+                     a);
+}
+
+# ── LinRgba <-> CieXyz (sRGB D65 primaries) ────────
+# SRGB_TO_XYZ / XYZ_TO_SRGB from rust-old/src/color.rs:451,458.
+#must_use
+fn lin_rgba_to_cie_xyz(c) {
+    var r = f32_to(load32(c));
+    var g = f32_to(load32(c + 4));
+    var b = f32_to(load32(c + 8));
+    var x = f64_add(f64_add(f64_mul(0.4124564, r), f64_mul(0.3575761, g)), f64_mul(0.1804375, b));
+    var y = f64_add(f64_add(f64_mul(0.2126729, r), f64_mul(0.7151522, g)), f64_mul(0.0721750, b));
+    var z = f64_add(f64_add(f64_mul(0.0193339, r), f64_mul(0.1191920, g)), f64_mul(0.9503041, b));
+    return cie_xyz_new(x, y, z);
+}
+
+# Alpha is set to 1.0 (fully opaque) — CieXyz carries no alpha.
+#must_use
+fn cie_xyz_to_lin_rgba(c) {
+    var x = load64(c);
+    var y = load64(c + 8);
+    var z = load64(c + 16);
+    var r = f64_add(f64_add(f64_mul(3.2404542, x), f64_mul(f64_neg(1.5371385), y)), f64_mul(f64_neg(0.4985314), z));
+    var g = f64_add(f64_add(f64_mul(f64_neg(0.9692660), x), f64_mul(1.8760108, y)), f64_mul(0.0415560, z));
+    var b = f64_add(f64_add(f64_mul(0.0556434, x), f64_mul(f64_neg(0.2040259), y)), f64_mul(1.0572252, z));
+    return lin_rgba_new(f32_from(r), f32_from(g), f32_from(b), f32_from(F64_ONE));
+}
+
+# ── CieXyz <-> CieLab (D65) ────────
+var _LAB_EPSILON = 0.008856;   # (6/29)^3
+var _LAB_KAPPA   = 903.3;      # (29/3)^3
+var _D65_XN      = 0.95047;
+var _D65_YN      = 1.00000;
+var _D65_ZN      = 1.08883;
+
+#must_use
+fn _lab_f(t) {
+    if (f64_gt(t, _LAB_EPSILON) == 1) { return _rg_cbrt(t); }
+    return f64_div(f64_add(f64_mul(_LAB_KAPPA, t), 16.0), 116.0);
+}
+
+#must_use
+fn _lab_f_inv(t) {
+    var lim = f64_div(f64_from(6), f64_from(29));
+    if (f64_gt(t, lim) == 1) { return f64_mul(f64_mul(t, t), t); }
+    var four29 = f64_div(f64_from(4), f64_from(29));
+    return f64_mul(f64_mul(f64_mul(3.0, lim), lim), f64_sub(t, four29));
+}
+
+#must_use
+fn cie_xyz_to_cie_lab(c) {
+    var fx = _lab_f(f64_div(load64(c), _D65_XN));
+    var fy = _lab_f(f64_div(load64(c + 8), _D65_YN));
+    var fz = _lab_f(f64_div(load64(c + 16), _D65_ZN));
+    return cie_lab_new(f64_sub(f64_mul(116.0, fy), 16.0),
+                       f64_mul(500.0, f64_sub(fx, fy)),
+                       f64_mul(200.0, f64_sub(fy, fz)));
+}
+
+#must_use
+fn cie_lab_to_cie_xyz(c) {
+    var fy = f64_div(f64_add(load64(c), 16.0), 116.0);
+    var fx = f64_add(f64_div(load64(c + 8), 500.0), fy);
+    var fz = f64_sub(fy, f64_div(load64(c + 16), 200.0));
+    return cie_xyz_new(f64_mul(_D65_XN, _lab_f_inv(fx)),
+                       f64_mul(_D65_YN, _lab_f_inv(fy)),
+                       f64_mul(_D65_ZN, _lab_f_inv(fz)));
+}
+
+# Convenience: sRGB byte -> Lab in one step. Frees the two intermediates.
+#must_use
+fn srgba_to_cie_lab(c) {
+    var lin = srgba_to_lin_rgba(c);
+    if (lin == 0) { return 0; }
+    var xyz = lin_rgba_to_cie_xyz(lin);
+    lin_rgba_free(lin);
+    if (xyz == 0) { return 0; }
+    var lab = cie_xyz_to_cie_lab(xyz);
+    cie_xyz_free(xyz);
+    return lab;
+}
+
+# ── Delta-E ────────
+# CIE76: plain Euclidean distance in Lab.
+#must_use
+fn delta_e_cie76(a, b) {
+    var dl = f64_sub(load64(a), load64(b));
+    var da = f64_sub(load64(a + 8), load64(b + 8));
+    var db = f64_sub(load64(a + 16), load64(b + 16));
+    var sum = f64_add(f64_add(f64_mul(dl, dl), f64_mul(da, da)), f64_mul(db, db));
+    return f64_sqrt(sum);
 }

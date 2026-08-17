@@ -1,0 +1,309 @@
+# color.cyr -- colour spaces and conversions
+# Ported from rust-old/src/color.rs (1423 lines).
+#
+# STRUCT LAYOUT. Following the pattern settled in pixel.cyr: raw byte offsets
+# with width-correct accessors, because Cyrius struct fields have no f32, f64,
+# or u8 type and `#derive(accessors)` would emit load64/store64 for all of them.
+# See cyrius-port-plan.md §2.
+#
+#   Srgba   4 bytes    +0 r  +1 g  +2 b  +3 a          (u8 each, load8/store8)
+#   LinRgba 16 bytes   +0 r  +4 g  +8 b  +12 a         (f32 bits, load32/store32)
+#   CieXyz  24 bytes   +0 x  +8 y  +16 z               (f64 bits, load64/store64)
+#   CieLab  24 bytes   +0 l  +8 a  +16 b               (f64 bits)
+#
+# PRECISION. Rust carries LinRgba as f32 and XYZ/Lab as f64, and this port keeps
+# that split exactly rather than promoting everything to f64 — the sRGB matrices
+# and the Lab transfer are f64 in the original, and widening the f32 side would
+# move results that the ported Delta-E assertions pin.
+#
+# FLOAT LITERALS. Written as ordinary decimals (`0.4124564`). Cyrius lexes a
+# decimal with a fractional part as an f64, so the hex-bit-pattern style
+# prakash's port plan prescribes is no longer necessary — verified on 6.5.27.
+
+# ── ColorSpace ────────
+var CS_SRGB       = 0;
+var CS_LINEAR_RGB = 1;
+var CS_DISPLAY_P3 = 2;
+var CS_BT2020     = 3;
+var CS_CIE_XYZ    = 4;
+var CS_CIE_LAB    = 5;
+var CS_OKLAB      = 6;
+
+#must_use
+fn color_space_name(s) {
+    if (s == CS_SRGB) { return "sRGB"; }
+    if (s == CS_LINEAR_RGB) { return "Linear RGB"; }
+    if (s == CS_DISPLAY_P3) { return "Display P3"; }
+    if (s == CS_BT2020) { return "BT.2020"; }
+    if (s == CS_CIE_XYZ) { return "CIE XYZ"; }
+    if (s == CS_CIE_LAB) { return "CIE L*a*b*"; }
+    if (s == CS_OKLAB) { return "Oklab"; }
+    return "unknown";
+}
+
+# ── Srgba (4 x u8) ────────
+var _SRGBA_SIZE = 4;
+
+#must_use
+fn srgba_new(r, g, b, a) {
+    var c = fl_alloc(_SRGBA_SIZE);
+    if (c == 0) { return 0; }
+    store8(c, r & 255);
+    store8(c + 1, g & 255);
+    store8(c + 2, b & 255);
+    store8(c + 3, a & 255);
+    return c;
+}
+
+#must_use
+fn srgba_r(c) { return load8(c); }
+#must_use
+fn srgba_g(c) { return load8(c + 1); }
+#must_use
+fn srgba_b(c) { return load8(c + 2); }
+#must_use
+fn srgba_a(c) { return load8(c + 3); }
+
+fn srgba_set(c, r, g, b, a) {
+    store8(c, r & 255);
+    store8(c + 1, g & 255);
+    store8(c + 2, b & 255);
+    store8(c + 3, a & 255);
+    return RG_ERR_NONE;
+}
+
+fn srgba_free(c) { if (c != 0) { fl_free(c); } return RG_ERR_NONE; }
+
+# ── LinRgba (4 x f32) ────────
+var _LINRGBA_SIZE = 16;
+
+# Takes and returns f32 BIT PATTERNS, matching the f32_from / f32_to convention.
+#must_use
+fn lin_rgba_new(r, g, b, a) {
+    var c = fl_alloc(_LINRGBA_SIZE);
+    if (c == 0) { return 0; }
+    store32(c, r);
+    store32(c + 4, g);
+    store32(c + 8, b);
+    store32(c + 12, a);
+    return c;
+}
+
+#must_use
+fn lin_rgba_r(c) { return load32(c); }
+#must_use
+fn lin_rgba_g(c) { return load32(c + 4); }
+#must_use
+fn lin_rgba_b(c) { return load32(c + 8); }
+#must_use
+fn lin_rgba_a(c) { return load32(c + 12); }
+
+fn lin_rgba_free(c) { if (c != 0) { fl_free(c); } return RG_ERR_NONE; }
+
+# ── CieXyz (3 x f64) ────────
+var _CIEXYZ_SIZE = 24;
+
+#must_use
+fn cie_xyz_new(x, y, z) {
+    var c = fl_alloc(_CIEXYZ_SIZE);
+    if (c == 0) { return 0; }
+    store64(c, x);
+    store64(c + 8, y);
+    store64(c + 16, z);
+    return c;
+}
+
+#must_use
+fn cie_xyz_x(c) { return load64(c); }
+#must_use
+fn cie_xyz_y(c) { return load64(c + 8); }
+#must_use
+fn cie_xyz_z(c) { return load64(c + 16); }
+fn cie_xyz_free(c) { if (c != 0) { fl_free(c); } return RG_ERR_NONE; }
+
+# Rust's CieXyz::D65_WHITE / D50_WHITE associated consts. Functions rather than
+# globals because each call hands back a fresh heap record the caller owns.
+#must_use
+fn cie_xyz_d65_white() { return cie_xyz_new(0.95047, 1.00000, 1.08883); }
+#must_use
+fn cie_xyz_d50_white() { return cie_xyz_new(0.96422, 1.00000, 0.82521); }
+
+# ── CieLab (3 x f64) ────────
+var _CIELAB_SIZE = 24;
+
+#must_use
+fn cie_lab_new(l, a, b) {
+    var c = fl_alloc(_CIELAB_SIZE);
+    if (c == 0) { return 0; }
+    store64(c, l);
+    store64(c + 8, a);
+    store64(c + 16, b);
+    return c;
+}
+
+#must_use
+fn cie_lab_l(c) { return load64(c); }
+#must_use
+fn cie_lab_a(c) { return load64(c + 8); }
+#must_use
+fn cie_lab_b(c) { return load64(c + 16); }
+fn cie_lab_free(c) { if (c != 0) { fl_free(c); } return RG_ERR_NONE; }
+
+# ── sRGB transfer function ────────
+# The piecewise sRGB EOTF. Rust takes u8 and returns f32; this takes an integer
+# 0-255 and returns an f32 bit pattern.
+#
+# The f32 result is computed in f64 and narrowed once at the end. That is not a
+# shortcut: there is no f64 pow available at f32 width, and rounding at every
+# intermediate would drift from the Rust original, which also evaluates
+# `((s + 0.055) / 1.055).powf(2.4)` at full width before storing to f32.
+#must_use
+fn srgb_to_linear(c) {
+    var s = f64_div(f64_from(c & 255), 255.0);
+    # `<=`, matching Rust's `if s <= 0.04045`. f64_le is stdlib (lib/math.cyr:437);
+    # spelling it as a separate f64_lt then f64_eq works but evaluates twice.
+    if (f64_le(s, 0.04045) == 1) {
+        return f32_from(f64_div(s, 12.92));
+    }
+    return f32_from(_rg_pow(f64_div(f64_add(s, 0.055), 1.055), 2.4));
+}
+
+# Inverse sRGB transfer. Takes an f32 bit pattern, returns an integer 0-255.
+#
+# The +0.5 before the clamp is round-half-up, matching Rust's
+# `(s * 255.0 + 0.5).clamp(0.0, 255.0) as u8` — `as u8` truncates, so the
+# explicit +0.5 is what makes it round rather than floor. Dropping it darkens
+# every channel by up to one level.
+#must_use
+fn linear_to_srgb(c) {
+    var v = f32_to(c);
+    var s = 0;
+    if (f64_le(v, 0.0031308) == 1) {
+        s = f64_mul(v, 12.92);
+    }
+    if (f64_le(v, 0.0031308) == 0) {
+        var third = f64_div(F64_ONE, 2.4);
+        s = f64_sub(f64_mul(1.055, _rg_pow(v, third)), 0.055);
+    }
+    var scaled = f64_add(f64_mul(s, 255.0), 0.5);
+    if (f64_lt(scaled, 0) == 1) { return 0; }
+    if (f64_gt(scaled, 255.0) == 1) { return 255; }
+    return f64_to(scaled);
+}
+
+# ── Srgba <-> LinRgba ────────
+#must_use
+fn srgba_to_lin_rgba(c) {
+    return lin_rgba_new(srgb_to_linear(load8(c)),
+                        srgb_to_linear(load8(c + 1)),
+                        srgb_to_linear(load8(c + 2)),
+                        f32_from(f64_div(f64_from(load8(c + 3)), 255.0)));
+}
+
+#must_use
+fn lin_rgba_to_srgba(c) {
+    # Alpha is linear, not gamma-encoded — it goes through the plain scale,
+    # not linear_to_srgb. Running alpha through the transfer function is a
+    # classic compositing bug; the Rust original is explicit about it.
+    var av = f64_add(f64_mul(f32_to(load32(c + 12)), 255.0), 0.5);
+    var a = 0;
+    if (f64_gt(av, 255.0) == 1) { a = 255; }
+    if (f64_gt(av, 255.0) == 0) {
+        if (f64_lt(av, 0) == 1) { a = 0; }
+        if (f64_lt(av, 0) == 0) { a = f64_to(av); }
+    }
+    return srgba_new(linear_to_srgb(load32(c)),
+                     linear_to_srgb(load32(c + 4)),
+                     linear_to_srgb(load32(c + 8)),
+                     a);
+}
+
+# ── LinRgba <-> CieXyz (sRGB D65 primaries) ────────
+# SRGB_TO_XYZ / XYZ_TO_SRGB from rust-old/src/color.rs:451,458.
+#must_use
+fn lin_rgba_to_cie_xyz(c) {
+    var r = f32_to(load32(c));
+    var g = f32_to(load32(c + 4));
+    var b = f32_to(load32(c + 8));
+    var x = f64_add(f64_add(f64_mul(0.4124564, r), f64_mul(0.3575761, g)), f64_mul(0.1804375, b));
+    var y = f64_add(f64_add(f64_mul(0.2126729, r), f64_mul(0.7151522, g)), f64_mul(0.0721750, b));
+    var z = f64_add(f64_add(f64_mul(0.0193339, r), f64_mul(0.1191920, g)), f64_mul(0.9503041, b));
+    return cie_xyz_new(x, y, z);
+}
+
+# Alpha is set to 1.0 (fully opaque) — CieXyz carries no alpha.
+#must_use
+fn cie_xyz_to_lin_rgba(c) {
+    var x = load64(c);
+    var y = load64(c + 8);
+    var z = load64(c + 16);
+    var r = f64_add(f64_add(f64_mul(3.2404542, x), f64_mul(f64_neg(1.5371385), y)), f64_mul(f64_neg(0.4985314), z));
+    var g = f64_add(f64_add(f64_mul(f64_neg(0.9692660), x), f64_mul(1.8760108, y)), f64_mul(0.0415560, z));
+    var b = f64_add(f64_add(f64_mul(0.0556434, x), f64_mul(f64_neg(0.2040259), y)), f64_mul(1.0572252, z));
+    return lin_rgba_new(f32_from(r), f32_from(g), f32_from(b), f32_from(F64_ONE));
+}
+
+# ── CieXyz <-> CieLab (D65) ────────
+var _LAB_EPSILON = 0.008856;   # (6/29)^3
+var _LAB_KAPPA   = 903.3;      # (29/3)^3
+var _D65_XN      = 0.95047;
+var _D65_YN      = 1.00000;
+var _D65_ZN      = 1.08883;
+
+#must_use
+fn _lab_f(t) {
+    if (f64_gt(t, _LAB_EPSILON) == 1) { return _rg_cbrt(t); }
+    return f64_div(f64_add(f64_mul(_LAB_KAPPA, t), 16.0), 116.0);
+}
+
+#must_use
+fn _lab_f_inv(t) {
+    var lim = f64_div(f64_from(6), f64_from(29));
+    if (f64_gt(t, lim) == 1) { return f64_mul(f64_mul(t, t), t); }
+    var four29 = f64_div(f64_from(4), f64_from(29));
+    return f64_mul(f64_mul(f64_mul(3.0, lim), lim), f64_sub(t, four29));
+}
+
+#must_use
+fn cie_xyz_to_cie_lab(c) {
+    var fx = _lab_f(f64_div(load64(c), _D65_XN));
+    var fy = _lab_f(f64_div(load64(c + 8), _D65_YN));
+    var fz = _lab_f(f64_div(load64(c + 16), _D65_ZN));
+    return cie_lab_new(f64_sub(f64_mul(116.0, fy), 16.0),
+                       f64_mul(500.0, f64_sub(fx, fy)),
+                       f64_mul(200.0, f64_sub(fy, fz)));
+}
+
+#must_use
+fn cie_lab_to_cie_xyz(c) {
+    var fy = f64_div(f64_add(load64(c), 16.0), 116.0);
+    var fx = f64_add(f64_div(load64(c + 8), 500.0), fy);
+    var fz = f64_sub(fy, f64_div(load64(c + 16), 200.0));
+    return cie_xyz_new(f64_mul(_D65_XN, _lab_f_inv(fx)),
+                       f64_mul(_D65_YN, _lab_f_inv(fy)),
+                       f64_mul(_D65_ZN, _lab_f_inv(fz)));
+}
+
+# Convenience: sRGB byte -> Lab in one step. Frees the two intermediates.
+#must_use
+fn srgba_to_cie_lab(c) {
+    var lin = srgba_to_lin_rgba(c);
+    if (lin == 0) { return 0; }
+    var xyz = lin_rgba_to_cie_xyz(lin);
+    lin_rgba_free(lin);
+    if (xyz == 0) { return 0; }
+    var lab = cie_xyz_to_cie_lab(xyz);
+    cie_xyz_free(xyz);
+    return lab;
+}
+
+# ── Delta-E ────────
+# CIE76: plain Euclidean distance in Lab.
+#must_use
+fn delta_e_cie76(a, b) {
+    var dl = f64_sub(load64(a), load64(b));
+    var da = f64_sub(load64(a + 8), load64(b + 8));
+    var db = f64_sub(load64(a + 16), load64(b + 16));
+    var sum = f64_add(f64_add(f64_mul(dl, dl), f64_mul(da, da)), f64_mul(db, db));
+    return f64_sqrt(sum);
+}

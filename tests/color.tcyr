@@ -1,0 +1,180 @@
+# color.tcyr — colour spaces and conversions
+# Ported from rust-old/src/color.rs #[cfg(test)] and its doctests.
+
+include "src/error.cyr"
+include "src/color.cyr"
+
+alloc_init();
+
+# f64 approximate equality — every colour assertion below is a float compare,
+# and exact equality would fail on the last mantissa bit for no useful reason.
+fn approx(a, b, eps) {
+    if (f64_lt(f64_abs(f64_sub(a, b)), eps) == 1) { return 1; }
+    return 0;
+}
+
+# ================================================================
+# sRGB transfer function
+# ================================================================
+test_group("srgb transfer");
+
+# Doctest anchors: the endpoints are exact.
+assert_eq(f64_to(f32_to(srgb_to_linear(0))), 0, "srgb_to_linear(0) == 0.0");
+assert_eq(approx(f32_to(srgb_to_linear(255)), F64_ONE, 0.0001), 1, "srgb_to_linear(255) == 1.0");
+
+# Doctest: mid-grey lands between 0.2 and 0.3 — the whole point of the curve
+# being non-linear. A linear ramp would put 128/255 at ~0.502.
+var mid = f32_to(srgb_to_linear(128));
+assert_eq(f64_gt(mid, 0.2), 1, "srgb_to_linear(128) > 0.2 (doctest)");
+assert_eq(f64_lt(mid, 0.3), 1, "srgb_to_linear(128) < 0.3 (doctest)");
+
+# Doctest: linear_to_srgb endpoints.
+assert_eq(linear_to_srgb(f32_from(f64_from(0))), 0, "linear_to_srgb(0.0) == 0 (doctest)");
+assert_eq(linear_to_srgb(f32_from(F64_ONE)), 255, "linear_to_srgb(1.0) == 255 (doctest)");
+
+# Clamping, not wrapping: out-of-gamut input saturates.
+assert_eq(linear_to_srgb(f32_from(2.0)), 255, "linear_to_srgb clamps above 1.0");
+assert_eq(linear_to_srgb(f32_from(f64_neg(F64_ONE))), 0, "linear_to_srgb clamps below 0.0");
+
+# Round-trip through both directions is stable for every byte value. This is
+# the assertion that catches a missing +0.5 rounding term — without it the
+# round trip drifts down by one level across most of the range.
+var i = 0;
+var roundtrip_ok = 1;
+while (i < 256) {
+    if (linear_to_srgb(srgb_to_linear(i)) != i) { roundtrip_ok = 0; }
+    i = i + 1;
+}
+assert_eq(roundtrip_ok, 1, "srgb -> linear -> srgb round-trips exactly for all 256 values");
+
+# ================================================================
+# Srgba <-> LinRgba
+# ================================================================
+test_group("srgba <-> linrgba");
+
+var white = srgba_new(255, 255, 255, 255);
+assert_eq(srgba_r(white), 255, "srgba_r");
+assert_eq(srgba_a(white), 255, "srgba_a");
+
+var lin = srgba_to_lin_rgba(white);
+assert_eq(approx(f32_to(lin_rgba_r(lin)), F64_ONE, 0.0001), 1, "white -> linear r == 1.0");
+assert_eq(approx(f32_to(lin_rgba_a(lin)), F64_ONE, 0.0001), 1, "alpha scales linearly to 1.0");
+
+var back = lin_rgba_to_srgba(lin);
+assert_eq(srgba_r(back), 255, "white round-trips r");
+assert_eq(srgba_a(back), 255, "white round-trips a");
+srgba_free(back);
+lin_rgba_free(lin);
+
+# Alpha must NOT go through the gamma transfer — it is linear coverage, not a
+# colour channel. Running it through srgb_to_linear would turn 128 into ~55.
+var half_alpha = srgba_new(0, 0, 0, 128);
+var la = srgba_to_lin_rgba(half_alpha);
+assert_eq(approx(f32_to(lin_rgba_a(la)), 0.50196, 0.001), 1, "alpha 128 -> 0.502 linearly, not gamma-decoded");
+var ba = lin_rgba_to_srgba(la);
+assert_eq(srgba_a(ba), 128, "alpha 128 round-trips");
+srgba_free(ba);
+lin_rgba_free(la);
+srgba_free(half_alpha);
+
+# ================================================================
+# CieXyz white points and the sRGB matrices
+# ================================================================
+test_group("cie xyz");
+
+var d65 = cie_xyz_d65_white();
+assert_eq(approx(cie_xyz_x(d65), 0.95047, 0.00001), 1, "D65 white X");
+assert_eq(approx(cie_xyz_y(d65), F64_ONE, 0.00001), 1, "D65 white Y == 1.0");
+assert_eq(approx(cie_xyz_z(d65), 1.08883, 0.00001), 1, "D65 white Z");
+
+var d50 = cie_xyz_d50_white();
+assert_eq(approx(cie_xyz_x(d50), 0.96422, 0.00001), 1, "D50 white X");
+cie_xyz_free(d50);
+
+# Linear white through the sRGB matrix must reproduce the D65 white point —
+# that is what it means for the matrix to be D65-adapted. A transposed or
+# mis-typed coefficient shows up here immediately.
+var linwhite = lin_rgba_new(f32_from(F64_ONE), f32_from(F64_ONE), f32_from(F64_ONE), f32_from(F64_ONE));
+var xyzwhite = lin_rgba_to_cie_xyz(linwhite);
+assert_eq(approx(cie_xyz_x(xyzwhite), 0.95047, 0.001), 1, "linear white -> D65 X");
+assert_eq(approx(cie_xyz_y(xyzwhite), F64_ONE, 0.001), 1, "linear white -> Y == 1.0");
+assert_eq(approx(cie_xyz_z(xyzwhite), 1.08883, 0.001), 1, "linear white -> D65 Z");
+
+# And back again — the two matrices are inverses.
+var linback = cie_xyz_to_lin_rgba(xyzwhite);
+assert_eq(approx(f32_to(lin_rgba_r(linback)), F64_ONE, 0.001), 1, "XYZ -> linear r round-trips");
+assert_eq(approx(f32_to(lin_rgba_g(linback)), F64_ONE, 0.001), 1, "XYZ -> linear g round-trips");
+assert_eq(approx(f32_to(lin_rgba_b(linback)), F64_ONE, 0.001), 1, "XYZ -> linear b round-trips");
+assert_eq(approx(f32_to(lin_rgba_a(linback)), F64_ONE, 0.0001), 1, "XYZ -> linear sets alpha opaque");
+lin_rgba_free(linback);
+lin_rgba_free(linwhite);
+cie_xyz_free(xyzwhite);
+
+# ================================================================
+# CieLab
+# ================================================================
+test_group("cie lab");
+
+# D65 white is L*=100, a*=0, b*=0 by definition. This exercises _rg_cbrt on the
+# t > epsilon branch; a broken cbrt moves L* off 100 immediately.
+var labwhite = cie_xyz_to_cie_lab(d65);
+assert_eq(approx(cie_lab_l(labwhite), 100.0, 0.01), 1, "D65 white is L* = 100");
+assert_eq(approx(cie_lab_a(labwhite), 0, 0.01), 1, "D65 white is a* = 0");
+assert_eq(approx(cie_lab_b(labwhite), 0, 0.01), 1, "D65 white is b* = 0");
+
+# Round-trip back to XYZ.
+var xyzback = cie_lab_to_cie_xyz(labwhite);
+assert_eq(approx(cie_xyz_x(xyzback), 0.95047, 0.0001), 1, "Lab -> XYZ round-trips X");
+assert_eq(approx(cie_xyz_y(xyzback), F64_ONE, 0.0001), 1, "Lab -> XYZ round-trips Y");
+assert_eq(approx(cie_xyz_z(xyzback), 1.08883, 0.0001), 1, "Lab -> XYZ round-trips Z");
+cie_xyz_free(xyzback);
+
+# Black exercises the OTHER branch of _lab_f — the linear segment below
+# epsilon, where cbrt is not used at all.
+var xyzblack = cie_xyz_new(0, 0, 0);
+var labblack = cie_xyz_to_cie_lab(xyzblack);
+assert_eq(approx(cie_lab_l(labblack), 0, 0.01), 1, "black is L* = 0 (linear segment)");
+cie_xyz_free(xyzblack);
+
+# sRGB white all the way through to Lab in one call.
+var labfromsrgb = srgba_to_cie_lab(white);
+assert_eq(approx(cie_lab_l(labfromsrgb), 100.0, 0.05), 1, "sRGB white -> L* = 100");
+
+# ================================================================
+# Delta-E CIE76
+# ================================================================
+test_group("delta-e cie76");
+
+assert_eq(approx(delta_e_cie76(labwhite, labwhite), 0, 0.00001), 1, "a colour is identical to itself");
+
+# Pure Euclidean distance: a 25-unit shift on a* alone is a delta of 25.
+var l1 = cie_lab_new(50.0, 25.0, 0);
+var l2 = cie_lab_new(50.0, 0, 0);
+assert_eq(approx(delta_e_cie76(l1, l2), 25.0, 0.0001), 1, "a* shift of 25 is delta 25");
+assert_eq(f64_gt(delta_e_cie76(l1, l2), 0), 1, "distinct colours have a positive delta (doctest)");
+
+# 3-4-5 triangle across the three axes: sqrt(9 + 16 + 0) = 5.
+var l3 = cie_lab_new(3.0, 4.0, 0);
+var l4 = cie_lab_new(0, 0, 0);
+assert_eq(approx(delta_e_cie76(l3, l4), 5.0, 0.0001), 1, "3-4-5 across L* and a*");
+
+# Symmetry.
+assert_eq(approx(delta_e_cie76(l1, l2), delta_e_cie76(l2, l1), 0.00001), 1, "delta-e is symmetric");
+
+cie_lab_free(l1); cie_lab_free(l2); cie_lab_free(l3); cie_lab_free(l4);
+cie_lab_free(labfromsrgb); cie_lab_free(labblack); cie_lab_free(labwhite);
+cie_xyz_free(d65);
+srgba_free(white);
+
+# ================================================================
+# ColorSpace display
+# ================================================================
+test_group("color space");
+
+assert_streq(color_space_name(CS_SRGB), "sRGB", "Display for sRGB");
+assert_streq(color_space_name(CS_CIE_LAB), "CIE L*a*b*", "Display for CIE Lab");
+assert_streq(color_space_name(CS_OKLAB), "Oklab", "Display for Oklab");
+
+var exit_code = assert_summary();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

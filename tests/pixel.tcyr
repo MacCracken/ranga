@@ -1,0 +1,252 @@
+# pixel.tcyr — bytevec + pixel module
+# Ported from rust-old/src/pixel.rs #[cfg(test)] and its doctests.
+
+include "src/error.cyr"
+include "src/bytevec.cyr"
+include "src/pixel.cyr"
+
+alloc_init();
+
+var err = fl_alloc(8);
+
+# ================================================================
+# bytevec — the Vec<u8> the Cyrius stdlib does not have
+# ================================================================
+test_group("bytevec");
+
+var v = bv_zeroed(16);
+assert_eq(bv_len(v), 16, "bv_zeroed sets len, not just capacity");
+assert_eq(bv_cap(v), 16, "bv_zeroed capacity");
+assert_eq(bv_get(v, 0), 0, "bv_zeroed is zero-filled");
+assert_eq(bv_get(v, 15), 0, "bv_zeroed zero-filled to the end");
+
+assert_eq(bv_set(v, 0, 255), 1, "bv_set in range returns 1");
+# load8 zero-extends: 0xFF must read back 255, not -1. A sign-extending read
+# here would silently corrupt every saturated channel in the library.
+assert_eq(bv_get(v, 0), 255, "0xFF reads back as 255, not -1");
+assert_eq(bv_set(v, 16, 1), 0, "bv_set past len returns 0");
+assert_eq(bv_set(v, (0 - 1), 1), 0, "bv_set negative index returns 0");
+assert_eq(bv_get(v, 16), 0, "bv_get past len returns 0");
+
+# Masking, not truncation-by-accident: a caller passing 256 gets 0.
+assert_eq(bv_set(v, 1, 256), 1, "bv_set accepts an out-of-byte value");
+assert_eq(bv_get(v, 1), 0, "256 masks to 0");
+assert_eq(bv_set(v, 1, 257), 1, "bv_set 257");
+assert_eq(bv_get(v, 1), 1, "257 masks to 1");
+
+bv_fill(v, 7);
+assert_eq(bv_get(v, 0), 7, "bv_fill writes the whole buffer");
+assert_eq(bv_get(v, 15), 7, "bv_fill reaches the last byte");
+
+var c = bv_clone(v);
+assert_eq(bv_len(c), 16, "clone length matches");
+assert_eq(bv_get(c, 15), 7, "clone copies contents");
+assert_eq(bv_set(c, 0, 99), 1, "clone is writable");
+assert_eq(bv_get(v, 0), 7, "clone is a deep copy — original unchanged");
+bv_free(c);
+
+# Growth preserves contents.
+var g = bv_new(2);
+assert_eq(bv_len(g), 0, "bv_new starts empty");
+bv_push(g, 10);
+bv_push(g, 20);
+bv_push(g, 30);
+assert_eq(bv_len(g), 3, "push grows length past initial capacity");
+assert_eq(bv_get(g, 0), 10, "push preserves byte 0 across a realloc");
+assert_eq(bv_get(g, 2), 30, "push stores the newest byte");
+
+bv_clear(g);
+assert_eq(bv_len(g), 0, "clear resets length");
+assert_eq(bv_cap(g) >= 3, 1, "clear keeps the allocation for reuse");
+
+bv_resize_zero(g, 5);
+assert_eq(bv_len(g), 5, "resize_zero sets length");
+assert_eq(bv_get(g, 4), 0, "resize_zero zeroes newly exposed bytes");
+bv_free(g);
+bv_free(v);
+
+# ================================================================
+# PixelFormat — doctest parity with rust-old/src/pixel.rs
+# ================================================================
+test_group("pixel format");
+
+assert_eq(pixel_format_checked_buffer_size(PF_RGB8, 10, 10), 300, "Rgb8 10x10 == 300 (doctest)");
+assert_eq(pixel_format_checked_buffer_size(PF_RGBA8, 10, 10), 400, "Rgba8 10x10 == 400");
+assert_eq(pixel_format_checked_buffer_size(PF_RGBAF32, 10, 10), 1600, "RgbaF32 10x10 == 1600");
+
+# The doctest's exact expression: 320*240 + 2*160*120
+var yuv_want = 320 * 240 + 2 * 160 * 120;
+assert_eq(pixel_format_checked_buffer_size(PF_YUV420P, 320, 240), yuv_want, "Yuv420p 320x240 (doctest)");
+assert_eq(pixel_format_checked_buffer_size(PF_NV12, 320, 240), 320 * 240 + 2 * 160 * 120, "Nv12 matches Yuv420p size");
+
+# Odd dimensions still need a full chroma sample — div_ceil, not floor. Flooring
+# here under-allocates and the last chroma row runs off the end of the buffer.
+assert_eq(pixel_format_checked_buffer_size(PF_YUV420P, 3, 3), 9 + 2 * 2 * 2, "Yuv420p 3x3 rounds chroma up");
+
+assert_eq(pixel_format_checked_buffer_size(PF_RGBA8, 0, 0), 0, "zero dimensions are legal");
+
+# Overflow guard. Rust returns None for (u32::MAX, u32::MAX); here it is an
+# error code. Before 1.0.0 the unchecked version silently wrapped.
+var ovf = pixel_format_checked_buffer_size(PF_RGBA8, 4294967295, 4294967295);
+assert_eq(ranga_is_err(ovf), 1, "u32::MAX square overflows");
+assert_eq(ranga_is_err(pixel_format_checked_buffer_size(PF_RGBA8, (0 - 1), 10)), 1, "negative width rejected");
+assert_eq(ranga_is_err(pixel_format_checked_buffer_size(99, 10, 10)), 1, "unknown format rejected");
+
+assert_eq(pixel_format_bytes_per_pixel(PF_RGBA8), 4, "Rgba8 is 4 bpp");
+assert_eq(pixel_format_bytes_per_pixel(PF_RGB8), 3, "Rgb8 is 3 bpp");
+assert_eq(pixel_format_bytes_per_pixel(PF_RGBAF32), 16, "RgbaF32 is 16 bpp");
+assert_eq(pixel_format_bytes_per_pixel(PF_YUV420P), 0, "planar has no per-pixel stride");
+assert_eq(pixel_format_is_planar(PF_YUV420P), 1, "Yuv420p is planar");
+assert_eq(pixel_format_is_planar(PF_NV12), 1, "Nv12 is planar");
+assert_eq(pixel_format_is_planar(PF_RGBA8), 0, "Rgba8 is not planar");
+
+assert_streq(pixel_format_name(PF_RGBA8), "RGBA8", "Display for Rgba8");
+assert_streq(pixel_format_name(PF_YUV420P), "YUV420p", "Display for Yuv420p");
+assert_streq(pixel_format_name(PF_RGBAF32), "RgbaF32", "Display for RgbaF32");
+
+# ================================================================
+# PixelBuffer
+# ================================================================
+test_group("pixel buffer");
+
+# Doctest: zeroed(64, 64, Rgba8) has 4096 pixels and 16384 bytes.
+var buf = pixel_buffer_zeroed(64, 64, PF_RGBA8, err);
+assert_eq(load64(err), RG_ERR_NONE, "zeroed succeeds");
+assert_eq(pixel_buffer_pixel_count(buf), 64 * 64, "pixel_count == 4096 (doctest)");
+assert_eq(pixel_buffer_len(buf), 64 * 64 * 4, "data len == 16384 (doctest)");
+assert_eq(pixel_buffer_width(buf), 64, "width");
+assert_eq(pixel_buffer_height(buf), 64, "height");
+assert_eq(pixel_buffer_format(buf), PF_RGBA8, "format");
+
+var px = fl_alloc(4);
+store8(px, 255); store8(px + 1, 0); store8(px + 2, 0); store8(px + 3, 255);
+assert_eq(pixel_buffer_set_rgba(buf, 0, 0, px), 1, "set_rgba in bounds (doctest)");
+
+var got = fl_alloc(4);
+assert_eq(pixel_buffer_get_rgba(buf, 0, 0, got), 1, "get_rgba in bounds");
+assert_eq(load8(got), 255, "red channel round-trips");
+assert_eq(load8(got + 3), 255, "alpha channel round-trips");
+
+# Doctest: get_rgba(99, 99) is None, set_rgba(99, 99) is false.
+assert_eq(pixel_buffer_get_rgba(buf, 99, 99, got), 0, "get_rgba out of bounds (doctest)");
+assert_eq(pixel_buffer_set_rgba(buf, 99, 99, px), 0, "set_rgba out of bounds (doctest)");
+assert_eq(pixel_buffer_get_rgba(buf, (0 - 1), 0, got), 0, "get_rgba negative x");
+
+# Row geometry, and the planar rejection rows()/rows_mut() enforce.
+assert_eq(pixel_buffer_row_bytes(buf), 64 * 4, "row_bytes");
+assert_eq(pixel_buffer_row_offset(buf, 2), 2 * 64 * 4, "row_offset");
+assert_eq(ranga_is_err(pixel_buffer_row_offset(buf, 64)), 1, "row_offset past height");
+
+var yuv = pixel_buffer_zeroed(320, 240, PF_YUV420P, err);
+assert_eq(load64(err), RG_ERR_NONE, "planar buffer allocates");
+assert_eq(ranga_is_err(pixel_buffer_row_offset(yuv, 0)), 1, "row_offset rejects planar");
+assert_eq(ranga_is_err(pixel_buffer_row_bytes(yuv)), 1, "row_bytes rejects planar");
+# Wrong-format guards: get/set_rgba are Rgba8-only.
+assert_eq(pixel_buffer_get_rgba(yuv, 0, 0, got), 0, "get_rgba rejects non-Rgba8");
+pixel_buffer_free(yuv);
+
+# new() validates length against the format.
+var short = bv_zeroed(4 * 4 * 4 - 1);
+var bad = pixel_buffer_new(short, 4, 4, PF_RGBA8, err);
+assert_eq(bad, 0, "new rejects a short buffer");
+assert_eq(load64(err), RG_ERR_DIMENSION_MISMATCH, "short buffer is a dimension mismatch");
+bv_free(short);
+
+var exact = bv_zeroed(4 * 4 * 4);
+var ok = pixel_buffer_new(exact, 4, 4, PF_RGBA8, err);
+assert_eq(load64(err), RG_ERR_NONE, "new accepts an exact-length buffer");
+assert_eq(pixel_buffer_len(ok), 64, "new keeps the buffer");
+pixel_buffer_free(ok);
+
+# clone is deep.
+var clone = pixel_buffer_clone(buf);
+assert_eq(pixel_buffer_len(clone), pixel_buffer_len(buf), "clone length matches");
+assert_eq(pixel_buffer_get_rgba(clone, 0, 0, got), 1, "clone readable");
+assert_eq(load8(got), 255, "clone copied the pixel");
+store8(px, 1);
+assert_eq(pixel_buffer_set_rgba(clone, 0, 0, px), 1, "clone writable");
+assert_eq(pixel_buffer_get_rgba(buf, 0, 0, got), 1, "original still readable");
+assert_eq(load8(got), 255, "clone is a deep copy — original unchanged");
+pixel_buffer_free(clone);
+
+# ================================================================
+# PixelView
+# ================================================================
+test_group("pixel view");
+
+var view = pixel_buffer_as_view(buf, err);
+assert_eq(load64(err), RG_ERR_NONE, "as_view succeeds");
+assert_eq(pixel_view_width(view), 64, "view width");
+assert_eq(pixel_view_pixel_count(view), 4096, "view pixel_count");
+assert_eq(pixel_view_format(view), PF_RGBA8, "view format");
+
+# from_view copies (doctest: buf.data() == data).
+var copied = pixel_buffer_from_view(view, err);
+assert_eq(load64(err), RG_ERR_NONE, "from_view succeeds");
+assert_eq(pixel_buffer_len(copied), 64 * 64 * 4, "from_view copies all bytes");
+assert_eq(pixel_buffer_get_rgba(copied, 0, 0, got), 1, "from_view data readable");
+assert_eq(load8(got), 255, "from_view copied the pixel");
+pixel_buffer_free(copied);
+pixel_view_free(view);
+
+# A view over too little memory is rejected rather than reading off the end.
+var small = bv_zeroed(8);
+var badview = pixel_view_new(bv_data(small), bv_len(small), 4, 4, PF_RGBA8, err);
+assert_eq(badview, 0, "view rejects an undersized buffer");
+assert_eq(load64(err), RG_ERR_BUFFER_TOO_SMALL, "undersized view is BUFFER_TOO_SMALL");
+bv_free(small);
+
+pixel_buffer_free(buf);
+
+# ================================================================
+# BufferPool — best-fit
+# ================================================================
+test_group("buffer pool");
+
+var pool = buffer_pool_new(4);
+assert_eq(buffer_pool_len(pool), 0, "new pool is empty");
+assert_eq(buffer_pool_is_empty(pool), 1, "is_empty on a new pool");
+
+var b1 = buffer_pool_acquire(pool, 100);
+assert_eq(bv_len(b1), 100, "acquire returns the requested length");
+assert_eq(bv_get(b1, 0), 0, "acquired buffer is zeroed");
+assert_eq(buffer_pool_is_empty(pool), 1, "acquire from an empty pool allocates fresh");
+
+buffer_pool_release(pool, b1);
+assert_eq(buffer_pool_len(pool), 1, "release pools the buffer");
+assert_eq(buffer_pool_is_empty(pool), 0, "pool is no longer empty");
+
+var b2 = buffer_pool_acquire(pool, 50);
+assert_eq(bv_len(b2), 50, "reused buffer is resized to the request");
+assert_eq(buffer_pool_len(pool), 0, "acquire removes it from the pool");
+
+# BEST-FIT. Pool a large and a small buffer, then ask for a size only the small
+# one comfortably fits: first-fit would hand back whichever it saw first and
+# strand the large one. 1.0.0 changed this deliberately.
+var big = bv_zeroed(10000);
+var small2 = bv_zeroed(200);
+buffer_pool_release(pool, big);
+buffer_pool_release(pool, small2);
+assert_eq(buffer_pool_len(pool), 2, "two buffers pooled");
+
+var fit = buffer_pool_acquire(pool, 150);
+assert_eq(bv_cap(fit) >= 150, 1, "acquired buffer is large enough");
+assert_eq(bv_cap(fit) < 10000, 1, "best-fit chose the 200-byte buffer, not the 10000-byte one");
+buffer_pool_release(pool, fit);
+
+# Over-capacity release frees rather than leaking or growing without bound.
+var p2 = buffer_pool_new(1);
+buffer_pool_release(p2, bv_zeroed(10));
+assert_eq(buffer_pool_len(p2), 1, "first release is pooled");
+buffer_pool_release(p2, bv_zeroed(10));
+assert_eq(buffer_pool_len(p2), 1, "release past max_buffers does not grow the pool");
+buffer_pool_free(p2);
+
+buffer_pool_clear(pool);
+assert_eq(buffer_pool_len(pool), 0, "clear empties the pool");
+buffer_pool_free(pool);
+bv_free(b2);
+
+var exit_code = assert_summary();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

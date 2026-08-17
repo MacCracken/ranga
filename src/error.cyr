@@ -110,6 +110,25 @@ fn _rg_pow(base, exp) {
     return ganita_f64_pow(base, exp);
 }
 
+# Rust `f64::cbrt`. There is NO f64 cbrt anywhere in the Cyrius tree —
+# `ganita_f32_cbrt` is the only one, and dropping to single precision would cost
+# ~8 significant digits in the CIE Lab transfer, where ranga's Delta-E tests
+# assert against tight tolerances.
+#
+# Built from pow, and the sign split is REQUIRED rather than decorative: pow
+# goes through exp(y*ln x), and ln of a negative is undefined, so a bare
+# _rg_pow returns garbage for every negative input while looking correct for
+# the positives a naive test would use. Same reasoning ganita applies in
+# ganita_f32_cbrt.
+#must_use
+fn _rg_cbrt(x) {
+    var third = f64_div(F64_ONE, f64_from(3));
+    if (f64_lt(x, 0) == 1) {
+        return f64_neg(_rg_pow(f64_abs(x), third));
+    }
+    return _rg_pow(x, third);
+}
+
 # Sine/cosine with an explicit domain guard. The x86 `fsin`/`fcos` instructions
 # are undefined for |x| >= 2^63 and return the ARGUMENT UNCHANGED there, so
 # `f64_sin(1e300)` yields 1e300. ranga takes a caller-supplied angle in

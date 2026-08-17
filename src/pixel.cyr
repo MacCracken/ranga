@@ -1,0 +1,440 @@
+# pixel.cyr -- pixel formats, buffers, views, and the buffer pool
+# Ported from rust-old/src/pixel.rs (783 lines).
+#
+# STRUCT LAYOUT. Cyrius struct FIELDS carry only i8/i16/i32/i64/struct/Str/Vec
+# sids — there is no u8, u32, or f32 field type, and `#derive(accessors)` emits
+# load64/store64 unconditionally, which is wrong for anything narrower. So these
+# are raw byte-offset records with hand-written width-correct accessors. This is
+# the pattern every later module follows; see cyrius-port-plan.md §2.
+#
+# PixelBuffer (32 bytes)          PixelView / PixelViewMut (32 bytes)
+#   +0  data    bytevec ptr         +0  data    raw byte pointer (borrowed)
+#   +8  width   i64                 +8  width   i64
+#   +16 height  i64                 +16 height  i64
+#   +24 format  i64                 +24 format  i64
+#
+# Rust's PixelView<'a> / PixelViewMut<'a> differ only by borrow mutability,
+# which Cyrius has no way to express — they share one representation here, and
+# the split survives as naming plus the mutating accessors being defined only
+# for the Mut form. The lifetime is the caller's responsibility: a view does not
+# own its bytes and must not outlive the buffer it came from.
+
+# ── PixelFormat ────────
+# Rust's `enum PixelFormat` — discriminants are the declaration order, matching
+# the Serialize/Deserialize wire form the Rust version emitted.
+var PF_RGBA8   = 0;
+var PF_ARGB8   = 1;
+var PF_RGB8    = 2;
+var PF_YUV420P = 3;
+var PF_NV12    = 4;
+var PF_RGBAF32 = 5;
+
+# Display impl. Hand-written because #derive(Serialize) on a Cyrius enum
+# compiles clean and emits a misnamed, crashing codec — see §3 item 6.
+#must_use
+fn pixel_format_name(f) {
+    if (f == PF_RGBA8) { return "RGBA8"; }
+    if (f == PF_ARGB8) { return "ARGB8"; }
+    if (f == PF_RGB8) { return "RGB8"; }
+    if (f == PF_YUV420P) { return "YUV420p"; }
+    if (f == PF_NV12) { return "NV12"; }
+    if (f == PF_RGBAF32) { return "RgbaF32"; }
+    return "unknown";
+}
+
+#must_use
+fn pixel_format_is_valid(f) {
+    if (f < 0) { return 0; }
+    if (f > PF_RGBAF32) { return 0; }
+    return 1;
+}
+
+# Planar formats have no meaningful interleaved row stride, so rows()/rows_mut()
+# reject them — the Rust version debug_asserts here, having previously produced
+# silently wrong slices.
+#must_use
+fn pixel_format_is_planar(f) {
+    if (f == PF_YUV420P) { return 1; }
+    if (f == PF_NV12) { return 1; }
+    return 0;
+}
+
+# Ceiling division, for the 4:2:0 chroma planes: an odd dimension still needs a
+# full chroma sample. Rust's usize::div_ceil.
+#must_use
+fn _div_ceil2(n) {
+    return (n + 1) / 2;
+}
+
+# Buffer size in bytes, or RG_ERR_ALLOCATION if the computation would overflow.
+# Rust returns Option<usize>; the error code takes the place of None, which is
+# safe because a real size is always >= 0 and every error code is negative.
+#
+# The overflow guard is not decorative: `Rgba8.checked_buffer_size(u32::MAX,
+# u32::MAX)` is None in Rust, and before 1.0.0 the unchecked version silently
+# wrapped. i64 is wide enough that u32*u32*16 cannot overflow it, so the guard
+# here is a range check against the same limit rather than a carry check.
+var _RG_SIZE_MAX = 0x7FFFFFFFFFFFFFF;
+
+#must_use
+fn pixel_format_checked_buffer_size(f, width, height) {
+    if (width < 0) { return RG_ERR_INVALID_PARAMETER; }
+    if (height < 0) { return RG_ERR_INVALID_PARAMETER; }
+    if (pixel_format_is_valid(f) == 0) { return RG_ERR_INVALID_FORMAT; }
+
+    var w = width;
+    var h = height;
+    if (w != 0) {
+        if (h > _RG_SIZE_MAX / w) { return RG_ERR_ALLOCATION; }
+    }
+    var px = w * h;
+
+    if (f == PF_RGBA8) { return px * 4; }
+    if (f == PF_ARGB8) { return px * 4; }
+    if (f == PF_RGB8) { return px * 3; }
+    if (f == PF_RGBAF32) { return px * 16; }
+    # Yuv420p and Nv12 share a size: a full Y plane plus two half-resolution
+    # chroma planes (Nv12 interleaves them, which does not change the total).
+    var chroma = _div_ceil2(w) * _div_ceil2(h) * 2;
+    return px + chroma;
+}
+
+# Bytes per pixel for the interleaved formats. 0 for the planar ones, which
+# have no single per-pixel stride.
+#must_use
+fn pixel_format_bytes_per_pixel(f) {
+    if (f == PF_RGBA8) { return 4; }
+    if (f == PF_ARGB8) { return 4; }
+    if (f == PF_RGB8) { return 3; }
+    if (f == PF_RGBAF32) { return 16; }
+    return 0;
+}
+
+# ── PixelBuffer ────────
+var _PB_SIZE = 32;
+
+# Take ownership of `bv` (a bytevec) as a buffer of the given shape, validating
+# that its length matches the format exactly. Writes an error code through
+# `err_out` and returns 0 on mismatch. On success the buffer OWNS bv — do not
+# free bv separately.
+#
+# Rust returns Result<Self, RangaError>; the err_out pointer is the Cyrius
+# equivalent (cyrius-port-plan.md §7 error model).
+#must_use
+fn pixel_buffer_new(bv, width, height, format, err_out) {
+    var want = pixel_format_checked_buffer_size(format, width, height);
+    if (ranga_is_err(want) == 1) { store64(err_out, want); return 0; }
+    if (bv_len(bv) != want) {
+        store64(err_out, RG_ERR_DIMENSION_MISMATCH);
+        return 0;
+    }
+    var b = fl_alloc(_PB_SIZE);
+    if (b == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    store64(b, bv);
+    store64(b + 8, width);
+    store64(b + 16, height);
+    store64(b + 24, format);
+    store64(err_out, RG_ERR_NONE);
+    return b;
+}
+
+# Allocate a zero-filled buffer of the given shape. Rust's PixelBuffer::zeroed,
+# which is infallible there; here an allocation can fail, so it reports through
+# err_out like pixel_buffer_new.
+#must_use
+fn pixel_buffer_zeroed(width, height, format, err_out) {
+    var want = pixel_format_checked_buffer_size(format, width, height);
+    if (ranga_is_err(want) == 1) { store64(err_out, want); return 0; }
+    var bv = bv_zeroed(want);
+    if (bv == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    var b = fl_alloc(_PB_SIZE);
+    if (b == 0) { bv_free(bv); store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    store64(b, bv);
+    store64(b + 8, width);
+    store64(b + 16, height);
+    store64(b + 24, format);
+    store64(err_out, RG_ERR_NONE);
+    return b;
+}
+
+#must_use
+fn pixel_buffer_bv(b) { return load64(b); }
+# Raw pointer to the first pixel byte — the hot-loop entry point.
+#must_use
+fn pixel_buffer_data(b) { return bv_data(load64(b)); }
+#must_use
+fn pixel_buffer_len(b) { return bv_len(load64(b)); }
+#must_use
+fn pixel_buffer_width(b) { return load64(b + 8); }
+#must_use
+fn pixel_buffer_height(b) { return load64(b + 16); }
+#must_use
+fn pixel_buffer_format(b) { return load64(b + 24); }
+
+#must_use
+fn pixel_buffer_pixel_count(b) {
+    return load64(b + 8) * load64(b + 16);
+}
+
+# Byte offset of row `y`. Returns RG_ERR_INVALID_FORMAT for planar formats,
+# matching rows()/rows_mut() rejecting them.
+#must_use
+fn pixel_buffer_row_offset(b, y) {
+    var f = load64(b + 24);
+    if (pixel_format_is_planar(f) == 1) { return RG_ERR_INVALID_FORMAT; }
+    if (y < 0) { return RG_ERR_INVALID_PARAMETER; }
+    if (y >= load64(b + 16)) { return RG_ERR_INVALID_PARAMETER; }
+    return y * load64(b + 8) * pixel_format_bytes_per_pixel(f);
+}
+
+#must_use
+fn pixel_buffer_row_bytes(b) {
+    var f = load64(b + 24);
+    if (pixel_format_is_planar(f) == 1) { return RG_ERR_INVALID_FORMAT; }
+    return load64(b + 8) * pixel_format_bytes_per_pixel(f);
+}
+
+# Read the RGBA pixel at (x, y) into the 4 bytes at `out`. Requires Rgba8.
+# Returns 1 on success, 0 for a wrong format or out-of-bounds coordinate —
+# Rust returns Option<[u8; 4]>, and 0 stands in for None.
+fn pixel_buffer_get_rgba(b, x, y, out) {
+    if (load64(b + 24) != PF_RGBA8) { return 0; }
+    if (x < 0) { return 0; }
+    if (y < 0) { return 0; }
+    if (x >= load64(b + 8)) { return 0; }
+    if (y >= load64(b + 16)) { return 0; }
+    var p = bv_data(load64(b)) + (y * load64(b + 8) + x) * 4;
+    store8(out, load8(p));
+    store8(out + 1, load8(p + 1));
+    store8(out + 2, load8(p + 2));
+    store8(out + 3, load8(p + 3));
+    return 1;
+}
+
+# Write the 4 bytes at `px` to the pixel at (x, y). Requires Rgba8.
+# Returns 1 on success, 0 for a wrong format or out-of-bounds coordinate.
+fn pixel_buffer_set_rgba(b, x, y, px) {
+    if (load64(b + 24) != PF_RGBA8) { return 0; }
+    if (x < 0) { return 0; }
+    if (y < 0) { return 0; }
+    if (x >= load64(b + 8)) { return 0; }
+    if (y >= load64(b + 16)) { return 0; }
+    var p = bv_data(load64(b)) + (y * load64(b + 8) + x) * 4;
+    store8(p, load8(px));
+    store8(p + 1, load8(px + 1));
+    store8(p + 2, load8(px + 2));
+    store8(p + 3, load8(px + 3));
+    return 1;
+}
+
+#must_use
+fn pixel_buffer_clone(b) {
+    var bv = bv_clone(load64(b));
+    if (bv == 0) { return 0; }
+    var c = fl_alloc(_PB_SIZE);
+    if (c == 0) { bv_free(bv); return 0; }
+    store64(c, bv);
+    store64(c + 8, load64(b + 8));
+    store64(c + 16, load64(b + 16));
+    store64(c + 24, load64(b + 24));
+    return c;
+}
+
+fn pixel_buffer_free(b) {
+    if (b == 0) { return RG_ERR_NONE; }
+    bv_free(load64(b));
+    fl_free(b);
+    return RG_ERR_NONE;
+}
+
+# ── PixelView / PixelViewMut ────────
+# Borrowed, non-owning. `data` is a raw pointer, not a bytevec, so a view can
+# wrap memory ranga did not allocate (a consumer's frame buffer).
+var _PV_SIZE = 32;
+
+#must_use
+fn _pixel_view_make(data, width, height, format, len, err_out) {
+    var want = pixel_format_checked_buffer_size(format, width, height);
+    if (ranga_is_err(want) == 1) { store64(err_out, want); return 0; }
+    if (len < want) { store64(err_out, RG_ERR_BUFFER_TOO_SMALL); return 0; }
+    var v = fl_alloc(_PV_SIZE);
+    if (v == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    store64(v, data);
+    store64(v + 8, width);
+    store64(v + 16, height);
+    store64(v + 24, format);
+    store64(err_out, RG_ERR_NONE);
+    return v;
+}
+
+#must_use
+fn pixel_view_new(data, len, width, height, format, err_out) {
+    return _pixel_view_make(data, width, height, format, len, err_out);
+}
+
+#must_use
+fn pixel_view_mut_new(data, len, width, height, format, err_out) {
+    return _pixel_view_make(data, width, height, format, len, err_out);
+}
+
+#must_use
+fn pixel_view_data(v) { return load64(v); }
+#must_use
+fn pixel_view_width(v) { return load64(v + 8); }
+#must_use
+fn pixel_view_height(v) { return load64(v + 16); }
+#must_use
+fn pixel_view_format(v) { return load64(v + 24); }
+#must_use
+fn pixel_view_pixel_count(v) { return load64(v + 8) * load64(v + 16); }
+
+# Borrow a buffer as a view. The view must not outlive `b`.
+#must_use
+fn pixel_buffer_as_view(b, err_out) {
+    return _pixel_view_make(bv_data(load64(b)), load64(b + 8), load64(b + 16),
+                            load64(b + 24), bv_len(load64(b)), err_out);
+}
+
+#must_use
+fn pixel_buffer_as_view_mut(b, err_out) {
+    return _pixel_view_make(bv_data(load64(b)), load64(b + 8), load64(b + 16),
+                            load64(b + 24), bv_len(load64(b)), err_out);
+}
+
+# Copy a view into a new owned buffer. Rust's PixelBuffer::from_view.
+#must_use
+fn pixel_buffer_from_view(v, err_out) {
+    var w = load64(v + 8);
+    var h = load64(v + 16);
+    var f = load64(v + 24);
+    var want = pixel_format_checked_buffer_size(f, w, h);
+    if (ranga_is_err(want) == 1) { store64(err_out, want); return 0; }
+    var bv = bv_zeroed(want);
+    if (bv == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    if (want > 0) { memcpy(bv_data(bv), load64(v), want); }
+    var b = fl_alloc(_PB_SIZE);
+    if (b == 0) { bv_free(bv); store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    store64(b, bv);
+    store64(b + 8, w);
+    store64(b + 16, h);
+    store64(b + 24, f);
+    store64(err_out, RG_ERR_NONE);
+    return b;
+}
+
+# A view owns nothing but its own 32-byte header.
+fn pixel_view_free(v) {
+    if (v == 0) { return RG_ERR_NONE; }
+    fl_free(v);
+    return RG_ERR_NONE;
+}
+
+# ── BufferPool ────────
+# Recycles pixel-sized allocations across frames. Backed by fl_alloc, so a
+# released 1080p buffer is a real munmap rather than a leak.
+#
+#   +0  slots       pointer to max_buffers i64 bytevec handles (0 = empty slot)
+#   +8  count       occupied slots
+#   +16 max_buffers capacity
+var _BP_SIZE = 24;
+
+#must_use
+fn buffer_pool_new(max_buffers) {
+    if (max_buffers < 0) { return 0; }
+    var p = fl_alloc(_BP_SIZE);
+    if (p == 0) { return 0; }
+    var slots = 0;
+    if (max_buffers > 0) {
+        slots = fl_calloc(max_buffers * 8);
+        if (slots == 0) { fl_free(p); return 0; }
+    }
+    store64(p, slots);
+    store64(p + 8, 0);
+    store64(p + 16, max_buffers);
+    return p;
+}
+
+#must_use
+fn buffer_pool_len(p) { return load64(p + 8); }
+
+#must_use
+fn buffer_pool_is_empty(p) {
+    if (load64(p + 8) == 0) { return 1; }
+    return 0;
+}
+
+# Acquire a zeroed buffer of at least `size` bytes.
+#
+# BEST-FIT, not first-fit: scan every occupied slot and take the SMALLEST one
+# that fits. 1.0.0 changed this from first-fit deliberately — first-fit hands a
+# 4K-sized buffer to a thumbnail request and then has nothing left for the next
+# 4K frame. Falls back to a fresh allocation when nothing fits.
+#must_use
+fn buffer_pool_acquire(p, size) {
+    var slots = load64(p);
+    var max = load64(p + 16);
+    var best = (0 - 1);
+    var best_cap = 0;
+    var i = 0;
+    while (i < max) {
+        var h = load64(slots + i * 8);
+        if (h != 0) {
+            var cap = bv_cap(h);
+            if (cap >= size) {
+                if (best < 0) { best = i; best_cap = cap; }
+                if (cap < best_cap) { best = i; best_cap = cap; }
+            }
+        }
+        i = i + 1;
+    }
+    if (best >= 0) {
+        var buf = load64(slots + best * 8);
+        store64(slots + best * 8, 0);
+        store64(p + 8, load64(p + 8) - 1);
+        bv_clear(buf);
+        bv_resize_zero(buf, size);
+        return buf;
+    }
+    return bv_zeroed(size);
+}
+
+# Return a buffer for reuse. If the pool is full the buffer is FREED, not
+# leaked — Rust dropped it here, and dropping is what fl_free does.
+fn buffer_pool_release(p, buf) {
+    if (buf == 0) { return RG_ERR_NONE; }
+    var slots = load64(p);
+    var max = load64(p + 16);
+    var i = 0;
+    while (i < max) {
+        if (load64(slots + i * 8) == 0) {
+            store64(slots + i * 8, buf);
+            store64(p + 8, load64(p + 8) + 1);
+            return RG_ERR_NONE;
+        }
+        i = i + 1;
+    }
+    bv_free(buf);
+    return RG_ERR_NONE;
+}
+
+fn buffer_pool_clear(p) {
+    var slots = load64(p);
+    var max = load64(p + 16);
+    var i = 0;
+    while (i < max) {
+        var h = load64(slots + i * 8);
+        if (h != 0) { bv_free(h); store64(slots + i * 8, 0); }
+        i = i + 1;
+    }
+    store64(p + 8, 0);
+    return RG_ERR_NONE;
+}
+
+fn buffer_pool_free(p) {
+    if (p == 0) { return RG_ERR_NONE; }
+    buffer_pool_clear(p);
+    var slots = load64(p);
+    if (slots != 0) { fl_free(slots); }
+    fl_free(p);
+    return RG_ERR_NONE;
+}

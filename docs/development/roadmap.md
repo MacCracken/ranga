@@ -45,13 +45,24 @@ Full module map and difficulty ratings: [`cyrius-port-plan.md`](cyrius-port-plan
   leaving 7.6 GB of `rust-old/target/` unignored
 - Doc-tree per [first-party-documentation.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-documentation.md)
 
-### M1 — Foundation
+### M1 — Foundation — in progress (183 assertions green)
 
-`error` ✅, `constants`, byte-vec, `pixel`, `color`. Settles the raw-byte-offset
-accessor pattern that every later module follows (plan §2).
+Settles the raw-byte-offset accessor pattern that every later module follows
+(plan §2). Automation learnings captured in
+[`port-mechanics.md`](port-mechanics.md).
 
 - [x] `src/error.cyr` — 8 error codes + `is_err`/`is_ok`, plus the Rust-semantics
-      shims `_rg_pow`/`_rg_exp`/`_rg_sin`/`_rg_cos`. 37 assertions green.
+      shims `_rg_pow`/`_rg_exp`/`_rg_cbrt`/`_rg_sin`/`_rg_cos`. 37 assertions.
+- [x] `src/bytevec.cyr` — the `Vec<u8>` the stdlib lacks (plan §3 item 2), on
+      `fl_alloc`/`fl_free` so a 1080p frame is one mmap each way.
+- [x] `src/pixel.cyr` — `PixelFormat` (6 formats, overflow-checked sizing),
+      `PixelBuffer`, `PixelView`/`PixelViewMut`, `BufferPool` (best-fit).
+      102 assertions.
+- [x] `src/color.cyr` — sRGB transfer, `Srgba`/`LinRgba`/`CieXyz`/`CieLab`,
+      the sRGB↔XYZ matrices, XYZ↔Lab, Delta-E CIE76. 44 assertions.
+- [ ] `src/color.cyr` remainder — Hsl, Cmyk, Oklab/Oklch, Display P3,
+      `color_temperature`, Delta-E CIE94 + CIEDE2000.
+- [ ] `src/constants.cyr` — shared EPS and matrices, once a second module needs them.
 
 ### M2 — Pixel ops
 
