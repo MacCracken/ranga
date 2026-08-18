@@ -582,6 +582,97 @@ fn _sx_rgb_mask16(out) {
     return RG_ERR_NONE;
 }
 
+# ── BT.601-family luma row (SSE2, pmaddwd) ────────
+# Y[i] = (cr*R + cg*G + cb*B) >> 8 for `pairs` groups of TWO pixels.
+#
+#   src   16 bytes per 2-pixel group is NOT required — 8 bytes are read per
+#         iteration (2 RGBA8 pixels) via movq.
+#   dst   2 bytes written per iteration.
+#   pairs number of 2-pixel groups; the caller handles an odd trailing pixel.
+#   coef  16 bytes: eight i16 laid out cr, cg, cb, 0, cr, cg, cb, 0.
+#
+# The coefficient triple must sum to 256 — that is what makes the `>> 8` an
+# exact divide, and it is why the alpha lane can be paired with a 0 coefficient
+# and simply dropped.
+#
+# HOW IT WORKS. punpcklbw zero-extends the 8 source bytes to eight i16. pmaddwd
+# multiplies adjacent i16 pairs and sums each pair into an i32, giving
+# [R0*cr + G0*cg], [B0*cb + 0], [R1*cr + G1*cg], [B1*cb + 0]. The pshufd/paddd
+# pair then folds lane 1 into lane 0 and lane 3 into lane 2, completing each
+# pixel's dot product. psrld does the >> 8, the second pshufd brings the two
+# results into adjacent lanes, and the two packs narrow i32 -> i16 -> u8.
+#
+# The whole loop is inside one asm block — a per-2-pixel function call would
+# cost more than the vectorisation saves, since Cyrius does not inline.
+# Every byte below came from `as` + `objdump`, INCLUDING the two branch
+# displacements (0x3b forward, 0xc5 backward); hand-counting a rel8 is exactly
+# the kind of thing that silently jumps into the middle of an instruction.
+#
+# rsi/rdi/rcx are pushed and popped rather than assumed scratch — the in-tree
+# precedent (_fhm_probe16) only clobbers rax, and this is more aggressive.
+fn _sx_luma_row_sse2(src, dst, pairs, coef) {
+    #ifdef CYRIUS_ARCH_X86
+    asm {
+        0x56;                           # push rsi
+        0x57;                           # push rdi
+        0x51;                           # push rcx
+        0x48; 0x8B; 0x75; 0xF8;         # mov rsi, [rbp-8]    ; src
+        0x48; 0x8B; 0x7D; 0xF0;         # mov rdi, [rbp-16]   ; dst
+        0x48; 0x8B; 0x4D; 0xE8;         # mov rcx, [rbp-24]   ; pairs
+        0x48; 0x8B; 0x45; 0xE0;         # mov rax, [rbp-32]   ; coef
+        0xF3; 0x0F; 0x6F; 0x08;         # movdqu xmm1, [rax]
+        0x66; 0x0F; 0xEF; 0xD2;         # pxor xmm2, xmm2
+        0x48; 0x85; 0xC9;               # test rcx, rcx
+        0x74; 0x3B;                     # jz done
+        0xF3; 0x0F; 0x7E; 0x06;         # movq xmm0, [rsi]        ; 2 pixels
+        0x66; 0x0F; 0x60; 0xC2;         # punpcklbw xmm0, xmm2    ; -> 8x i16
+        0x66; 0x0F; 0xF5; 0xC1;         # pmaddwd xmm0, xmm1
+        0x66; 0x0F; 0x70; 0xD8; 0xB1;   # pshufd xmm3, xmm0, 0xB1
+        0x66; 0x0F; 0xFE; 0xC3;         # paddd xmm0, xmm3        ; fold pairs
+        0x66; 0x0F; 0x72; 0xD0; 0x08;   # psrld xmm0, 8
+        0x66; 0x0F; 0x70; 0xC0; 0x08;   # pshufd xmm0, xmm0, 0x08 ; lanes 0,2 -> 0,1
+        0x66; 0x0F; 0x6B; 0xC0;         # packssdw xmm0, xmm0
+        0x66; 0x0F; 0x67; 0xC0;         # packuswb xmm0, xmm0
+        0x66; 0x0F; 0x7E; 0xC0;         # movd eax, xmm0
+        0x66; 0x89; 0x07;               # mov [rdi], ax           ; 2 luma bytes
+        0x48; 0x83; 0xC6; 0x08;         # add rsi, 8
+        0x48; 0x83; 0xC7; 0x02;         # add rdi, 2
+        0x48; 0xFF; 0xC9;               # dec rcx
+        0x75; 0xC5;                     # jnz loop
+        0x59;                           # pop rcx
+        0x5F;                           # pop rdi
+        0x5E;                           # pop rsi
+    }
+    #endif
+    #ifndef CYRIUS_ARCH_X86
+    var cr = load16(coef);
+    var cg = load16(coef + 2);
+    var cb = load16(coef + 4);
+    var i = 0;
+    while (i < pairs) {
+        var s = src + i * 8;
+        store8(dst + i * 2, (cr * load8(s) + cg * load8(s + 1) + cb * load8(s + 2)) >> 8);
+        store8(dst + i * 2 + 1, (cr * load8(s + 4) + cg * load8(s + 5) + cb * load8(s + 6)) >> 8);
+        i = i + 1;
+    }
+    #endif
+    return RG_ERR_NONE;
+}
+
+# Build the 16-byte coefficient vector the kernel expects: eight i16 laid out
+# cr, cg, cb, 0 twice.
+fn _sx_luma_coef(out, cr, cg, cb) {
+    store16(out, cr);
+    store16(out + 2, cg);
+    store16(out + 4, cb);
+    store16(out + 6, 0);
+    store16(out + 8, cr);
+    store16(out + 10, cg);
+    store16(out + 12, cb);
+    store16(out + 14, 0);
+    return RG_ERR_NONE;
+}
+
 # --- pixel.cyr ---
 
 # pixel.cyr -- pixel formats, buffers, views, and the buffer pool
@@ -4317,17 +4408,46 @@ fn grayscale(buf) {
 }
 
 # ── invert ────────
+# VECTORISED with the existing primitives — no new assembly needed. `255 - c`
+# for a byte is exactly a saturating subtract from 255 (the saturation never
+# triggers, since c <= 255), so psubusb does the whole thing and the alpha lane
+# is restored by the same mask-and-select brightness uses.
 fn invert(buf) {
     var rc = _fp_validate_rgba8(buf);
     if (rc != RG_ERR_NONE) { return rc; }
     var p = pixel_buffer_data(buf);
     var n = pixel_buffer_pixel_count(buf);
-    var i = 0;
+
+    var groups = n / 4;
+    if (groups > 0) {
+        var amask = fl_alloc(16);
+        var rmask = fl_alloc(16);
+        var ones = fl_alloc(16);
+        var tmp = fl_alloc(16);
+        if (amask == 0) { return RG_ERR_ALLOCATION; }
+        if (rmask == 0) { fl_free(amask); return RG_ERR_ALLOCATION; }
+        if (ones == 0) { fl_free(amask); fl_free(rmask); return RG_ERR_ALLOCATION; }
+        if (tmp == 0) { fl_free(amask); fl_free(rmask); fl_free(ones); return RG_ERR_ALLOCATION; }
+        _sx_alpha_mask16(amask);
+        _sx_rgb_mask16(rmask);
+        _sx_splat16(ones, 255);
+
+        var g = 0;
+        while (g < groups) {
+            var q = p + g * 16;
+            _sx_subus16(ones, q, tmp);            # 255 - c, lane-wise
+            _sx_select16(q, tmp, amask, rmask, q);
+            g = g + 1;
+        }
+        fl_free(amask); fl_free(rmask); fl_free(ones); fl_free(tmp);
+    }
+
+    var i = groups * 4;
     while (i < n) {
-        var q = p + i * 4;
-        store8(q, 255 - load8(q));
-        store8(q + 1, 255 - load8(q + 1));
-        store8(q + 2, 255 - load8(q + 2));
+        var q2 = p + i * 4;
+        store8(q2, 255 - load8(q2));
+        store8(q2 + 1, 255 - load8(q2 + 1));
+        store8(q2 + 2, 255 - load8(q2 + 2));
         i = i + 1;
     }
     return RG_ERR_NONE;
@@ -5883,8 +6003,21 @@ fn _cv_div_ceil2(n) { return (n + 1) / 2; }
 #   BT.601  (77, 150, 29)
 #   BT.709  (54, 183, 19)
 #   BT.2020 (67, 174, 15)
+# VECTORISED via _sx_luma_row_sse2 (pmaddwd, 2 pixels per iteration) with a
+# scalar tail for an odd width. The coefficient vector is rebuilt per row, which
+# is one 16-byte store against a whole row of work — hoisting it to the caller
+# would tangle three public entry points for no measurable gain.
 fn _cv_y_row(src, dst, n, cr, cg, cb) {
-    var i = 0;
+    var pairs = n / 2;
+    if (pairs > 0) {
+        var coef = fl_alloc(16);
+        if (coef == 0) { return RG_ERR_ALLOCATION; }
+        _sx_luma_coef(coef, cr, cg, cb);
+        _sx_luma_row_sse2(src, dst, pairs, coef);
+        fl_free(coef);
+    }
+    # Odd trailing pixel, if any.
+    var i = pairs * 2;
     while (i < n) {
         var p = src + i * 4;
         store8(dst + i, (cr * load8(p) + cg * load8(p + 1) + cb * load8(p + 2)) >> 8);
@@ -5965,22 +6098,33 @@ fn _cv_yuv420p_to_rgba(buf, kr, kgu, kgv, kb, err_out) {
     var u_off = w * h;
     var v_off = u_off + cw * ch;
 
+    # Row pointers hoisted out of the inner loop. Computing
+    # `sp + u_off + cy * cw + cx` per pixel costs a divide, a clamp and two
+    # multiplies for values that only change once per ROW — and once per two
+    # rows for the chroma. This was measured at 44.2x Rust before hoisting.
     var y = 0;
     while (y < h) {
         var cy = y / 2;
         if (cy > ch - 1) { cy = ch - 1; }
+        var yrow = sp + y * w;
+        var urow = sp + u_off + cy * cw;
+        var vrow = sp + v_off + cy * cw;
+        var orow = dp + y * w * 4;
+        var cxmax = cw - 1;
         var x = 0;
         while (x < w) {
-            var cx = x / 2;
-            if (cx > cw - 1) { cx = cw - 1; }
-            var yi = load8(sp + y * w + x);
-            var u = load8(sp + u_off + cy * cw + cx) - 128;
-            var v = load8(sp + v_off + cy * cw + cx) - 128;
-            var oi = (y * w + x) * 4;
-            store8(dp + oi, _cv_clamp255(yi + ((kr * v) >>> 8)));
-            store8(dp + oi + 1, _cv_clamp255(yi - ((kgu * u + kgv * v) >>> 8)));
-            store8(dp + oi + 2, _cv_clamp255(yi + ((kb * u) >>> 8)));
-            store8(dp + oi + 3, 255);
+            # `>> 1` rather than `/ 2`: x is non-negative, and the logical shift
+            # is the cheaper form.
+            var cx = x >> 1;
+            if (cx > cxmax) { cx = cxmax; }
+            var yi = load8(yrow + x);
+            var u = load8(urow + cx) - 128;
+            var v = load8(vrow + cx) - 128;
+            var oi = x * 4;
+            store8(orow + oi, _cv_clamp255(yi + ((kr * v) >>> 8)));
+            store8(orow + oi + 1, _cv_clamp255(yi - ((kgu * u + kgv * v) >>> 8)));
+            store8(orow + oi + 2, _cv_clamp255(yi + ((kb * u) >>> 8)));
+            store8(orow + oi + 3, 255);
             x = x + 1;
         }
         y = y + 1;
@@ -6096,23 +6240,28 @@ fn nv12_to_rgba(buf, err_out) {
     var ch = _cv_div_ceil2(h);
     var uv_off = w * h;
 
+    # Same hoist as _cv_yuv420p_to_rgba; here the UV plane is interleaved so one
+    # row pointer serves both channels.
     var y = 0;
     while (y < h) {
         var cy = y / 2;
         if (cy > ch - 1) { cy = ch - 1; }
+        var yrow = sp + y * w;
+        var uvrow = sp + uv_off + cy * cw * 2;
+        var orow = dp + y * w * 4;
+        var cxmax = cw - 1;
         var x = 0;
         while (x < w) {
-            var cx = x / 2;
-            if (cx > cw - 1) { cx = cw - 1; }
-            var yi = load8(sp + y * w + x);
-            var ci = uv_off + (cy * cw + cx) * 2;
-            var u = load8(sp + ci) - 128;
-            var v = load8(sp + ci + 1) - 128;
-            var oi = (y * w + x) * 4;
-            store8(dp + oi, _cv_clamp255(yi + ((359 * v) >>> 8)));
-            store8(dp + oi + 1, _cv_clamp255(yi - ((88 * u + 183 * v) >>> 8)));
-            store8(dp + oi + 2, _cv_clamp255(yi + ((454 * u) >>> 8)));
-            store8(dp + oi + 3, 255);
+            var cx = x >> 1;
+            if (cx > cxmax) { cx = cxmax; }
+            var yi = load8(yrow + x);
+            var u = load8(uvrow + cx * 2) - 128;
+            var v = load8(uvrow + cx * 2 + 1) - 128;
+            var oi = x * 4;
+            store8(orow + oi, _cv_clamp255(yi + ((359 * v) >>> 8)));
+            store8(orow + oi + 1, _cv_clamp255(yi - ((88 * u + 183 * v) >>> 8)));
+            store8(orow + oi + 2, _cv_clamp255(yi + ((454 * u) >>> 8)));
+            store8(orow + oi + 3, 255);
             x = x + 1;
         }
         y = y + 1;

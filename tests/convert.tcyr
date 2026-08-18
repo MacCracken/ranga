@@ -5,6 +5,7 @@
 include "src/error.cyr"
 include "src/bytevec.cyr"
 include "src/pixel.cyr"
+include "src/simd_u8.cyr"
 include "src/convert.cyr"
 
 alloc_init();
@@ -70,6 +71,28 @@ assert_eq(load8(yrow), 14, "BT.2020 blue is 14 — lowest of the three");
 set1(src4, 128, 128, 128);
 _cv_y_row(src4, yrow, 1, 77, 150, 29);
 assert_eq(load8(yrow), 128, "a neutral grey maps to its own value");
+
+# ODD width: the SIMD kernel does floor(n/2) pairs and the scalar tail does the
+# rest. Three pixels means one pair plus one tail pixel, and all three must be
+# right — a tail that starts at the wrong index silently drops or doubles one.
+var src3 = fl_alloc(12);
+var y3 = fl_alloc(3);
+set1(src3, 255, 0, 0);
+set1(src3 + 4, 0, 255, 0);
+set1(src3 + 8, 0, 0, 255);
+_cv_y_row(src3, y3, 3, 77, 150, 29);
+assert_eq(load8(y3), 76, "odd-width row: pixel 0 (SIMD pair)");
+assert_eq(load8(y3 + 1), 149, "odd-width row: pixel 1 (SIMD pair)");
+assert_eq(load8(y3 + 2), 28, "odd-width row: pixel 2 (SCALAR tail)");
+fl_free(src3); fl_free(y3);
+
+# A single-pixel row is all tail, no SIMD at all.
+var src1 = fl_alloc(4);
+var y1 = fl_alloc(1);
+set1(src1, 0, 255, 0);
+_cv_y_row(src1, y1, 1, 77, 150, 29);
+assert_eq(load8(y1), 149, "a 1-pixel row is handled entirely by the scalar tail");
+fl_free(src1); fl_free(y1);
 
 # The row loop must reach the LAST pixel.
 set1(src4, 255, 255, 255); set1(src4 + 4, 0, 0, 0);

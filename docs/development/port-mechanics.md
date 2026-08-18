@@ -295,6 +295,20 @@ then differentially test the asm against it across an exhaustive sweep. That is
 what makes hand-assembled bytes reviewable — a reader checks the fallback and
 trusts the test, rather than checking the hex.
 
+**Put the loop inside the asm block, and let the assembler compute the
+branches.** A per-iteration function call costs more than the vectorisation
+saves, since Cyrius does not inline. But do not hand-count a `rel8`
+displacement: write the whole loop to a `.s` file, run `as` + `objdump`, and
+copy the bytes out — the branch offsets come back computed and correct
+(`0x3b` forward and `0xc5` backward for the luma kernel). Hand-counting is how
+you end up jumping into the middle of an instruction.
+
+**Reach for the cheap techniques first.** Of the three speedups in the second
+performance pass, the 2.33x came from *reusing already-proven primitives*
+(`255 - c` is a saturating subtract) and the 1.40x from *hoisting a loop
+invariant* — neither needed a byte of new assembly. Only the third was a genuine
+new kernel. Check for those two before opening an editor on hex.
+
 ### Hot loops must be written flat — helper calls are real calls
 
 Cyrius leaves general function inlining **off by default** (`_INLINE_OK`, a

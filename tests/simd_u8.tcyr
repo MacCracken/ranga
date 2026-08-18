@@ -208,6 +208,97 @@ assert_eq(load8(o + 2), 255, "blue SATURATES rather than wrapping");
 assert_eq(load8(o + 3), 40, "alpha is restored byte-identical, NOT shifted to 70");
 assert_eq(load8(o + 15), 40, "the last pixel's alpha is preserved too");
 
+# ================================================================
+# luma row kernel (SSE2 pmaddwd) — differential against scalar
+# ================================================================
+test_group("luma row sse2");
+
+var lsrc = fl_alloc(64);
+var ldst = fl_alloc(16);
+var coef = fl_alloc(16);
+
+# Scalar reference, written independently of the kernel.
+fn ref_luma(r, g, bl, cr, cg, cb) { return (cr * r + cg * g + cb * bl) >> 8; }
+
+_sx_luma_coef(coef, 77, 150, 29);
+
+# Pure primaries and white, two pixels per call.
+setb(lsrc, 0, 255); setb(lsrc, 1, 0); setb(lsrc, 2, 0); setb(lsrc, 3, 255);
+setb(lsrc, 4, 0); setb(lsrc, 5, 255); setb(lsrc, 6, 0); setb(lsrc, 7, 255);
+_sx_luma_row_sse2(lsrc, ldst, 1, coef);
+assert_eq(load8(ldst), 76, "SSE2 luma: pure red is 76");
+assert_eq(load8(ldst + 1), 149, "SSE2 luma: pure green is 149 (second pixel of the pair)");
+
+setb(lsrc, 0, 0); setb(lsrc, 1, 0); setb(lsrc, 2, 255); setb(lsrc, 3, 255);
+setb(lsrc, 4, 255); setb(lsrc, 5, 255); setb(lsrc, 6, 255); setb(lsrc, 7, 255);
+_sx_luma_row_sse2(lsrc, ldst, 1, coef);
+assert_eq(load8(ldst), 28, "SSE2 luma: pure blue is 28");
+assert_eq(load8(ldst + 1), 255, "SSE2 luma: white is exactly 255");
+
+# ALPHA MUST BE IGNORED. It is paired with a zero coefficient, so a pixel whose
+# alpha differs must give the same luma — if the coefficient vector were laid
+# out wrong, alpha would leak into the result.
+setb(lsrc, 0, 100); setb(lsrc, 1, 100); setb(lsrc, 2, 100); setb(lsrc, 3, 0);
+setb(lsrc, 4, 100); setb(lsrc, 5, 100); setb(lsrc, 6, 100); setb(lsrc, 7, 255);
+_sx_luma_row_sse2(lsrc, ldst, 1, coef);
+assert_eq(load8(ldst), load8(ldst + 1), "alpha does NOT affect luma (paired with a 0 coefficient)");
+assert_eq(load8(ldst), 100, "a neutral grey maps to its own value");
+
+# Differential sweep against the scalar reference across the byte range, with
+# the two pixels of each pair carrying DIFFERENT values so a kernel that
+# broadcast one pixel across both lanes would fail.
+var lm = 0;
+var rv = 0;
+while (rv < 256) {
+    var gv = 0;
+    while (gv < 256) {
+        setb(lsrc, 0, rv); setb(lsrc, 1, gv); setb(lsrc, 2, 255 - rv); setb(lsrc, 3, 17);
+        setb(lsrc, 4, gv); setb(lsrc, 5, 255 - gv); setb(lsrc, 6, rv); setb(lsrc, 7, 200);
+        _sx_luma_row_sse2(lsrc, ldst, 1, coef);
+        if (load8(ldst) != ref_luma(rv, gv, 255 - rv, 77, 150, 29)) { lm = lm + 1; }
+        if (load8(ldst + 1) != ref_luma(gv, 255 - gv, rv, 77, 150, 29)) { lm = lm + 1; }
+        gv = gv + 11;
+    }
+    rv = rv + 11;
+}
+assert_eq(lm, 0, "SSE2 luma matches the scalar reference across the input sweep");
+
+# The other two standards, so the coefficient vector is not hard-wired.
+_sx_luma_coef(coef, 54, 183, 19);
+setb(lsrc, 0, 255); setb(lsrc, 1, 0); setb(lsrc, 2, 0); setb(lsrc, 3, 255);
+setb(lsrc, 4, 0); setb(lsrc, 5, 255); setb(lsrc, 6, 0); setb(lsrc, 7, 255);
+_sx_luma_row_sse2(lsrc, ldst, 1, coef);
+assert_eq(load8(ldst), 53, "BT.709 coefficients: red is 53");
+assert_eq(load8(ldst + 1), 182, "BT.709 coefficients: green is 182");
+
+_sx_luma_coef(coef, 67, 174, 15);
+_sx_luma_row_sse2(lsrc, ldst, 1, coef);
+assert_eq(load8(ldst), 66, "BT.2020 coefficients: red is 66");
+
+# Multiple pairs in one call — the internal loop, including its backward jump.
+_sx_luma_coef(coef, 77, 150, 29);
+var mi = 0;
+while (mi < 8) {
+    setb(lsrc, mi * 4, mi * 30); setb(lsrc, mi * 4 + 1, mi * 30);
+    setb(lsrc, mi * 4 + 2, mi * 30); setb(lsrc, mi * 4 + 3, 255);
+    mi = mi + 1;
+}
+_sx_luma_row_sse2(lsrc, ldst, 4, coef);
+var loop_ok = 1;
+mi = 0;
+while (mi < 8) {
+    if (load8(ldst + mi) != mi * 30) { loop_ok = 0; }
+    mi = mi + 1;
+}
+assert_eq(loop_ok, 1, "the internal loop covers all 4 pairs (8 pixels) correctly");
+
+# A zero count must be a clean no-op, not a wrapped loop counter.
+store8(ldst, 42);
+_sx_luma_row_sse2(lsrc, ldst, 0, coef);
+assert_eq(load8(ldst), 42, "pairs == 0 writes nothing (the test/jz guard)");
+
+fl_free(lsrc); fl_free(ldst); fl_free(coef);
+
 fl_free(a); fl_free(b); fl_free(o); fl_free(m); fl_free(nm);
 fl_free(px); fl_free(shifted); fl_free(val);
 

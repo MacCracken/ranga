@@ -51,49 +51,50 @@ only — GPU and spectral land with M5/M6). Rust numbers are the frozen 1.0.1
 series. **Both were taken on the same loaded machine under a `powersave`
 governor**, so the ratio is more trustworthy than either absolute.
 
-**Median ratio: 10.6× slower than Rust; range 3.8×–79.9×.** That is the expected
+**Median ratio: 9.5× slower than Rust; range 3.2×–46.9×** (first measurement was
+10.6× median, 3.8×–79.9× — two performance passes have since landed). That is the expected
 shape for a scalar-first port and is not alarming on its own — Rust's numbers
 include SSE2/AVX2 kernels for the paths that dominate this list, and ranga's
 Cyrius side currently has vector code only in `brightness`. The interesting
 information is in the spread, not the median.
 
-| Benchmark | Rust v1.0.1 | Cyrius v2.0 (scalar) | Ratio |
+| Benchmark | Rust v1.0.1 | Cyrius v2.0 | Ratio |
 |---|---:|---:|---:|
 | `blend_pixel_normal` | 12.8 ns | 84.0 ns | 6.6× |
-| `blend_pixel_modes/Multiply` | 13.8 ns | 91.0 ns | 6.6× |
-| `blend_pixel_modes/SoftLight` | 17.1 ns | 147.0 ns | 8.6× |
-| `blend_pixel_argb_normal` | 14.4 ns | 139.0 ns | 9.6× |
+| `blend_pixel_modes/Multiply` | 13.8 ns | 90.0 ns | 6.5× |
+| `blend_pixel_modes/SoftLight` | 17.1 ns | 139.0 ns | 8.1× |
+| `blend_pixel_argb_normal` | 14.4 ns | 137.0 ns | 9.5× |
 | `delta_e_cie76` | 2.4 ns | 9.0 ns | 3.8× |
 | `delta_e_cie94` | 7.4 ns | 36.0 ns | 4.9× |
-| `delta_e_ciede2000` | 111.3 ns | 550.0 ns | 4.9× |
-| `blend_row_1920px` | 3.63 µs | 46.58 µs | 12.8× |
-| `blend_row_argb_1920px` | 3.94 µs | 47.24 µs | 12.0× |
-| `brightness_1080p` | 277.91 µs | 3.65 ms | 13.1× |
-| `grayscale_1080p` | 1.50 ms | 16.10 ms | 10.7× |
-| `invert_1080p` | 1.06 ms | 7.91 ms | 7.5× |
-| `contrast_1080p` | 7.32 ms | 87.48 ms | 11.9× |
-| `saturation_1080p` | 5.89 ms | 88.91 ms | 15.1× |
-| `threshold_1080p` | 2.75 ms | 17.72 ms | 6.5× |
-| `flip_horizontal_1080p` | 1.80 ms | 35.18 ms | 19.5× |
-| `flip_vertical_1080p` | 583.61 µs | 23.45 ms | 40.2× |
-| `crop_1080p_to_720p` | 139.96 µs | 11.18 ms | 79.9× |
-| `resize_bilinear_1080p_to_720p` | 19.72 ms | 89.10 ms | 4.5× |
-| `resize_nearest_1080p_to_720p` | 1.59 ms | 16.83 ms | 10.6× |
-| `rgba_to_yuv420p_1080p` | — | 19.10 ms | — |
-| `yuv420p_to_rgba_bt601_1080p` | 1.20 ms | 52.92 ms | 44.2× |
-| `rgba8_to_argb8_1080p` | 2.16 ms | 24.46 ms | 11.3× |
-| `premultiply_alpha_1080p` | 3.53 ms | 30.28 ms | 8.6× |
-| `fill_solid_1080p` | 149.61 µs | 3.13 ms | 20.9× |
-| `composite_at_1080p` | — | 58.98 ms | — |
-| `luminance_histogram_1080p` | 4.70 ms | 18.27 ms | 3.9× |
-| `equalize_1080p` | 10.37 ms | 205.50 ms | 19.8× |
-| `auto_levels_1080p` | 8.18 ms | 187.68 ms | 23.0× |
-| `box_blur_r3_1080p` | 18.60 ms | 395.10 ms | 21.2× |
-| `gaussian_blur_r3_1080p` | 18.50 ms | 399.32 ms | 21.6× |
-| `median_r1_512x512` | 29.34 ms | 187.09 ms | 6.4× |
-| `bilateral_r2_256x256` | 14.90 ms | 126.89 ms | 8.5× |
-| `vignette_1080p` | 12.80 ms | 122.98 ms | 9.6× |
-| `noise_gaussian_1080p` | 59.61 ms | 429.81 ms | 7.2× |
+| `delta_e_ciede2000` | 111.3 ns | 557.0 ns | 5.0× |
+| `blend_row_1920px` | 3.63 µs | 46.70 µs | 12.9× |
+| `blend_row_argb_1920px` | 3.94 µs | 47.03 µs | 11.9× |
+| `brightness_1080p` | 277.91 µs | 3.79 ms | 13.6× |
+| `grayscale_1080p` | 1.50 ms | 16.27 ms | 10.8× |
+| `invert_1080p` | 1.06 ms | 3.36 ms | 3.2× |
+| `contrast_1080p` | 7.32 ms | 88.90 ms | 12.1× |
+| `saturation_1080p` | 5.89 ms | 86.74 ms | 14.7× |
+| `threshold_1080p` | 2.75 ms | 17.47 ms | 6.4× |
+| `flip_horizontal_1080p` | 1.80 ms | 25.10 ms | 13.9× |
+| `flip_vertical_1080p` | 583.61 µs | 13.40 ms | 23.0× |
+| `crop_1080p_to_720p` | 139.96 µs | 6.57 ms | 46.9× |
+| `resize_bilinear_1080p_to_720p` | 19.72 ms | 84.35 ms | 4.3× |
+| `resize_nearest_1080p_to_720p` | 1.59 ms | 12.24 ms | 7.7× |
+| `rgba_to_yuv420p_1080p` | — | 9.00 ms | — |
+| `yuv420p_to_rgba_bt601_1080p` | 1.20 ms | 37.06 ms | 31.0× |
+| `rgba8_to_argb8_1080p` | 2.16 ms | 14.28 ms | 6.6× |
+| `premultiply_alpha_1080p` | 3.53 ms | 30.18 ms | 8.6× |
+| `fill_solid_1080p` | 149.61 µs | 3.15 ms | 21.1× |
+| `composite_at_1080p` | — | 58.94 ms | — |
+| `luminance_histogram_1080p` | 4.70 ms | 18.10 ms | 3.8× |
+| `equalize_1080p` | 10.37 ms | 202.49 ms | 19.5× |
+| `auto_levels_1080p` | 8.18 ms | 185.87 ms | 22.7× |
+| `box_blur_r3_1080p` | 18.60 ms | 396.53 ms | 21.3× |
+| `gaussian_blur_r3_1080p` | 18.50 ms | 395.90 ms | 21.4× |
+| `median_r1_512x512` | 29.34 ms | 185.70 ms | 6.3× |
+| `bilateral_r2_256x256` | 14.90 ms | 126.28 ms | 8.5× |
+| `vignette_1080p` | 12.80 ms | 121.31 ms | 9.5× |
+| `noise_gaussian_1080p` | 59.61 ms | 502.20 ms | 8.4× |
 
 ### Reading the spread
 
@@ -138,6 +139,35 @@ dozen call sites, and the hazard is untestable (fresh mmap reads as zero, so a
 wrong use only breaks once the allocator recycles). `affine_transform` and
 `perspective_transform` deliberately keep the zeroed path: their skipped pixels
 *are* the transparent black.
+
+### First vector kernels + a loop hoist
+
+| | before | after | speedup | vs Rust now |
+|---|---:|---:|---:|---:|
+| `rgba_to_yuv420p_1080p` | 19.10 ms | **9.10 ms** | 2.10x | — |
+| `invert_1080p` | 7.91 ms | **3.39 ms** | 2.33x | 3.2x (was 7.5x) |
+| `yuv420p_to_rgba_bt601_1080p` | 52.92 ms | **37.72 ms** | 1.40x | 31x (was 44.2x) |
+
+Three different techniques, in increasing order of cost to write:
+
+1. **`yuv420p_to_rgba` — a loop hoist, no assembly.** The chroma row pointers
+   were being recomputed per pixel (a divide, a clamp and two multiplies for
+   values that change once per two rows). Hoisting them out gave 1.40x.
+2. **`invert` — vectorised with primitives already proven.** `255 - c` on a byte
+   IS a saturating subtract, so `psubusb` plus the existing alpha mask-and-select
+   did the whole thing with no new assembly at all.
+3. **`rgba_to_yuv420p` — a genuine new SSE2 kernel.** `_sx_luma_row_sse2` uses
+   `pmaddwd` to do two pixels per iteration: `punpcklbw` widens the eight source
+   bytes to i16, `pmaddwd` multiplies and pair-sums into i32, then
+   `pshufd`/`paddd` folds each pixel's halves together and two packs narrow back
+   to bytes. The whole loop lives inside one `asm { }` block, because a
+   per-2-pixel function call would cost more than the vectorisation saves.
+
+The kernel is differentially tested against an independent scalar reference
+across the byte range with **different values in each lane of the pair**, so a
+kernel that broadcast one pixel across both would fail. It also covers the
+alpha-is-ignored property, all three coefficient standards, the internal loop
+across multiple pairs, and the `pairs == 0` guard.
 
 ### What the inline experiment showed
 

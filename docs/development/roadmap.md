@@ -169,9 +169,19 @@ reading the spread rather than the median:
   consumer workaround is 1.35x-1.75x on the memcpy-bound ops and should be
   reverted if the stdlib fix lands.
 
-Still open: the 10x-20x band is Rust SIMD vs Cyrius scalar and needs the
-remaining `asm { }` kernels. `yuv420p_to_rgba` at 44.2x should get its chroma
-row pointers hoisted before any assembly is written.
+**Second pass — first vector kernels landed:**
+
+- `rgba_to_yuv420p` **2.10x** — new `_sx_luma_row_sse2` (pmaddwd, 2 px/iter),
+  wired into `_cv_y_row` so all three colour standards benefit.
+- `invert` **2.33x** — no new assembly; `255 - c` is a saturating subtract, so
+  the primitives from the first pass covered it.
+- `yuv420p_to_rgba` **1.40x** — pure loop hoist, chroma row pointers out of the
+  inner loop.
+
+Still open: `blend_row_normal` (12.8x) and `grayscale` (10.7x) need kernels of
+their own — grayscale scatters its result back across three channels rather
+than to a separate plane, so it needs a different shape from the luma kernel.
+Plan §3 item 4 (256-bit AVX2) sits behind those.
 
 ### M7 — Parity
 

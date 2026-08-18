@@ -253,6 +253,19 @@ assert_eq(chan(b7, 0, 3), 40, "invert leaves alpha alone");
 assert_eq(invert(b7), RG_ERR_NONE, "invert twice succeeds");
 assert_eq(px3(b7, 0, 0, 128, 255), 1, "invert twice is the identity");
 
+# invert is vectorised, so it needs the same SIMD-group / scalar-tail coverage
+# as brightness: 6 pixels is one full group plus a 2-pixel tail.
+var b7v = mkbuf(6, 1);
+var v7 = 0;
+while (v7 < 6) { put(b7v, v7, 0, 128, 255, 33); v7 = v7 + 1; }
+assert_eq(invert(b7v), RG_ERR_NONE, "6-pixel invert succeeds");
+assert_eq(px3(b7v, 0, 255, 127, 0), 1, "SIMD group inverts");
+assert_eq(chan(b7v, 0, 3), 33, "SIMD group preserves alpha through psubusb");
+assert_eq(px3(b7v, 3, 255, 127, 0), 1, "last pixel of the SIMD group");
+assert_eq(px3(b7v, 5, 255, 127, 0), 1, "scalar tail agrees with the SIMD group");
+assert_eq(chan(b7v, 5, 3), 33, "scalar tail preserves alpha");
+pixel_buffer_free(b7v);
+
 test_group("threshold");
 var b8 = mkbuf(2, 1);
 put(b8, 0, 0, 0, 255, 255);     # integer luma 28

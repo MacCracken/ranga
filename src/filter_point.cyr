@@ -305,17 +305,46 @@ fn grayscale(buf) {
 }
 
 # ── invert ────────
+# VECTORISED with the existing primitives — no new assembly needed. `255 - c`
+# for a byte is exactly a saturating subtract from 255 (the saturation never
+# triggers, since c <= 255), so psubusb does the whole thing and the alpha lane
+# is restored by the same mask-and-select brightness uses.
 fn invert(buf) {
     var rc = _fp_validate_rgba8(buf);
     if (rc != RG_ERR_NONE) { return rc; }
     var p = pixel_buffer_data(buf);
     var n = pixel_buffer_pixel_count(buf);
-    var i = 0;
+
+    var groups = n / 4;
+    if (groups > 0) {
+        var amask = fl_alloc(16);
+        var rmask = fl_alloc(16);
+        var ones = fl_alloc(16);
+        var tmp = fl_alloc(16);
+        if (amask == 0) { return RG_ERR_ALLOCATION; }
+        if (rmask == 0) { fl_free(amask); return RG_ERR_ALLOCATION; }
+        if (ones == 0) { fl_free(amask); fl_free(rmask); return RG_ERR_ALLOCATION; }
+        if (tmp == 0) { fl_free(amask); fl_free(rmask); fl_free(ones); return RG_ERR_ALLOCATION; }
+        _sx_alpha_mask16(amask);
+        _sx_rgb_mask16(rmask);
+        _sx_splat16(ones, 255);
+
+        var g = 0;
+        while (g < groups) {
+            var q = p + g * 16;
+            _sx_subus16(ones, q, tmp);            # 255 - c, lane-wise
+            _sx_select16(q, tmp, amask, rmask, q);
+            g = g + 1;
+        }
+        fl_free(amask); fl_free(rmask); fl_free(ones); fl_free(tmp);
+    }
+
+    var i = groups * 4;
     while (i < n) {
-        var q = p + i * 4;
-        store8(q, 255 - load8(q));
-        store8(q + 1, 255 - load8(q + 1));
-        store8(q + 2, 255 - load8(q + 2));
+        var q2 = p + i * 4;
+        store8(q2, 255 - load8(q2));
+        store8(q2 + 1, 255 - load8(q2 + 1));
+        store8(q2 + 2, 255 - load8(q2 + 2));
         i = i + 1;
     }
     return RG_ERR_NONE;
