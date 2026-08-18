@@ -1,0 +1,1018 @@
+# icc.cyr -- ICC profile parsing and tone-curve application
+# Ported from rust-old/src/icc.rs. Private prefix: _icc_
+#
+# BIG-ENDIAN. Every multi-byte field in an ICC profile is big-endian, which is
+# the opposite of the host. All reads go through the _icc_read_*_be helpers;
+# there is no place in this module where a raw load16/load32 would be correct.
+#
+# BOUNDS. Every read is bounds-checked against the profile length and returns a
+# negative RG_ERR_* on failure, because the input is untrusted file data — this
+# is the one module in ranga whose input is not produced by ranga.
+#
+# STRUCT LAYOUT, per the pattern in pixel.cyr / color.cyr.
+#
+#   ToneCurve  32 bytes  +0 kind  +8 gamma(f64)  +16 table ptr  +24 table len
+#   TagEntry   24 bytes  +0..3 signature bytes   +8 offset      +16 size
+#   IccProfile 56 bytes  +0 major +8 minor +16..19 colour space
+#                        +24 matrix(9 f64 ptr) +32 rTRC +40 gTRC +48 bTRC
+#
+# The matrix is COLUMN-major, matching Rust: row i holds the XYZ of primary i,
+# so `apply` reads m[0][0], m[1][0], m[2][0] to build X.
+
+# MUTATION TESTING. 38 mutants, 34 killed. The four survivors are all the same
+# shape and are recorded here so a later reader does not re-derive them:
+#
+#   * `hi` in tone_curve_apply, `hi` in _icc_apply_curve, and `r1`/`g1`/`b1` in
+#     icc_lut_profile_apply are only mis-clamped when the sample lands exactly
+#     on the top of the domain — and there the interpolation fraction is 0, so
+#     the out-of-range value is multiplied away. The clamps prevent an
+#     eight-byte heap OVER-READ that no output assertion can see. They match
+#     rust-old/src/icc.rs:110 and :386 as written.
+#   * `f64_clamp(f64_mul(ri, s), 0, s)` cannot fire, because the input curves
+#     are built from u16/65535 or u8/255 and so are already in [0, 1]. It is a
+#     guard against a future curve source that is not.
+#   * the a ~ 0 test in _icc_para_table replaces a break point of -b/a that
+#     would otherwise be an infinity or a NaN. With the .max(0.0) floor below
+#     it, every substitute lands on the same curve values — the guard exists to
+#     keep a non-finite out of the comparison, not to change a result.
+#
+# None are removable without giving up a bound the Rust original also holds.
+
+var _ICC_MIN_PROFILE_SIZE = 132;
+var _ICC_MAX_TAG_COUNT    = 1024;
+
+# ── ToneCurve ────────
+var TC_GAMMA = 0;
+var TC_TABLE = 1;
+
+var _TC_SIZE = 32;
+
+#must_use
+fn tone_curve_gamma(g) {
+    var t = fl_alloc(_TC_SIZE);
+    if (t == 0) { return 0; }
+    store64(t, TC_GAMMA);
+    store64(t + 8, g);
+    store64(t + 16, 0);
+    store64(t + 24, 0);
+    return t;
+}
+
+# Takes ownership of `table` (n f64 values); freed by tone_curve_free.
+#must_use
+fn tone_curve_table(table, n) {
+    var t = fl_alloc(_TC_SIZE);
+    if (t == 0) { return 0; }
+    store64(t, TC_TABLE);
+    store64(t + 8, 0);
+    store64(t + 16, table);
+    store64(t + 24, n);
+    return t;
+}
+
+#must_use
+fn tone_curve_kind(t) { return load64(t); }
+#must_use
+fn tone_curve_gamma_value(t) { return load64(t + 8); }
+#must_use
+fn tone_curve_len(t) { return load64(t + 24); }
+
+fn tone_curve_free(t) {
+    if (t == 0) { return RG_ERR_NONE; }
+    var tab = load64(t + 16);
+    if (tab != 0) { fl_free(tab); }
+    fl_free(t);
+    return RG_ERR_NONE;
+}
+
+# Apply the curve to a value in [0,1]. Input is clamped first, matching Rust.
+#
+# The table path interpolates linearly between neighbouring entries. Note the
+# asymmetric index clamping the Rust does: `hi` is derived from `lo.min(len-2)`
+# BEFORE `lo` is itself clamped to `len-1`, so a value of exactly 1.0 reads
+# entries (len-2, len-1) rather than running off the end.
+#must_use
+fn tone_curve_apply(t, v) {
+    var x = f64_clamp(v, 0, F64_ONE);
+    if (load64(t) == TC_GAMMA) {
+        # _rg_pow, not ganita_f64_pow: a fully black channel is x == 0.0, and
+        # the bare builtin returns NaN there where Rust gives 0.0.
+        return _rg_pow(x, load64(t + 8));
+    }
+    var tab = load64(t + 16);
+    var n = load64(t + 24);
+    if (n == 0) { return x; }
+    if (n == 1) { return load64(tab); }
+
+    var maxi = f64_from(n - 1);
+    var pos = f64_mul(x, maxi);
+    var fl = f64_floor(pos);
+    var lo = f64_to(fl);
+    var hi = lo;
+    if (hi > n - 2) { hi = n - 2; }
+    hi = hi + 1;
+    if (lo > n - 1) { lo = n - 1; }
+    var frac = f64_sub(pos, fl);
+    var a = load64(tab + lo * 8);
+    var b = load64(tab + hi * 8);
+    return f64_add(f64_mul(a, f64_sub(F64_ONE, frac)), f64_mul(b, frac));
+}
+
+# ── big-endian readers ────────
+# Each returns the value, or writes a negative code through err_out and returns
+# 0. A caller that can distinguish 0 from an error by other means may pass a
+# scratch pointer and ignore it.
+#must_use
+fn _icc_read_u16_be(data, len, off, err_out) {
+    if (off < 0) { store64(err_out, RG_ERR_PARSE); return 0; }
+    if (off + 2 > len) { store64(err_out, RG_ERR_PARSE); return 0; }
+    store64(err_out, RG_ERR_NONE);
+    return (load8(data + off) << 8) | load8(data + off + 1);
+}
+
+#must_use
+fn _icc_read_u32_be(data, len, off, err_out) {
+    if (off < 0) { store64(err_out, RG_ERR_PARSE); return 0; }
+    if (off + 4 > len) { store64(err_out, RG_ERR_PARSE); return 0; }
+    store64(err_out, RG_ERR_NONE);
+    return (load8(data + off) << 24) | (load8(data + off + 1) << 16)
+         | (load8(data + off + 2) << 8) | load8(data + off + 3);
+}
+
+# Signed 32-bit, sign-extended from the 32-bit value.
+#must_use
+fn _icc_read_i32_be(data, len, off, err_out) {
+    var u = _icc_read_u32_be(data, len, off, err_out);
+    if (load64(err_out) != RG_ERR_NONE) { return 0; }
+    # Bit 31 set means negative: subtract 2^32.
+    if (u >= 0x80000000) { return u - 0x100000000; }
+    return u;
+}
+
+# s15Fixed16Number: a signed 32-bit value scaled by 65536.
+#must_use
+fn _icc_read_s15fixed16(data, len, off, err_out) {
+    var i = _icc_read_i32_be(data, len, off, err_out);
+    if (load64(err_out) != RG_ERR_NONE) { return 0; }
+    return f64_div(f64_from(i), 65536.0);
+}
+
+# 1 if the four bytes at `off` equal the four at `sig`.
+#must_use
+fn _icc_sig_eq(data, off, sig) {
+    if (load8(data + off) != load8(sig)) { return 0; }
+    if (load8(data + off + 1) != load8(sig + 1)) { return 0; }
+    if (load8(data + off + 2) != load8(sig + 2)) { return 0; }
+    if (load8(data + off + 3) != load8(sig + 3)) { return 0; }
+    return 1;
+}
+
+# ── tag table ────────
+var _ICC_TAG_SIZE = 24;
+
+# Parse `count` 12-byte tag-table entries into a freshly allocated array.
+# Returns 0 and writes a code on any malformed entry.
+#must_use
+fn _icc_parse_tag_table(data, len, count, err_out) {
+    var tags = fl_calloc(count * _ICC_TAG_SIZE);
+    if (tags == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    var i = 0;
+    while (i < count) {
+        var base = 132 + i * 12;
+        if (base + 12 > len) {
+            fl_free(tags);
+            store64(err_out, RG_ERR_PARSE);
+            return 0;
+        }
+        var e = tags + i * _ICC_TAG_SIZE;
+        store8(e, load8(data + base));
+        store8(e + 1, load8(data + base + 1));
+        store8(e + 2, load8(data + base + 2));
+        store8(e + 3, load8(data + base + 3));
+        var off = _icc_read_u32_be(data, len, base + 4, err_out);
+        if (load64(err_out) != RG_ERR_NONE) { fl_free(tags); return 0; }
+        var size = _icc_read_u32_be(data, len, base + 8, err_out);
+        if (load64(err_out) != RG_ERR_NONE) { fl_free(tags); return 0; }
+        # offset + size must not run past the profile. Both are u32 read into
+        # an i64, so the sum cannot overflow here the way Rust's usize add
+        # could — Rust needs checked_add, this needs only the range test.
+        if (off + size > len) {
+            fl_free(tags);
+            store64(err_out, RG_ERR_PARSE);
+            return 0;
+        }
+        store64(e + 8, off);
+        store64(e + 16, size);
+        i = i + 1;
+    }
+    store64(err_out, RG_ERR_NONE);
+    return tags;
+}
+
+# Index of the tag whose signature matches, or -1.
+#must_use
+fn _icc_find_tag(tags, count, sig) {
+    var i = 0;
+    while (i < count) {
+        if (_icc_sig_eq(tags + i * _ICC_TAG_SIZE, 0, sig) == 1) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+#must_use
+fn _icc_tag_offset(tags, idx) { return load64(tags + idx * _ICC_TAG_SIZE + 8); }
+#must_use
+fn _icc_tag_size(tags, idx) { return load64(tags + idx * _ICC_TAG_SIZE + 16); }
+
+# Read an XYZ tag's three s15Fixed16 components into `out` (3 f64).
+fn _icc_parse_xyz_tag(data, len, tags, idx, out, err_out) {
+    var off = _icc_tag_offset(tags, idx);
+    if (_icc_tag_size(tags, idx) < 20) { store64(err_out, RG_ERR_PARSE); return RG_ERR_PARSE; }
+    if (off + 20 > len) { store64(err_out, RG_ERR_PARSE); return RG_ERR_PARSE; }
+    var xyzsig = _icc_sig_xyz();
+    if (_icc_sig_eq(data, off, xyzsig) == 0) {
+        fl_free(xyzsig);
+        store64(err_out, RG_ERR_PARSE);
+        return RG_ERR_PARSE;
+    }
+    fl_free(xyzsig);
+    store64(out, _icc_read_s15fixed16(data, len, off + 8, err_out));
+    store64(out + 8, _icc_read_s15fixed16(data, len, off + 12, err_out));
+    store64(out + 16, _icc_read_s15fixed16(data, len, off + 16, err_out));
+    return load64(err_out);
+}
+
+# ── signature helpers ────────
+# Four-byte signatures as heap literals; the caller frees.
+#must_use
+fn _icc_sig4(a, b, c, d) {
+    var s = fl_alloc(4);
+    if (s == 0) { return 0; }
+    store8(s, a); store8(s + 1, b); store8(s + 2, c); store8(s + 3, d);
+    return s;
+}
+#must_use
+fn _icc_sig_acsp() { return _icc_sig4(97, 99, 115, 112); }    # "acsp"
+#must_use
+fn _icc_sig_xyz() { return _icc_sig4(88, 89, 90, 32); }       # "XYZ "
+#must_use
+fn _icc_sig_curv() { return _icc_sig4(99, 117, 114, 118); }   # "curv"
+#must_use
+fn _icc_sig_para() { return _icc_sig4(112, 97, 114, 97); }    # "para"
+#must_use
+fn _icc_sig_rxyz() { return _icc_sig4(114, 88, 89, 90); }     # "rXYZ"
+#must_use
+fn _icc_sig_gxyz() { return _icc_sig4(103, 88, 89, 90); }     # "gXYZ"
+#must_use
+fn _icc_sig_bxyz() { return _icc_sig4(98, 88, 89, 90); }      # "bXYZ"
+#must_use
+fn _icc_sig_rtrc() { return _icc_sig4(114, 84, 82, 67); }     # "rTRC"
+#must_use
+fn _icc_sig_gtrc() { return _icc_sig4(103, 84, 82, 67); }     # "gTRC"
+#must_use
+fn _icc_sig_btrc() { return _icc_sig4(98, 84, 82, 67); }      # "bTRC"
+
+# ── curv tag ────────
+# count == 0 is linear (gamma 1.0); count == 1 is a u8Fixed8 gamma; anything
+# larger is a u16 table normalised by 65535.
+#must_use
+fn _icc_parse_curv(data, len, off, size, err_out) {
+    if (size < 12) { store64(err_out, RG_ERR_PARSE); return 0; }
+    if (off + 12 > len) { store64(err_out, RG_ERR_PARSE); return 0; }
+    var count = _icc_read_u32_be(data, len, off + 8, err_out);
+    if (load64(err_out) != RG_ERR_NONE) { return 0; }
+
+    if (count == 0) { return tone_curve_gamma(F64_ONE); }
+    if (count == 1) {
+        if (off + 14 > len) { store64(err_out, RG_ERR_PARSE); return 0; }
+        var raw = _icc_read_u16_be(data, len, off + 12, err_out);
+        if (load64(err_out) != RG_ERR_NONE) { return 0; }
+        # u8Fixed8Number: the value scaled by 256.
+        return tone_curve_gamma(f64_div(f64_from(raw), 256.0));
+    }
+
+    if (off + 12 + count * 2 > len) { store64(err_out, RG_ERR_PARSE); return 0; }
+    var tab = fl_alloc(count * 8);
+    if (tab == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    var i = 0;
+    while (i < count) {
+        var v = _icc_read_u16_be(data, len, off + 12 + i * 2, err_out);
+        if (load64(err_out) != RG_ERR_NONE) { fl_free(tab); return 0; }
+        store64(tab + i * 8, f64_div(f64_from(v), 65535.0));
+        i = i + 1;
+    }
+    store64(err_out, RG_ERR_NONE);
+    return tone_curve_table(tab, count);
+}
+
+# ── para tag ────────
+# Build the 4096-entry table the parametric types 1-4 all produce.
+#
+#   type 1: (aX + b)^g            for X >= -b/a, else 0
+#   type 2: (aX + b)^g + c        for X >= -b/a, else c
+#   type 3: (aX + b)^g + e        for X >= d,    else cX + f
+#   type 4: identical to type 3 in this implementation
+#
+# Types 3 and 4 really do share a formula here. The ICC spec distinguishes
+# them, but rust-old computes both the same way and this is a port — the
+# divergence, if it is one, belongs upstream and not in a translation.
+var _ICC_PARA_N = 4096;
+
+#must_use
+fn _icc_para_table(g, a, b, c, d, e, f, use_d, err_out) {
+    var tab = fl_alloc(_ICC_PARA_N * 8);
+    if (tab == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    var denom = f64_from(_ICC_PARA_N - 1);
+    # For types 1 and 2 the break point is -b/a, guarded against a ~ 0.
+    var thresh = d;
+    if (use_d == 0) {
+        thresh = 0;
+        if (f64_gt(f64_abs(a), 0.000000000001) == 1) {
+            thresh = f64_div(f64_neg(b), a);
+        }
+    }
+    var i = 0;
+    while (i < _ICC_PARA_N) {
+        var x = f64_div(f64_from(i), denom);
+        var out = 0;
+        if (f64_ge(x, thresh) == 1) {
+            # `.max(0.0)` before the power: a negative base would make powf
+            # return NaN, and the ICC curves legitimately go negative below
+            # the break point.
+            var base = f64_max(f64_add(f64_mul(a, x), b), 0);
+            out = f64_add(_rg_pow(base, g), e);
+        }
+        if (f64_ge(x, thresh) == 0) {
+            out = f64_add(f64_mul(c, x), f);
+        }
+        store64(tab + i * 8, f64_clamp(out, 0, F64_ONE));
+        i = i + 1;
+    }
+    store64(err_out, RG_ERR_NONE);
+    return tone_curve_table(tab, _ICC_PARA_N);
+}
+
+#must_use
+fn _icc_parse_para(data, len, off, size, err_out) {
+    if (size < 12) { store64(err_out, RG_ERR_PARSE); return 0; }
+    if (off + 12 > len) { store64(err_out, RG_ERR_PARSE); return 0; }
+    var ft = _icc_read_u16_be(data, len, off + 8, err_out);
+    if (load64(err_out) != RG_ERR_NONE) { return 0; }
+
+    if (ft == 0) {
+        if (off + 16 > len) { store64(err_out, RG_ERR_PARSE); return 0; }
+        var g0 = _icc_read_s15fixed16(data, len, off + 12, err_out);
+        if (load64(err_out) != RG_ERR_NONE) { return 0; }
+        return tone_curve_gamma(g0);
+    }
+
+    var need = 0;
+    if (ft == 1) { need = 24; }
+    if (ft == 2) { need = 28; }
+    if (ft == 3) { need = 40; }
+    if (ft == 4) { need = 40; }
+    if (need == 0) { store64(err_out, RG_ERR_PARSE); return 0; }
+    if (off + need > len) { store64(err_out, RG_ERR_PARSE); return 0; }
+
+    var g = _icc_read_s15fixed16(data, len, off + 12, err_out);
+    var a = _icc_read_s15fixed16(data, len, off + 16, err_out);
+    var b = _icc_read_s15fixed16(data, len, off + 20, err_out);
+    if (load64(err_out) != RG_ERR_NONE) { return 0; }
+
+    if (ft == 1) { return _icc_para_table(g, a, b, 0, 0, 0, 0, 0, err_out); }
+
+    var c = _icc_read_s15fixed16(data, len, off + 24, err_out);
+    if (load64(err_out) != RG_ERR_NONE) { return 0; }
+    # Type 2's "else" branch is the constant c, which the shared builder
+    # expresses as c*X + f with c == 0 and f == c.
+    if (ft == 2) { return _icc_para_table(g, a, b, 0, 0, c, c, 0, err_out); }
+
+    var d = _icc_read_s15fixed16(data, len, off + 28, err_out);
+    var e = _icc_read_s15fixed16(data, len, off + 32, err_out);
+    var f = _icc_read_s15fixed16(data, len, off + 36, err_out);
+    if (load64(err_out) != RG_ERR_NONE) { return 0; }
+    return _icc_para_table(g, a, b, c, d, e, f, 1, err_out);
+}
+
+#must_use
+fn _icc_parse_trc_tag(data, len, tags, idx, err_out) {
+    var off = _icc_tag_offset(tags, idx);
+    var size = _icc_tag_size(tags, idx);
+    if (size < 8) { store64(err_out, RG_ERR_PARSE); return 0; }
+    if (off + 8 > len) { store64(err_out, RG_ERR_PARSE); return 0; }
+
+    var cs = _icc_sig_curv();
+    var is_curv = _icc_sig_eq(data, off, cs);
+    fl_free(cs);
+    if (is_curv == 1) { return _icc_parse_curv(data, len, off, size, err_out); }
+
+    var ps = _icc_sig_para();
+    var is_para = _icc_sig_eq(data, off, ps);
+    fl_free(ps);
+    if (is_para == 1) { return _icc_parse_para(data, len, off, size, err_out); }
+
+    store64(err_out, RG_ERR_PARSE);
+    return 0;
+}
+
+# ── IccProfile ────────
+var _ICC_PROFILE_SIZE = 56;
+
+#must_use
+fn icc_profile_major(p) { return load64(p); }
+#must_use
+fn icc_profile_minor(p) { return load64(p + 8); }
+#must_use
+fn icc_profile_color_space_byte(p, i) { return load8(p + 16 + i); }
+#must_use
+fn icc_profile_matrix(p, i, j) { return load64(load64(p + 24) + (i * 3 + j) * 8); }
+#must_use
+fn icc_profile_red_trc(p) { return load64(p + 32); }
+#must_use
+fn icc_profile_green_trc(p) { return load64(p + 40); }
+#must_use
+fn icc_profile_blue_trc(p) { return load64(p + 48); }
+
+fn icc_profile_free(p) {
+    if (p == 0) { return RG_ERR_NONE; }
+    var m = load64(p + 24);
+    if (m != 0) { fl_free(m); }
+    tone_curve_free(load64(p + 32));
+    tone_curve_free(load64(p + 40));
+    tone_curve_free(load64(p + 48));
+    fl_free(p);
+    return RG_ERR_NONE;
+}
+
+# Parse a full ICC profile from `data` (`len` bytes). Returns 0 with a code
+# through err_out on any malformed input.
+#must_use
+fn icc_profile_from_bytes(data, len, err_out) {
+    if (len < _ICC_MIN_PROFILE_SIZE) {
+        store64(err_out, RG_ERR_INVALID_FORMAT);
+        return 0;
+    }
+    # The 'acsp' signature at offset 36 is what makes this an ICC profile.
+    var acsp = _icc_sig_acsp();
+    var ok = _icc_sig_eq(data, 36, acsp);
+    fl_free(acsp);
+    if (ok == 0) { store64(err_out, RG_ERR_INVALID_FORMAT); return 0; }
+
+    var major = load8(data + 8);
+    # The minor version is the HIGH nibble of byte 9.
+    var minor = load8(data + 9) >> 4;
+
+    var tag_count = _icc_read_u32_be(data, len, 128, err_out);
+    if (load64(err_out) != RG_ERR_NONE) { return 0; }
+    if (tag_count > _ICC_MAX_TAG_COUNT) {
+        store64(err_out, RG_ERR_INVALID_FORMAT);
+        return 0;
+    }
+    if (132 + tag_count * 12 > len) {
+        store64(err_out, RG_ERR_INVALID_FORMAT);
+        return 0;
+    }
+
+    var tags = _icc_parse_tag_table(data, len, tag_count, err_out);
+    if (tags == 0) { return 0; }
+
+    var m = fl_calloc(9 * 8);
+    if (m == 0) { fl_free(tags); store64(err_out, RG_ERR_ALLOCATION); return 0; }
+
+    var rc = _icc_load_primary(data, len, tags, tag_count, _icc_sig_rxyz(), m, 0, err_out);
+    if (rc == RG_ERR_NONE) { rc = _icc_load_primary(data, len, tags, tag_count, _icc_sig_gxyz(), m, 1, err_out); }
+    if (rc == RG_ERR_NONE) { rc = _icc_load_primary(data, len, tags, tag_count, _icc_sig_bxyz(), m, 2, err_out); }
+    if (rc != RG_ERR_NONE) {
+        fl_free(m); fl_free(tags);
+        store64(err_out, rc);
+        return 0;
+    }
+
+    var rtrc = _icc_load_trc(data, len, tags, tag_count, _icc_sig_rtrc(), err_out);
+    var gtrc = 0;
+    var btrc = 0;
+    if (rtrc != 0) { gtrc = _icc_load_trc(data, len, tags, tag_count, _icc_sig_gtrc(), err_out); }
+    if (gtrc != 0) { btrc = _icc_load_trc(data, len, tags, tag_count, _icc_sig_btrc(), err_out); }
+    if (btrc == 0) {
+        tone_curve_free(rtrc); tone_curve_free(gtrc);
+        fl_free(m); fl_free(tags);
+        return 0;
+    }
+
+    var p = fl_calloc(_ICC_PROFILE_SIZE);
+    if (p == 0) {
+        tone_curve_free(rtrc); tone_curve_free(gtrc); tone_curve_free(btrc);
+        fl_free(m); fl_free(tags);
+        store64(err_out, RG_ERR_ALLOCATION);
+        return 0;
+    }
+    store64(p, major);
+    store64(p + 8, minor);
+    store8(p + 16, load8(data + 16));
+    store8(p + 17, load8(data + 17));
+    store8(p + 18, load8(data + 18));
+    store8(p + 19, load8(data + 19));
+    store64(p + 24, m);
+    store64(p + 32, rtrc);
+    store64(p + 40, gtrc);
+    store64(p + 48, btrc);
+    fl_free(tags);
+    store64(err_out, RG_ERR_NONE);
+    return p;
+}
+
+# Locate an XYZ tag by signature and load it into matrix row `row`.
+# Takes ownership of `sig` and frees it — the callers build them inline.
+fn _icc_load_primary(data, len, tags, count, sig, m, row, err_out) {
+    var idx = _icc_find_tag(tags, count, sig);
+    fl_free(sig);
+    if (idx < 0) { store64(err_out, RG_ERR_INVALID_FORMAT); return RG_ERR_INVALID_FORMAT; }
+    return _icc_parse_xyz_tag(data, len, tags, idx, m + row * 24, err_out);
+}
+
+#must_use
+fn _icc_load_trc(data, len, tags, count, sig, err_out) {
+    var idx = _icc_find_tag(tags, count, sig);
+    fl_free(sig);
+    if (idx < 0) { store64(err_out, RG_ERR_INVALID_FORMAT); return 0; }
+    return _icc_parse_trc_tag(data, len, tags, idx, err_out);
+}
+
+# Apply the profile: each channel through its own tone curve, then the
+# column-major matrix. Writes X, Y, Z as three f64 to `out`.
+fn icc_profile_apply(p, r, g, b, out) {
+    var rl = tone_curve_apply(load64(p + 32), r);
+    var gl = tone_curve_apply(load64(p + 40), g);
+    var bl = tone_curve_apply(load64(p + 48), b);
+    var m = load64(p + 24);
+    var c = 0;
+    while (c < 3) {
+        # Column-major: component c of the output sums element c of each
+        # primary's row.
+        var v = f64_add(f64_add(f64_mul(load64(m + c * 8), rl),
+                                f64_mul(load64(m + 24 + c * 8), gl)),
+                        f64_mul(load64(m + 48 + c * 8), bl));
+        store64(out + c * 8, v);
+        c = c + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+# ── writers, for srgb_v2_profile ────────
+fn _icc_write_u32_be(buf, off, v) {
+    store8(buf + off, (v >> 24) & 255);
+    store8(buf + off + 1, (v >> 16) & 255);
+    store8(buf + off + 2, (v >> 8) & 255);
+    store8(buf + off + 3, v & 255);
+    return RG_ERR_NONE;
+}
+
+fn _icc_write_u16_be(buf, off, v) {
+    store8(buf + off, (v >> 8) & 255);
+    store8(buf + off + 1, v & 255);
+    return RG_ERR_NONE;
+}
+
+fn _icc_write_s15fixed16(buf, off, v) {
+    # Rust's `(v * 65536.0).round() as i32`, then to_be_bytes.
+    var scaled = f64_mul(v, 65536.0);
+    var i = f64_to(f64_round(scaled));
+    _icc_write_u32_be(buf, off, i & 0xFFFFFFFF);
+    return RG_ERR_NONE;
+}
+
+fn _icc_write_sig(buf, off, sig) {
+    store8(buf + off, load8(sig));
+    store8(buf + off + 1, load8(sig + 1));
+    store8(buf + off + 2, load8(sig + 2));
+    store8(buf + off + 3, load8(sig + 3));
+    fl_free(sig);
+    return RG_ERR_NONE;
+}
+
+#must_use
+fn _icc_align4(v) { return (v + 3) & (0 - 4); }
+
+# Build a minimal sRGB v2 profile: 6 tags (three XYZ primaries, three gamma-2.2
+# curves). Returns a bytevec the caller owns, and writes the length through
+# `len_out`. Round-trips through icc_profile_from_bytes by construction, which
+# is what makes it useful as a test fixture as well as a default profile.
+#must_use
+fn srgb_v2_profile(len_out) {
+    var tag_count = 6;
+    var header_size = 128;
+    var data_start = header_size + 4 + tag_count * 12;
+    var xyz_size = 20;
+    var curv_size = 14;
+
+    var r_xyz_off = data_start;
+    var g_xyz_off = r_xyz_off + _icc_align4(xyz_size);
+    var b_xyz_off = g_xyz_off + _icc_align4(xyz_size);
+    var r_trc_off = b_xyz_off + _icc_align4(xyz_size);
+    var g_trc_off = r_trc_off + _icc_align4(curv_size);
+    var b_trc_off = g_trc_off + _icc_align4(curv_size);
+    var total = b_trc_off + _icc_align4(curv_size);
+
+    var bv = bv_zeroed(total);
+    if (bv == 0) { return 0; }
+    var buf = bv_data(bv);
+    store64(len_out, total);
+
+    # Header: size, version 2.4, RGB colour space, mntr device class, acsp.
+    _icc_write_u32_be(buf, 0, total);
+    store8(buf + 8, 2);
+    store8(buf + 9, 4 << 4);
+    _icc_write_sig(buf, 16, _icc_sig4(82, 71, 66, 32));    # "RGB "
+    _icc_write_sig(buf, 20, _icc_sig4(109, 110, 116, 114)); # "mntr"
+    _icc_write_sig(buf, 36, _icc_sig_acsp());
+
+    _icc_write_u32_be(buf, 128, tag_count);
+    _icc_write_sig(buf, 132, _icc_sig_rxyz());
+    _icc_write_u32_be(buf, 136, r_xyz_off);
+    _icc_write_u32_be(buf, 140, xyz_size);
+    _icc_write_sig(buf, 144, _icc_sig_gxyz());
+    _icc_write_u32_be(buf, 148, g_xyz_off);
+    _icc_write_u32_be(buf, 152, xyz_size);
+    _icc_write_sig(buf, 156, _icc_sig_bxyz());
+    _icc_write_u32_be(buf, 160, b_xyz_off);
+    _icc_write_u32_be(buf, 164, xyz_size);
+    _icc_write_sig(buf, 168, _icc_sig_rtrc());
+    _icc_write_u32_be(buf, 172, r_trc_off);
+    _icc_write_u32_be(buf, 176, curv_size);
+    _icc_write_sig(buf, 180, _icc_sig_gtrc());
+    _icc_write_u32_be(buf, 184, g_trc_off);
+    _icc_write_u32_be(buf, 188, curv_size);
+    _icc_write_sig(buf, 192, _icc_sig_btrc());
+    _icc_write_u32_be(buf, 196, b_trc_off);
+    _icc_write_u32_be(buf, 200, curv_size);
+
+    # sRGB D65 primaries (IEC 61966-2-1), COLUMN-major: each tag holds one
+    # primary's XYZ.
+    _icc_write_sig(buf, r_xyz_off, _icc_sig_xyz());
+    _icc_write_s15fixed16(buf, r_xyz_off + 8, 0.4124564);
+    _icc_write_s15fixed16(buf, r_xyz_off + 12, 0.2126729);
+    _icc_write_s15fixed16(buf, r_xyz_off + 16, 0.0193339);
+    _icc_write_sig(buf, g_xyz_off, _icc_sig_xyz());
+    _icc_write_s15fixed16(buf, g_xyz_off + 8, 0.3575761);
+    _icc_write_s15fixed16(buf, g_xyz_off + 12, 0.7151522);
+    _icc_write_s15fixed16(buf, g_xyz_off + 16, 0.1191920);
+    _icc_write_sig(buf, b_xyz_off, _icc_sig_xyz());
+    _icc_write_s15fixed16(buf, b_xyz_off + 8, 0.1804375);
+    _icc_write_s15fixed16(buf, b_xyz_off + 12, 0.0721750);
+    _icc_write_s15fixed16(buf, b_xyz_off + 16, 0.9503041);
+
+    # Three identical gamma-2.2 curv tags, count == 1 (u8Fixed8).
+    var fixed = f64_to(f64_round(f64_mul(2.2, 256.0)));
+    var offs = fl_alloc(24);
+    store64(offs, r_trc_off); store64(offs + 8, g_trc_off); store64(offs + 16, b_trc_off);
+    var i = 0;
+    while (i < 3) {
+        var o = load64(offs + i * 8);
+        _icc_write_sig(buf, o, _icc_sig_curv());
+        _icc_write_u32_be(buf, o + 8, 1);
+        store8(buf + o + 12, (fixed >> 8) & 255);
+        store8(buf + o + 13, fixed & 255);
+        i = i + 1;
+    }
+    fl_free(offs);
+    return bv;
+}
+
+# ── IccLutProfile ────────
+#
+# The SECOND, independent profile parser in rust-old/src/icc.rs (line 257).
+# Where IccProfile handles the matrix/TRC form — three primaries and three tone
+# curves — this one handles the LUT form: an `A2B0` tag holding per-channel
+# input curves followed by a 3D colour lookup table, sampled by trilinear
+# interpolation. The two share the header and tag-table parsing and nothing
+# else. A profile is one form or the other; the caller picks the parser.
+#
+#   IccLutProfile 80 bytes
+#     +0  major        +8  minor       +16..19 colour space
+#     +24 grid_size    +32 lut ptr     +40 lut len (grid^3 * 3 f64)
+#     +48 curve R ptr  +56 curve G ptr +64 curve B ptr
+#     +72 curve len (entries per channel — all three are equal by construction)
+#
+# GRID CAP. grid_size is a single untrusted byte and the LUT is grid^3 * 3
+# f64s, so an unchecked 255 would ask for 397 MB. Rust caps it at 64 (8 MB);
+# the cap is preserved rather than widened.
+
+var _ILP_SIZE = 80;
+var _ICC_MAX_GRID = 64;
+
+#must_use
+fn icc_lut_profile_major(p) { return load64(p); }
+#must_use
+fn icc_lut_profile_minor(p) { return load64(p + 8); }
+#must_use
+fn icc_lut_profile_color_space_byte(p, i) { return load8(p + 16 + i); }
+#must_use
+fn icc_lut_profile_grid_size(p) { return load64(p + 24); }
+#must_use
+fn icc_lut_profile_lut_len(p) { return load64(p + 40); }
+#must_use
+fn icc_lut_profile_lut_at(p, i) { return load64(load64(p + 32) + i * 8); }
+#must_use
+fn icc_lut_profile_curve_len(p) { return load64(p + 72); }
+#must_use
+fn icc_lut_profile_curve_at(p, ch, i) { return load64(load64(p + 48 + ch * 8) + i * 8); }
+
+fn icc_lut_profile_free(p) {
+    if (p == 0) { return RG_ERR_NONE; }
+    var lut = load64(p + 32);
+    if (lut != 0) { fl_free(lut); }
+    var ch = 0;
+    while (ch < 3) {
+        var c = load64(p + 48 + ch * 8);
+        if (c != 0) { fl_free(c); }
+        ch = ch + 1;
+    }
+    fl_free(p);
+    return RG_ERR_NONE;
+}
+
+# Sample one of the input curves. This is rust-old's free `apply_curve`, which
+# is NOT ToneCurve::apply: `hi` is min(lo + 1, n - 1) and `lo` is left
+# unclamped, where ToneCurve clamps lo and derives hi from the clamped value.
+# The two agree everywhere except at the top of the domain, and both are
+# reproduced as written rather than unified.
+#must_use
+fn _icc_apply_curve(curve, n, v) {
+    if (n == 0) { return v; }
+    if (n == 1) { return load64(curve); }
+    var maxi = f64_from(n - 1);
+    var pos = f64_mul(v, maxi);
+    var fl = f64_floor(pos);
+    var lo = f64_to(fl);
+    var hi = lo + 1;
+    if (hi > n - 1) { hi = n - 1; }
+    var frac = f64_sub(pos, fl);
+    var a = load64(curve + lo * 8);
+    var b = load64(curve + hi * 8);
+    return f64_add(f64_mul(a, f64_sub(F64_ONE, frac)), f64_mul(b, frac));
+}
+
+# Shared tail of the two LUT tag parsers. `scale16` selects the sample width:
+# 1 for mft2's big-endian u16 samples over 65535, 0 for mft1's raw bytes over
+# 255. Everything downstream of the byte layout is identical.
+#must_use
+fn _icc_lut_build(data, len, major, minor, cs_off, grid, in_start, in_entries,
+                  lut_start, scale16, err_out) {
+    var p = fl_calloc(_ILP_SIZE);
+    if (p == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    store64(p, major);
+    store64(p + 8, minor);
+    store8(p + 16, load8(data + cs_off));
+    store8(p + 17, load8(data + cs_off + 1));
+    store8(p + 18, load8(data + cs_off + 2));
+    store8(p + 19, load8(data + cs_off + 3));
+    store64(p + 24, grid);
+    store64(p + 72, in_entries);
+
+    var width = 1;
+    if (scale16 == 1) { width = 2; }
+
+    var ch = 0;
+    while (ch < 3) {
+        var cur = fl_alloc(in_entries * 8);
+        if (cur == 0) {
+            store64(err_out, RG_ERR_ALLOCATION);
+            icc_lut_profile_free(p);
+            return 0;
+        }
+        store64(p + 48 + ch * 8, cur);
+        var coff = in_start + ch * in_entries * width;
+        var i = 0;
+        while (i < in_entries) {
+            var raw = 0;
+            if (scale16 == 1) {
+                raw = _icc_read_u16_be(data, len, coff + i * 2, err_out);
+                if (load64(err_out) != RG_ERR_NONE) { icc_lut_profile_free(p); return 0; }
+                store64(cur + i * 8, f64_div(f64_from(raw), 65535.0));
+            }
+            if (scale16 == 0) {
+                raw = load8(data + coff + i);
+                store64(cur + i * 8, f64_div(f64_from(raw), 255.0));
+            }
+            i = i + 1;
+        }
+        ch = ch + 1;
+    }
+
+    var cells = grid * grid * grid;
+    var total = cells * 3;
+    var lut = fl_alloc(total * 8);
+    if (lut == 0) {
+        store64(err_out, RG_ERR_ALLOCATION);
+        icc_lut_profile_free(p);
+        return 0;
+    }
+    store64(p + 32, lut);
+    store64(p + 40, total);
+    var j = 0;
+    while (j < total) {
+        var v = 0;
+        if (scale16 == 1) {
+            var r16 = _icc_read_u16_be(data, len, lut_start + j * 2, err_out);
+            if (load64(err_out) != RG_ERR_NONE) { icc_lut_profile_free(p); return 0; }
+            v = f64_div(f64_from(r16), 65535.0);
+        }
+        if (scale16 == 0) {
+            v = f64_div(f64_from(load8(data + lut_start + j)), 255.0);
+        }
+        store64(lut + j * 8, v);
+        j = j + 1;
+    }
+    store64(err_out, RG_ERR_NONE);
+    return p;
+}
+
+# The 3→3 channel check and the grid cap, shared by mft1 and mft2.
+#must_use
+fn _icc_lut_check_channels(data, off, err_out) {
+    if (load8(data + off + 8) != 3) { store64(err_out, RG_ERR_INVALID_FORMAT); return 0; }
+    if (load8(data + off + 9) != 3) { store64(err_out, RG_ERR_INVALID_FORMAT); return 0; }
+    var grid = load8(data + off + 10);
+    if (grid > _ICC_MAX_GRID) { store64(err_out, RG_ERR_INVALID_FORMAT); return 0; }
+    store64(err_out, RG_ERR_NONE);
+    return grid;
+}
+
+# mft2: 16-bit samples, with the input/output table sizes declared in the
+# header at +48 and +50 rather than fixed.
+#must_use
+fn _icc_parse_mft2(data, len, off, size, major, minor, cs_off, err_out) {
+    if (size < 52) { store64(err_out, RG_ERR_INVALID_FORMAT); return 0; }
+    if (off + 52 > len) { store64(err_out, RG_ERR_INVALID_FORMAT); return 0; }
+
+    var grid = _icc_lut_check_channels(data, off, err_out);
+    if (load64(err_out) != RG_ERR_NONE) { return 0; }
+
+    var in_entries = _icc_read_u16_be(data, len, off + 48, err_out);
+    if (load64(err_out) != RG_ERR_NONE) { return 0; }
+    var out_entries = _icc_read_u16_be(data, len, off + 50, err_out);
+    if (load64(err_out) != RG_ERR_NONE) { return 0; }
+
+    var in_start = off + 52;
+    var lut_start = in_start + 3 * in_entries * 2;
+    var out_start = lut_start + grid * grid * grid * 3 * 2;
+    if (out_start + 3 * out_entries * 2 > len) {
+        store64(err_out, RG_ERR_INVALID_FORMAT);
+        return 0;
+    }
+    return _icc_lut_build(data, len, major, minor, cs_off, grid, in_start,
+                          in_entries, lut_start, 1, err_out);
+}
+
+# mft1: 8-bit samples, and both tables are a fixed 256 entries — the entry
+# counts are not in the header at all.
+#must_use
+fn _icc_parse_mft1(data, len, off, size, major, minor, cs_off, err_out) {
+    if (size < 48) { store64(err_out, RG_ERR_INVALID_FORMAT); return 0; }
+    if (off + 48 > len) { store64(err_out, RG_ERR_INVALID_FORMAT); return 0; }
+
+    var grid = _icc_lut_check_channels(data, off, err_out);
+    if (load64(err_out) != RG_ERR_NONE) { return 0; }
+
+    var in_start = off + 48;
+    var lut_start = in_start + 3 * 256;
+    var out_start = lut_start + grid * grid * grid * 3;
+    if (out_start + 3 * 256 > len) {
+        store64(err_out, RG_ERR_INVALID_FORMAT);
+        return 0;
+    }
+    return _icc_lut_build(data, len, major, minor, cs_off, grid, in_start,
+                          256, lut_start, 0, err_out);
+}
+
+# Parse a LUT-based profile. Reads the A2B0 tag and dispatches on its type
+# signature: `mft2` (v2, 16-bit) or `mft1` (v2, 8-bit). rust-old's doc comment
+# mentions `mAB ` (v4) but its match arms do not handle it, so neither does
+# this — an mAB profile is rejected as an unsupported type, exactly as in Rust.
+#must_use
+fn icc_lut_profile_from_bytes(data, len, err_out) {
+    if (len < _ICC_MIN_PROFILE_SIZE) {
+        store64(err_out, RG_ERR_INVALID_FORMAT);
+        return 0;
+    }
+    var acsp = _icc_sig_acsp();
+    var ok = _icc_sig_eq(data, 36, acsp);
+    fl_free(acsp);
+    if (ok == 0) { store64(err_out, RG_ERR_INVALID_FORMAT); return 0; }
+
+    var major = load8(data + 8);
+    var minor = load8(data + 9) >> 4;
+
+    var tag_count = _icc_read_u32_be(data, len, 128, err_out);
+    if (load64(err_out) != RG_ERR_NONE) { return 0; }
+    if (tag_count > _ICC_MAX_TAG_COUNT) {
+        store64(err_out, RG_ERR_INVALID_FORMAT);
+        return 0;
+    }
+    if (132 + tag_count * 12 > len) {
+        store64(err_out, RG_ERR_INVALID_FORMAT);
+        return 0;
+    }
+    var tags = _icc_parse_tag_table(data, len, tag_count, err_out);
+    if (tags == 0) { return 0; }
+
+    var a2b0 = _icc_sig4(65, 50, 66, 48);
+    var idx = _icc_find_tag(tags, tag_count, a2b0);
+    fl_free(a2b0);
+    if (idx < 0) {
+        fl_free(tags);
+        store64(err_out, RG_ERR_INVALID_FORMAT);
+        return 0;
+    }
+
+    var off = _icc_tag_offset(tags, idx);
+    var size = _icc_tag_size(tags, idx);
+    if (off + 4 > len) {
+        fl_free(tags);
+        store64(err_out, RG_ERR_INVALID_FORMAT);
+        return 0;
+    }
+
+    var m2 = _icc_sig4(109, 102, 116, 50);
+    var is_mft2 = _icc_sig_eq(data, off, m2);
+    fl_free(m2);
+    var m1 = _icc_sig4(109, 102, 116, 49);
+    var is_mft1 = _icc_sig_eq(data, off, m1);
+    fl_free(m1);
+    fl_free(tags);
+
+    if (is_mft2 == 1) {
+        return _icc_parse_mft2(data, len, off, size, major, minor, 16, err_out);
+    }
+    if (is_mft1 == 1) {
+        return _icc_parse_mft1(data, len, off, size, major, minor, 16, err_out);
+    }
+    store64(err_out, RG_ERR_INVALID_FORMAT);
+    return 0;
+}
+
+# Apply the LUT profile to an RGB triplet, giving CIE XYZ. Input curves first,
+# then trilinear interpolation through the 3D table.
+#
+# INDEXING. The ICC spec has the LAST input channel varying fastest, so a cell
+# lives at (b + g*gs + r*gs*gs) * 3 + channel. Getting this backwards produces
+# a colour cast rather than a crash, which is why the test suite checks a
+# deliberately asymmetric LUT.
+fn icc_lut_profile_apply(p, r, g, b, x_out, y_out, z_out) {
+    var gs = load64(p + 24);
+    var lut = load64(p + 32);
+    var cl = load64(p + 72);
+
+    var ri = _icc_apply_curve(load64(p + 48), cl, f64_clamp(r, 0, F64_ONE));
+    var gi = _icc_apply_curve(load64(p + 56), cl, f64_clamp(g, 0, F64_ONE));
+    var bi = _icc_apply_curve(load64(p + 64), cl, f64_clamp(b, 0, F64_ONE));
+
+    var s = f64_from(gs - 1);
+    var rf = f64_clamp(f64_mul(ri, s), 0, s);
+    var gf = f64_clamp(f64_mul(gi, s), 0, s);
+    var bf = f64_clamp(f64_mul(bi, s), 0, s);
+
+    var rfl = f64_floor(rf);
+    var gfl = f64_floor(gf);
+    var bfl = f64_floor(bf);
+    var r0 = f64_to(rfl);
+    var g0 = f64_to(gfl);
+    var b0 = f64_to(bfl);
+    var r1 = r0 + 1;
+    if (r1 > gs - 1) { r1 = gs - 1; }
+    var g1 = g0 + 1;
+    if (g1 > gs - 1) { g1 = gs - 1; }
+    var b1 = b0 + 1;
+    if (b1 > gs - 1) { b1 = gs - 1; }
+
+    var fr = f64_sub(rf, rfl);
+    var fg = f64_sub(gf, gfl);
+    var fb = f64_sub(bf, bfl);
+
+    var ch = 0;
+    while (ch < 3) {
+        var c000 = load64(lut + ((b0 + g0 * gs + r0 * gs * gs) * 3 + ch) * 8);
+        var c100 = load64(lut + ((b0 + g0 * gs + r1 * gs * gs) * 3 + ch) * 8);
+        var c010 = load64(lut + ((b0 + g1 * gs + r0 * gs * gs) * 3 + ch) * 8);
+        var c110 = load64(lut + ((b0 + g1 * gs + r1 * gs * gs) * 3 + ch) * 8);
+        var c001 = load64(lut + ((b1 + g0 * gs + r0 * gs * gs) * 3 + ch) * 8);
+        var c101 = load64(lut + ((b1 + g0 * gs + r1 * gs * gs) * 3 + ch) * 8);
+        var c011 = load64(lut + ((b1 + g1 * gs + r0 * gs * gs) * 3 + ch) * 8);
+        var c111 = load64(lut + ((b1 + g1 * gs + r1 * gs * gs) * 3 + ch) * 8);
+
+        var x00 = f64_add(c000, f64_mul(fr, f64_sub(c100, c000)));
+        var x10 = f64_add(c010, f64_mul(fr, f64_sub(c110, c010)));
+        var x01 = f64_add(c001, f64_mul(fr, f64_sub(c101, c001)));
+        var x11 = f64_add(c011, f64_mul(fr, f64_sub(c111, c011)));
+        var y0 = f64_add(x00, f64_mul(fg, f64_sub(x10, x00)));
+        var y1 = f64_add(x01, f64_mul(fg, f64_sub(x11, x01)));
+        var res = f64_add(y0, f64_mul(fb, f64_sub(y1, y0)));
+
+        if (ch == 0) { store64(x_out, res); }
+        if (ch == 1) { store64(y_out, res); }
+        if (ch == 2) { store64(z_out, res); }
+        ch = ch + 1;
+    }
+    return RG_ERR_NONE;
+}

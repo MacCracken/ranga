@@ -1,0 +1,932 @@
+# icc.tcyr — ICC profile parsing and tone curves
+# Ported from rust-old/src/icc.rs #[cfg(test)] and its doctests.
+#
+# This is the one module whose input is UNTRUSTED file data, so the malformed
+# cases carry as much weight as the happy path.
+
+include "src/error.cyr"
+include "src/bytevec.cyr"
+include "src/icc.cyr"
+
+alloc_init();
+
+var err = fl_alloc(8);
+
+fn approx(a, b, eps) {
+    if (f64_lt(f64_abs(f64_sub(a, b)), eps) == 1) { return 1; }
+    return 0;
+}
+
+# ================================================================
+# big-endian readers
+# ================================================================
+test_group("big-endian readers");
+
+var d = fl_alloc(16);
+store8(d, 0x12); store8(d + 1, 0x34); store8(d + 2, 0x56); store8(d + 3, 0x78);
+store8(d + 4, 0xFF); store8(d + 5, 0xFF); store8(d + 6, 0xFF); store8(d + 7, 0xFF);
+store8(d + 8, 0x00); store8(d + 9, 0x01); store8(d + 10, 0x00); store8(d + 11, 0x00);
+
+# BIG-endian: the first byte is the most significant. A little-endian read
+# would give 0x78563412 here.
+assert_eq(_icc_read_u32_be(d, 16, 0, err), 0x12345678, "u32 reads BIG-endian, not little");
+assert_eq(load64(err), RG_ERR_NONE, "in-bounds read succeeds");
+assert_eq(_icc_read_u16_be(d, 16, 0, err), 0x1234, "u16 reads big-endian");
+assert_eq(_icc_read_u16_be(d, 16, 2, err), 0x5678, "u16 at an offset");
+
+# Sign extension: 0xFFFFFFFF is -1 as i32, not 4294967295.
+assert_eq(_icc_read_i32_be(d, 16, 4, err), (0 - 1), "i32 sign-extends 0xFFFFFFFF to -1");
+assert_eq(_icc_read_u32_be(d, 16, 4, err), 4294967295, "the same bytes read UNSIGNED are 4294967295");
+
+# s15Fixed16: 0x00010000 is exactly 1.0.
+assert_eq(approx(_icc_read_s15fixed16(d, 16, 8, err), F64_ONE, 0.0000001), 1, "s15Fixed16 0x00010000 == 1.0");
+assert_eq(approx(_icc_read_s15fixed16(d, 16, 4, err), f64_div(f64_neg(F64_ONE), 65536.0), 0.0000001), 1,
+          "s15Fixed16 of -1 raw is -1/65536 — the sign survives the scale");
+
+# Every read is bounds-checked; this is untrusted input.
+_icc_read_u32_be(d, 16, 13, err);
+assert_eq(load64(err), RG_ERR_PARSE, "a u32 read past the end is rejected");
+_icc_read_u16_be(d, 16, 15, err);
+assert_eq(load64(err), RG_ERR_PARSE, "a u16 read past the end is rejected");
+_icc_read_u32_be(d, 16, (0 - 1), err);
+assert_eq(load64(err), RG_ERR_PARSE, "a negative offset is rejected");
+fl_free(d);
+
+# ================================================================
+# ToneCurve
+# ================================================================
+test_group("tone curve");
+
+# Doctest: ToneCurve::Gamma(2.2).apply(0.5) is between 0.2 and 0.3.
+var tg = tone_curve_gamma(2.2);
+assert_eq(tone_curve_kind(tg), TC_GAMMA, "gamma curve kind");
+assert_eq(approx(tone_curve_apply(tg, 0), 0, 0.0000001), 1, "gamma of 0 is 0");
+assert_eq(approx(tone_curve_apply(tg, F64_ONE), F64_ONE, 0.0000001), 1, "gamma of 1 is 1");
+var mid = tone_curve_apply(tg, 0.5);
+assert_eq(f64_gt(mid, 0.2), 1, "gamma 2.2 of 0.5 is above 0.2 (doctest)");
+assert_eq(f64_lt(mid, 0.3), 1, "gamma 2.2 of 0.5 is below 0.3 (doctest)");
+
+# The input is CLAMPED to [0,1] before the curve — out-of-range must not
+# produce an out-of-range result or a NaN.
+assert_eq(approx(tone_curve_apply(tg, 2.0), F64_ONE, 0.0000001), 1, "input above 1 clamps to 1");
+assert_eq(approx(tone_curve_apply(tg, f64_neg(F64_ONE)), 0, 0.0000001), 1, "input below 0 clamps to 0");
+# A zero base through pow: the bare builtin gives NaN here, _rg_pow gives 0.
+var z = tone_curve_apply(tg, 0);
+assert_eq(f64_eq(z, z), 1, "gamma of 0 is a number, not NaN");
+tone_curve_free(tg);
+
+# Table interpolation.
+var tab = fl_alloc(3 * 8);
+store64(tab, 0);
+store64(tab + 8, 0.5);
+store64(tab + 16, F64_ONE);
+var tt = tone_curve_table(tab, 3);
+assert_eq(tone_curve_kind(tt), TC_TABLE, "table curve kind");
+assert_eq(tone_curve_len(tt), 3, "table length");
+assert_eq(approx(tone_curve_apply(tt, 0), 0, 0.0000001), 1, "table at 0");
+assert_eq(approx(tone_curve_apply(tt, 0.5), 0.5, 0.0000001), 1, "table at the midpoint entry");
+# Interpolation BETWEEN entries: 0.25 sits halfway between entries 0 and 1.
+assert_eq(approx(tone_curve_apply(tt, 0.25), 0.25, 0.0000001), 1, "table interpolates between entries");
+# The top edge is where the asymmetric index clamp matters: hi is derived from
+# min(lo, len-2) BEFORE lo is clamped to len-1, so v == 1.0 reads entry 2 twice
+# rather than running off the end.
+assert_eq(approx(tone_curve_apply(tt, F64_ONE), F64_ONE, 0.0000001), 1, "table at 1.0 does not read past the end");
+tone_curve_free(tt);
+
+# Degenerate tables: empty is the identity, single-entry is constant.
+var t0 = tone_curve_table(0, 0);
+assert_eq(approx(tone_curve_apply(t0, 0.37), 0.37, 0.0000001), 1, "an empty table is the identity");
+tone_curve_free(t0);
+var t1tab = fl_alloc(8);
+store64(t1tab, 0.75);
+var t1 = tone_curve_table(t1tab, 1);
+assert_eq(approx(tone_curve_apply(t1, 0.1), 0.75, 0.0000001), 1, "a 1-entry table is constant");
+assert_eq(approx(tone_curve_apply(t1, 0.9), 0.75, 0.0000001), 1, "constant regardless of input");
+tone_curve_free(t1);
+
+# ================================================================
+# srgb_v2_profile — build and parse round-trip
+# ================================================================
+test_group("srgb v2 profile");
+
+var lenp = fl_alloc(8);
+var pbv = srgb_v2_profile(lenp);
+assert_eq(pbv != 0, 1, "srgb_v2_profile builds");
+var plen = load64(lenp);
+# Oracle: 128 header + 4 count + 72 table + 3*20 XYZ + 3*16 curv = 312.
+assert_eq(plen, 312, "the generated profile is 312 bytes");
+var pdata = bv_data(pbv);
+
+# Header sanity — this is what makes it an ICC profile at all.
+assert_eq(_icc_read_u32_be(pdata, plen, 0, err), 312, "the header size field matches the buffer");
+assert_eq(load8(pdata + 8), 2, "major version 2");
+assert_eq(load8(pdata + 9) >> 4, 4, "minor version 4 lives in the HIGH nibble");
+assert_eq(load8(pdata + 36), 97, "acsp signature byte 0");
+assert_eq(load8(pdata + 39), 112, "acsp signature byte 3");
+assert_eq(_icc_read_u32_be(pdata, plen, 128, err), 6, "six tags");
+
+# Parse it back.
+var prof = icc_profile_from_bytes(pdata, plen, err);
+assert_eq(load64(err), RG_ERR_NONE, "the generated profile parses");
+assert_eq(prof != 0, 1, "parse returns a profile");
+assert_eq(icc_profile_major(prof), 2, "parsed major version");
+assert_eq(icc_profile_minor(prof), 4, "parsed minor version");
+assert_eq(icc_profile_color_space_byte(prof, 0), 82, "colour space is 'RGB '");
+assert_eq(icc_profile_color_space_byte(prof, 3), 32, "colour space trailing space");
+
+# The matrix is COLUMN-major: row 0 is the RED primary's XYZ, not the X row.
+# Confusing the two transposes the whole transform, and the values are close
+# enough that a casual test would not notice — 0.4124 vs 0.4124 for [0][0] but
+# 0.3576 vs 0.2127 for [0][1].
+assert_eq(approx(icc_profile_matrix(prof, 0, 0), 0.412460, 0.0001), 1, "matrix[0][0] is red X");
+assert_eq(approx(icc_profile_matrix(prof, 0, 1), 0.212677, 0.0001), 1, "matrix[0][1] is red Y — COLUMN-major");
+assert_eq(approx(icc_profile_matrix(prof, 1, 0), 0.357574, 0.0001), 1, "matrix[1][0] is green X");
+assert_eq(approx(icc_profile_matrix(prof, 2, 2), 0.950302, 0.0001), 1, "matrix[2][2] is blue Z");
+
+# The TRC tags parse as gamma, quantised by u8Fixed8 to 563/256 = 2.19921875
+# rather than exactly 2.2 — that quantisation is the format's, not a port bug.
+assert_eq(tone_curve_kind(icc_profile_red_trc(prof)), TC_GAMMA, "rTRC is a gamma curve");
+assert_eq(approx(tone_curve_gamma_value(icc_profile_red_trc(prof)), 2.19921875, 0.00001), 1,
+          "gamma 2.2 quantises to 2.19921875 through u8Fixed8");
+
+# apply(1,1,1) must reproduce the D65 white point — the strongest single check
+# that the curves and the matrix are wired together correctly.
+var xyz = fl_alloc(24);
+icc_profile_apply(prof, F64_ONE, F64_ONE, F64_ONE, xyz);
+assert_eq(approx(load64(xyz), 0.9505, 0.001), 1, "white through the profile gives D65 X");
+assert_eq(approx(load64(xyz + 8), F64_ONE, 0.001), 1, "white gives Y == 1.0");
+assert_eq(approx(load64(xyz + 16), 1.0888, 0.001), 1, "white gives D65 Z");
+# Black in, black out.
+icc_profile_apply(prof, 0, 0, 0, xyz);
+assert_eq(approx(load64(xyz), 0, 0.0000001), 1, "black gives X == 0");
+assert_eq(approx(load64(xyz + 8), 0, 0.0000001), 1, "black gives Y == 0");
+
+# ================================================================
+# malformed input — untrusted data
+# ================================================================
+test_group("malformed profiles");
+
+assert_eq(icc_profile_from_bytes(pdata, 131, err), 0, "a profile shorter than 132 bytes is rejected");
+assert_eq(load64(err), RG_ERR_INVALID_FORMAT, "too-short is INVALID_FORMAT");
+
+# Corrupt the acsp signature.
+var bad = bv_clone(pbv);
+var bd = bv_data(bad);
+store8(bd + 36, 88);
+assert_eq(icc_profile_from_bytes(bd, plen, err), 0, "a missing acsp signature is rejected");
+assert_eq(load64(err), RG_ERR_INVALID_FORMAT, "bad signature is INVALID_FORMAT");
+bv_free(bad);
+
+# A tag count beyond the limit — the guard that stops a hostile profile from
+# making us allocate unboundedly.
+var bad2 = bv_clone(pbv);
+var bd2 = bv_data(bad2);
+_icc_write_u32_be(bd2, 128, 2000);
+assert_eq(icc_profile_from_bytes(bd2, plen, err), 0, "a tag count above 1024 is rejected");
+bv_free(bad2);
+
+# A tag count that fits the limit but overruns the buffer.
+var bad3 = bv_clone(pbv);
+var bd3 = bv_data(bad3);
+_icc_write_u32_be(bd3, 128, 100);
+assert_eq(icc_profile_from_bytes(bd3, plen, err), 0, "a tag table extending past the data is rejected");
+bv_free(bad3);
+
+# A tag whose offset+size runs past the profile.
+var bad4 = bv_clone(pbv);
+var bd4 = bv_data(bad4);
+_icc_write_u32_be(bd4, 140, 99999);
+assert_eq(icc_profile_from_bytes(bd4, plen, err), 0, "a tag whose offset+size overruns is rejected");
+bv_free(bad4);
+
+# A missing required tag: rename rXYZ so it cannot be found.
+var bad5 = bv_clone(pbv);
+var bd5 = bv_data(bad5);
+store8(bd5 + 132, 122);
+assert_eq(icc_profile_from_bytes(bd5, plen, err), 0, "a missing rXYZ tag is rejected");
+assert_eq(load64(err), RG_ERR_INVALID_FORMAT, "missing tag is INVALID_FORMAT");
+bv_free(bad5);
+
+# An unsupported TRC type signature.
+var bad6 = bv_clone(pbv);
+var bd6 = bv_data(bad6);
+store8(bd6 + 264, 122);
+assert_eq(icc_profile_from_bytes(bd6, plen, err), 0, "an unknown TRC type signature is rejected");
+bv_free(bad6);
+
+# An XYZ tag with the wrong type signature.
+var bad7 = bv_clone(pbv);
+var bd7 = bv_data(bad7);
+store8(bd7 + 204, 122);
+assert_eq(icc_profile_from_bytes(bd7, plen, err), 0, "an XYZ tag with a wrong type signature is rejected");
+bv_free(bad7);
+
+# ================================================================
+# curv TABLE and para curves — the paths srgb_v2_profile never takes
+# ================================================================
+test_group("curv table and para");
+
+# Build a profile whose three TRC tags are a given blob, so the parametric and
+# table curve paths get exercised. srgb_v2_profile only ever emits curv
+# count==1, which left five of the six curve types with no coverage at all.
+# Tag signatures indexed 0/1/2 = red/green/blue, so the big-profile block can
+# fill its tag table in a loop. 114/103/98 are 'r'/'g'/'b'.
+fn _icc_sig_xyz_tag_n(i) {
+    if (i == 0) { return _icc_sig4(114, 88, 89, 90); }
+    if (i == 1) { return _icc_sig4(103, 88, 89, 90); }
+    return _icc_sig4(98, 88, 89, 90);
+}
+
+fn _icc_sig_trc_tag_n(i) {
+    if (i == 0) { return _icc_sig4(114, 84, 82, 67); }
+    if (i == 1) { return _icc_sig4(103, 84, 82, 67); }
+    return _icc_sig4(98, 84, 82, 67);
+}
+
+fn build_profile(trc, trclen, out_len) {
+    var xyz_size = 20;
+    var data_start = 128 + 4 + 6 * 12;
+    var tl = _icc_align4(trclen);
+    var rx = data_start;
+    var gx = rx + 20;
+    var bx = gx + 20;
+    var rt = bx + 20;
+    var gt = rt + tl;
+    var bt = gt + tl;
+    var total = bt + tl;
+    var bv = bv_zeroed(total);
+    if (bv == 0) { return 0; }
+    var b = bv_data(bv);
+    store64(out_len, total);
+    _icc_write_u32_be(b, 0, total);
+    store8(b + 8, 2);
+    store8(b + 9, 4 << 4);
+    _icc_write_sig(b, 16, _icc_sig4(82, 71, 66, 32));
+    _icc_write_sig(b, 36, _icc_sig_acsp());
+    _icc_write_u32_be(b, 128, 6);
+    _icc_write_sig(b, 132, _icc_sig_rxyz()); _icc_write_u32_be(b, 136, rx); _icc_write_u32_be(b, 140, xyz_size);
+    _icc_write_sig(b, 144, _icc_sig_gxyz()); _icc_write_u32_be(b, 148, gx); _icc_write_u32_be(b, 152, xyz_size);
+    _icc_write_sig(b, 156, _icc_sig_bxyz()); _icc_write_u32_be(b, 160, bx); _icc_write_u32_be(b, 164, xyz_size);
+    _icc_write_sig(b, 168, _icc_sig_rtrc()); _icc_write_u32_be(b, 172, rt); _icc_write_u32_be(b, 176, trclen);
+    _icc_write_sig(b, 180, _icc_sig_gtrc()); _icc_write_u32_be(b, 184, gt); _icc_write_u32_be(b, 188, trclen);
+    _icc_write_sig(b, 192, _icc_sig_btrc()); _icc_write_u32_be(b, 196, bt); _icc_write_u32_be(b, 200, trclen);
+    var k = 0;
+    while (k < 3) {
+        var o = rx + k * 20;
+        _icc_write_sig(b, o, _icc_sig_xyz());
+        _icc_write_s15fixed16(b, o + 8, 0.5);
+        _icc_write_s15fixed16(b, o + 12, 0.5);
+        _icc_write_s15fixed16(b, o + 16, 0.5);
+        k = k + 1;
+    }
+    k = 0;
+    while (k < 3) {
+        var t = rt + k * tl;
+        var j = 0;
+        while (j < trclen) { store8(b + t + j, load8(trc + j)); j = j + 1; }
+        k = k + 1;
+    }
+    return bv;
+}
+
+# --- curv with a real TABLE (count > 1) ---
+# Three entries 0, 32768, 65535 -> 0.0, ~0.5, 1.0 after the /65535 scale.
+# The /65535 vs /65536 divisor is only visible here; count==1 uses /256.
+var ctrc = fl_alloc(18);
+_icc_write_sig(ctrc, 0, _icc_sig_curv());
+_icc_write_u32_be(ctrc, 8, 3);
+store8(ctrc + 12, 0); store8(ctrc + 13, 0);
+store8(ctrc + 14, 0x80); store8(ctrc + 15, 0x00);
+store8(ctrc + 16, 0xFF); store8(ctrc + 17, 0xFF);
+var clen = fl_alloc(8);
+var cbv = build_profile(ctrc, 18, clen);
+var cprof = icc_profile_from_bytes(bv_data(cbv), load64(clen), err);
+assert_eq(load64(err), RG_ERR_NONE, "a profile with a curv TABLE parses");
+var ctc = icc_profile_red_trc(cprof);
+assert_eq(tone_curve_kind(ctc), TC_TABLE, "curv count > 1 gives a TABLE, not a gamma");
+assert_eq(tone_curve_len(ctc), 3, "the table has three entries");
+# 0xFFFF / 65535 == 1.0 exactly. With a /65536 divisor it would be 0.99998,
+# which is the only place that divisor is observable.
+assert_eq(approx(tone_curve_apply(ctc, F64_ONE), F64_ONE, 0.000001), 1, "0xFFFF scales to exactly 1.0 (/65535, not /65536)");
+assert_eq(approx(tone_curve_apply(ctc, 0), 0, 0.000001), 1, "entry 0 is 0.0");
+icc_profile_free(cprof); bv_free(cbv); fl_free(ctrc); fl_free(clen);
+
+# --- para type 0: a single gamma parameter ---
+var p0 = fl_alloc(16);
+_icc_write_sig(p0, 0, _icc_sig_para());
+store8(p0 + 8, 0); store8(p0 + 9, 0);
+_icc_write_s15fixed16(p0, 12, 2.4);
+var p0len = fl_alloc(8);
+var p0bv = build_profile(p0, 16, p0len);
+var p0prof = icc_profile_from_bytes(bv_data(p0bv), load64(p0len), err);
+assert_eq(load64(err), RG_ERR_NONE, "a para type 0 profile parses");
+assert_eq(tone_curve_kind(icc_profile_red_trc(p0prof)), TC_GAMMA, "para type 0 gives a GAMMA curve, not a table");
+assert_eq(approx(tone_curve_gamma_value(icc_profile_red_trc(p0prof)), 2.4, 0.0001), 1, "para type 0 gamma is 2.4");
+icc_profile_free(p0prof); bv_free(p0bv); fl_free(p0); fl_free(p0len);
+
+# --- para type 3: the seven-parameter sRGB-style curve ---
+# g=2.4 a=1/1.055 b=0.055/1.055 c=1/12.92 d=0.04045 e=0 f=0 — the standard
+# sRGB transfer function, so the result should track srgb_to_linear closely.
+var p3 = fl_alloc(40);
+_icc_write_sig(p3, 0, _icc_sig_para());
+store8(p3 + 8, 0); store8(p3 + 9, 3);
+_icc_write_s15fixed16(p3, 12, 2.4);
+_icc_write_s15fixed16(p3, 16, f64_div(F64_ONE, 1.055));
+_icc_write_s15fixed16(p3, 20, f64_div(0.055, 1.055));
+_icc_write_s15fixed16(p3, 24, f64_div(F64_ONE, 12.92));
+_icc_write_s15fixed16(p3, 28, 0.04045);
+_icc_write_s15fixed16(p3, 32, 0);
+_icc_write_s15fixed16(p3, 36, 0);
+var p3len = fl_alloc(8);
+var p3bv = build_profile(p3, 40, p3len);
+var p3prof = icc_profile_from_bytes(bv_data(p3bv), load64(p3len), err);
+assert_eq(load64(err), RG_ERR_NONE, "a para type 3 profile parses");
+var p3tc = icc_profile_red_trc(p3prof);
+assert_eq(tone_curve_kind(p3tc), TC_TABLE, "para type 3 builds a 4096-entry TABLE");
+assert_eq(tone_curve_len(p3tc), 4096, "the parametric table has 4096 entries");
+assert_eq(approx(tone_curve_apply(p3tc, 0), 0, 0.001), 1, "para type 3 maps 0 to 0");
+assert_eq(approx(tone_curve_apply(p3tc, F64_ONE), F64_ONE, 0.001), 1, "para type 3 maps 1 to 1");
+# The sRGB transfer at 0.5 is ~0.214 — this is the value that would move if the
+# power branch, the linear branch, or the d threshold were wrong.
+assert_eq(approx(tone_curve_apply(p3tc, 0.5), 0.2140, 0.005), 1, "para type 3 at 0.5 matches the sRGB transfer (~0.214)");
+# Below the d threshold the LINEAR branch runs: 0.02 / 12.92 ~ 0.00155.
+# Tight tolerance on purpose. If the break point were -b/a (-0.055) instead of
+# d (0.04045), every X would take the power branch and 0.02 would come out at
+# ~0.00175 rather than ~0.001548 — a 13% error that a loose epsilon hides.
+assert_eq(approx(tone_curve_apply(p3tc, 0.02), 0.0015480, 0.00005), 1,
+          "below d the linear branch is used, and the break point is d itself");
+icc_profile_free(p3prof); bv_free(p3bv); fl_free(p3); fl_free(p3len);
+
+# --- para type 1: (aX + b)^g, zero below -b/a ---
+# a = 1, b = -0.5, g = 1 gives a ramp that is clamped to 0 below X = 0.5.
+# The max(0.0) guard before the power is what keeps the sub-threshold region
+# from feeding a negative base into pow.
+var p1 = fl_alloc(24);
+_icc_write_sig(p1, 0, _icc_sig_para());
+store8(p1 + 8, 0); store8(p1 + 9, 1);
+_icc_write_s15fixed16(p1, 12, F64_ONE);
+_icc_write_s15fixed16(p1, 16, F64_ONE);
+_icc_write_s15fixed16(p1, 20, f64_neg(0.5));
+var p1len = fl_alloc(8);
+var p1bv = build_profile(p1, 24, p1len);
+var p1prof = icc_profile_from_bytes(bv_data(p1bv), load64(p1len), err);
+assert_eq(load64(err), RG_ERR_NONE, "a para type 1 profile parses");
+var p1tc = icc_profile_red_trc(p1prof);
+assert_eq(approx(tone_curve_apply(p1tc, 0.25), 0, 0.001), 1, "para type 1 is 0 below the -b/a threshold");
+assert_eq(approx(tone_curve_apply(p1tc, F64_ONE), 0.5, 0.001), 1, "para type 1 at 1.0 is (1 - 0.5)^1 == 0.5");
+assert_eq(approx(tone_curve_apply(p1tc, 0.75), 0.25, 0.002), 1, "para type 1 ramps above the threshold");
+# Every entry must be a real number — a negative base reaching pow would make
+# the whole sub-threshold region NaN.
+var nan_free = 1;
+var pi2 = 0;
+while (pi2 < 20) {
+    var pv = tone_curve_apply(p1tc, f64_div(f64_from(pi2), 20.0));
+    if (f64_eq(pv, pv) == 0) { nan_free = 0; }
+    pi2 = pi2 + 1;
+}
+assert_eq(nan_free, 1, "no entry is NaN — the max(0) guard holds the base non-negative");
+icc_profile_free(p1prof); bv_free(p1bv); fl_free(p1); fl_free(p1len);
+
+# --- para type 2: adds a constant c below the threshold ---
+var p2 = fl_alloc(28);
+_icc_write_sig(p2, 0, _icc_sig_para());
+store8(p2 + 8, 0); store8(p2 + 9, 2);
+_icc_write_s15fixed16(p2, 12, F64_ONE);
+_icc_write_s15fixed16(p2, 16, F64_ONE);
+_icc_write_s15fixed16(p2, 20, f64_neg(0.5));
+_icc_write_s15fixed16(p2, 24, 0.25);
+var p2len = fl_alloc(8);
+var p2bv = build_profile(p2, 28, p2len);
+var p2prof = icc_profile_from_bytes(bv_data(p2bv), load64(p2len), err);
+assert_eq(load64(err), RG_ERR_NONE, "a para type 2 profile parses");
+var p2tc = icc_profile_red_trc(p2prof);
+# Below the threshold type 2 is the CONSTANT c, where type 1 was 0.
+assert_eq(approx(tone_curve_apply(p2tc, 0.25), 0.25, 0.002), 1, "para type 2 is the constant c below the threshold");
+assert_eq(approx(tone_curve_apply(p2tc, F64_ONE), 0.75, 0.002), 1, "para type 2 at 1.0 is (0.5)^1 + 0.25");
+icc_profile_free(p2prof); bv_free(p2bv); fl_free(p2); fl_free(p2len);
+
+# --- para type 4 shares type 3's formula in this implementation ---
+var p4 = fl_alloc(40);
+var pc = 0;
+while (pc < 40) { store8(p4 + pc, load8(p3 + pc)); pc = pc + 1; }
+_icc_write_sig(p4, 0, _icc_sig_para());
+store8(p4 + 8, 0); store8(p4 + 9, 4);
+_icc_write_s15fixed16(p4, 12, 2.4);
+_icc_write_s15fixed16(p4, 16, f64_div(F64_ONE, 1.055));
+_icc_write_s15fixed16(p4, 20, f64_div(0.055, 1.055));
+_icc_write_s15fixed16(p4, 24, f64_div(F64_ONE, 12.92));
+_icc_write_s15fixed16(p4, 28, 0.04045);
+_icc_write_s15fixed16(p4, 32, 0);
+_icc_write_s15fixed16(p4, 36, 0);
+var p4len = fl_alloc(8);
+var p4bv = build_profile(p4, 40, p4len);
+var p4prof = icc_profile_from_bytes(bv_data(p4bv), load64(p4len), err);
+assert_eq(load64(err), RG_ERR_NONE, "a para type 4 profile parses");
+assert_eq(approx(tone_curve_apply(icc_profile_red_trc(p4prof), 0.5), 0.2140, 0.005), 1,
+          "para type 4 gives the same curve as type 3 (they share a formula here)");
+icc_profile_free(p4prof); bv_free(p4bv); fl_free(p4); fl_free(p4len);
+
+# An unsupported para function type is rejected.
+var p9 = fl_alloc(40);
+_icc_write_sig(p9, 0, _icc_sig_para());
+store8(p9 + 8, 0); store8(p9 + 9, 9);
+var p9len = fl_alloc(8);
+var p9bv = build_profile(p9, 40, p9len);
+assert_eq(icc_profile_from_bytes(bv_data(p9bv), load64(p9len), err), 0, "an unknown para function type is rejected");
+bv_free(p9bv); fl_free(p9); fl_free(p9len);
+
+# --- para type 3 where d sits BELOW the -b/a break point ---
+# sRGB never exercises this: its d (0.04045) is above -b/a (-0.055), so aX+b is
+# already non-negative wherever the power branch runs and the .max(0.0) is
+# inert. Here d = 0.1 and -b/a = 0.5, so for X in [0.1, 0.5) the power branch
+# runs on a NEGATIVE base — which is the only configuration where the guard
+# does any work. Without it, pow(-0.2, 2) returns 0.04 instead of 0.
+var pd = fl_alloc(40);
+_icc_write_sig(pd, 0, _icc_sig_para());
+store8(pd + 8, 0); store8(pd + 9, 3);
+_icc_write_s15fixed16(pd, 12, 2.0);
+_icc_write_s15fixed16(pd, 16, F64_ONE);
+_icc_write_s15fixed16(pd, 20, f64_neg(0.5));
+_icc_write_s15fixed16(pd, 24, 0);
+_icc_write_s15fixed16(pd, 28, 0.1);
+_icc_write_s15fixed16(pd, 32, 0);
+_icc_write_s15fixed16(pd, 36, 0);
+var pdlen = fl_alloc(8);
+var pdbv = build_profile(pd, 40, pdlen);
+var pdprof = icc_profile_from_bytes(bv_data(pdbv), load64(pdlen), err);
+assert_eq(load64(err), RG_ERR_NONE, "a para type 3 with d below -b/a parses");
+var pdtc = icc_profile_red_trc(pdprof);
+assert_eq(approx(tone_curve_apply(pdtc, 0.3), 0, 0.002), 1,
+          "a negative power base is floored to 0 by the max(0) guard");
+assert_eq(approx(tone_curve_apply(pdtc, F64_ONE), 0.25, 0.002), 1,
+          "above the break point the power branch is unaffected");
+icc_profile_free(pdprof); bv_free(pdbv); fl_free(pd); fl_free(pdlen);
+
+# --- para type 3 with e != f: the two branches carry DIFFERENT constants ---
+# Everywhere else e and f coincide (both 0 for type 1 and sRGB, both c for type
+# 2), so swapping them is invisible. Here f = 0.2 below the break and e = 0.1
+# above it.
+var pe = fl_alloc(40);
+_icc_write_sig(pe, 0, _icc_sig_para());
+store8(pe + 8, 0); store8(pe + 9, 3);
+_icc_write_s15fixed16(pe, 12, F64_ONE);
+_icc_write_s15fixed16(pe, 16, 0.5);
+_icc_write_s15fixed16(pe, 20, 0);
+_icc_write_s15fixed16(pe, 24, 0);
+_icc_write_s15fixed16(pe, 28, 0.5);
+_icc_write_s15fixed16(pe, 32, 0.1);
+_icc_write_s15fixed16(pe, 36, 0.2);
+var pelen = fl_alloc(8);
+var pebv = build_profile(pe, 40, pelen);
+var peprof = icc_profile_from_bytes(bv_data(pebv), load64(pelen), err);
+assert_eq(load64(err), RG_ERR_NONE, "a para type 3 with e != f parses");
+var petc = icc_profile_red_trc(peprof);
+assert_eq(approx(tone_curve_apply(petc, 0.25), 0.2, 0.002), 1,
+          "below the break point the constant is f");
+# a = 0.5 keeps the top of the curve at 0.6, well inside [0, 1]. With a = 1 it
+# would land at 1.1 and the clamp would flatten it to 1.0 — which is also what
+# the f constant gives, hiding the swap entirely.
+assert_eq(approx(tone_curve_apply(petc, F64_ONE), 0.6, 0.002), 1,
+          "above the break point the constant is e");
+icc_profile_free(peprof); bv_free(pebv); fl_free(pe); fl_free(pelen);
+
+# --- para type 1 with a POSITIVE b, which pushes the break point below zero ---
+# For types 1 and 2 the break point is -b/a. Every other case here uses b < 0,
+# where the break point is positive and the .max(0.0) floor makes the power
+# branch return exactly the same value the else branch would — so the SIGN of
+# the break point is unobservable. With b = +0.25 the break point is -0.25, the
+# power branch covers the whole domain, and f(0) = 0.25 rather than 0.
+var pp = fl_alloc(24);
+_icc_write_sig(pp, 0, _icc_sig_para());
+store8(pp + 8, 0); store8(pp + 9, 1);
+_icc_write_s15fixed16(pp, 12, F64_ONE);
+_icc_write_s15fixed16(pp, 16, 0.5);
+_icc_write_s15fixed16(pp, 20, 0.25);
+var pplen = fl_alloc(8);
+var ppbv = build_profile(pp, 24, pplen);
+var ppprof = icc_profile_from_bytes(bv_data(ppbv), load64(pplen), err);
+assert_eq(load64(err), RG_ERR_NONE, "a para type 1 with positive b parses");
+var pptc = icc_profile_red_trc(ppprof);
+assert_eq(approx(tone_curve_apply(pptc, 0), 0.25, 0.002), 1,
+          "with b > 0 the break point is negative, so X = 0 takes the power branch");
+assert_eq(approx(tone_curve_apply(pptc, F64_ONE), 0.75, 0.002), 1,
+          "the curve is 0.5X + 0.25 across the whole domain");
+icc_profile_free(ppprof); bv_free(ppbv); fl_free(pp); fl_free(pplen);
+
+# --- para type 1 with a == 0, where -b/a is not a number ---
+# The break point is -b/a, so a degenerate a would divide by zero and feed an
+# infinity (or a NaN, when b is also 0) into the branch comparison. The guard
+# substitutes a break point of 0. The curve is then the constant max(b, 0).
+var pz = fl_alloc(24);
+_icc_write_sig(pz, 0, _icc_sig_para());
+store8(pz + 8, 0); store8(pz + 9, 1);
+_icc_write_s15fixed16(pz, 12, F64_ONE);
+_icc_write_s15fixed16(pz, 16, 0);
+_icc_write_s15fixed16(pz, 20, 0.5);
+var pzlen = fl_alloc(8);
+var pzbv = build_profile(pz, 24, pzlen);
+var pzprof = icc_profile_from_bytes(bv_data(pzbv), load64(pzlen), err);
+assert_eq(load64(err), RG_ERR_NONE, "a para type 1 with a == 0 parses");
+var pztc = icc_profile_red_trc(pzprof);
+var pz_ok = 1;
+var pzi = 0;
+while (pzi < 16) {
+    var pzv = tone_curve_apply(pztc, f64_div(f64_from(pzi), 15.0));
+    if (f64_eq(pzv, pzv) == 0) { pz_ok = 0; }
+    if (approx(pzv, 0.5, 0.002) == 0) { pz_ok = 0; }
+    pzi = pzi + 1;
+}
+assert_eq(pz_ok, 1, "a == 0 gives the finite constant curve b, never NaN");
+icc_profile_free(pzprof); bv_free(pzbv); fl_free(pz); fl_free(pzlen);
+
+# --- curv with count == 0, the ICC spelling of an identity curve ---
+var cz = fl_alloc(12);
+_icc_write_sig(cz, 0, _icc_sig_curv());
+_icc_write_u32_be(cz, 8, 0);
+var czlen = fl_alloc(8);
+var czbv = build_profile(cz, 12, czlen);
+var czprof = icc_profile_from_bytes(bv_data(czbv), load64(czlen), err);
+assert_eq(load64(err), RG_ERR_NONE, "a curv with count 0 parses");
+var cztc = icc_profile_red_trc(czprof);
+# Count 0 means linear, which this encodes as gamma 1.0 — so the curve is the
+# identity, NOT the 2.2 that a v2 profile would otherwise default to.
+assert_eq(approx(tone_curve_gamma_value(cztc), F64_ONE, 0.0001), 1, "curv count 0 is gamma 1.0");
+assert_eq(approx(tone_curve_apply(cztc, 0.5), 0.5, 0.0001), 1, "the identity curve passes 0.5 through");
+assert_eq(approx(tone_curve_apply(cztc, 0.25), 0.25, 0.0001), 1, "and passes 0.25 through");
+icc_profile_free(czprof); bv_free(czbv); fl_free(cz); fl_free(czlen);
+
+# --- the parametric table is clamped into [0, 1] ---
+# a = 2 sends the top of the curve to 2.0. Nothing else in the suite drives a
+# parametric curve out of range, so the clamp is otherwise untested.
+var pk = fl_alloc(24);
+_icc_write_sig(pk, 0, _icc_sig_para());
+store8(pk + 8, 0); store8(pk + 9, 1);
+_icc_write_s15fixed16(pk, 12, F64_ONE);
+_icc_write_s15fixed16(pk, 16, 2.0);
+_icc_write_s15fixed16(pk, 20, 0);
+var pklen = fl_alloc(8);
+var pkbv = build_profile(pk, 24, pklen);
+var pkprof = icc_profile_from_bytes(bv_data(pkbv), load64(pklen), err);
+assert_eq(load64(err), RG_ERR_NONE, "a para curve that overshoots 1.0 parses");
+var pktc = icc_profile_red_trc(pkprof);
+assert_eq(approx(tone_curve_apply(pktc, F64_ONE), F64_ONE, 0.001), 1,
+          "an overshooting parametric curve is clamped to 1.0");
+assert_eq(approx(tone_curve_apply(pktc, 0.25), 0.5, 0.002), 1,
+          "the in-range part of the same curve is untouched");
+icc_profile_free(pkprof); bv_free(pkbv); fl_free(pk); fl_free(pklen);
+
+# --- the 1024-tag cap, isolated from the tag-table bound ---
+# The existing bad2 case uses count 2000 in a 312-byte profile, where the
+# tag-table bound would reject it anyway — so it does not actually test the
+# cap. This profile is large enough that 1025 tags FIT, and every tag past the
+# sixth is zeroed and harmless. It is a completely well-formed profile in every
+# respect except the tag count, so only the cap can reject it.
+var big_count = 1025;
+var big_ds = 132 + big_count * 12;
+var big_total = big_ds + 3 * 20 + 3 * 16;
+var bigbv = bv_zeroed(big_total);
+var bb = bv_data(bigbv);
+_icc_write_u32_be(bb, 0, big_total);
+store8(bb + 8, 2);
+store8(bb + 9, 4 << 4);
+_icc_write_sig(bb, 16, _icc_sig4(82, 71, 66, 32));
+_icc_write_sig(bb, 36, _icc_sig_acsp());
+_icc_write_u32_be(bb, 128, big_count);
+var bxs = 0;
+while (bxs < 3) {
+    var bxo = big_ds + bxs * 20;
+    _icc_write_sig(bb, 132 + bxs * 12, _icc_sig_xyz_tag_n(bxs));
+    _icc_write_u32_be(bb, 132 + bxs * 12 + 4, bxo);
+    _icc_write_u32_be(bb, 132 + bxs * 12 + 8, 20);
+    _icc_write_sig(bb, bxo, _icc_sig_xyz());
+    _icc_write_s15fixed16(bb, bxo + 8, 0.5);
+    _icc_write_s15fixed16(bb, bxo + 12, 0.5);
+    _icc_write_s15fixed16(bb, bxo + 16, 0.5);
+    bxs = bxs + 1;
+}
+var bts = 0;
+while (bts < 3) {
+    var bto = big_ds + 60 + bts * 16;
+    _icc_write_sig(bb, 132 + (3 + bts) * 12, _icc_sig_trc_tag_n(bts));
+    _icc_write_u32_be(bb, 132 + (3 + bts) * 12 + 4, bto);
+    _icc_write_u32_be(bb, 132 + (3 + bts) * 12 + 8, 14);
+    _icc_write_sig(bb, bto, _icc_sig_curv());
+    _icc_write_u32_be(bb, bto + 8, 1);
+    store8(bb + bto + 12, 2); store8(bb + bto + 13, 51);
+    bts = bts + 1;
+}
+assert_eq(icc_profile_from_bytes(bb, big_total, err), 0,
+          "1025 tags is rejected even when the tag table fits the buffer");
+assert_eq(load64(err), RG_ERR_INVALID_FORMAT, "the cap reports INVALID_FORMAT");
+# Same profile with the count inside the cap parses, which proves the rejection
+# above came from the cap and not from anything else being malformed.
+_icc_write_u32_be(bb, 128, 1024);
+var bigprof = icc_profile_from_bytes(bb, big_total, err);
+assert_eq(load64(err), RG_ERR_NONE, "the same profile at 1024 tags parses");
+icc_profile_free(bigprof);
+bv_free(bigbv);
+
+# The tag-table bound must report INVALID_FORMAT from the pre-check, not PARSE
+# from the per-entry check inside the tag-table loop. The two guards overlap,
+# and the outer one exists to fail before allocating count * 40 bytes.
+_icc_write_u32_be(bd3, 128, 100);
+var bd3r = icc_profile_from_bytes(bd3, plen, err);
+assert_eq(bd3r, 0, "the overrunning tag table is still rejected");
+assert_eq(load64(err), RG_ERR_INVALID_FORMAT,
+          "the tag-table overrun is caught by the pre-check, before allocating");
+
+
+# ================================================================
+# IccLutProfile — the A2B0 / 3D-LUT form
+# ================================================================
+test_group("lut profile");
+
+# Build a LUT profile with a 2x2x2 grid. `scale16` picks mft2 (16-bit samples,
+# declared table sizes) or mft1 (8-bit samples, fixed 256-entry tables).
+#
+# The LUT is deliberately ASYMMETRIC: cell (r,g,b) stores r in channel 0, g in
+# channel 1 and b in channel 2, at three different magnitudes. A profile where
+# every channel carried the same ramp would parse identically whether the LUT
+# were indexed b-fastest or r-fastest, and the ICC ordering is the easiest
+# thing in this parser to get backwards.
+fn build_lut_profile(scale16, grid, out_len) {
+    var width = 1;
+    var in_entries = 256;
+    var hdr = 48;
+    if (scale16 == 1) { width = 2; in_entries = 2; hdr = 52; }
+
+    var tag_off = 144;
+    var in_start = tag_off + hdr;
+    var cells = grid * grid * grid;
+    var lut_start = in_start + 3 * in_entries * width;
+    var out_start = lut_start + cells * 3 * width;
+    var total = out_start + 3 * in_entries * width;
+
+    var bv = bv_zeroed(total);
+    if (bv == 0) { return 0; }
+    var d = bv_data(bv);
+    store64(out_len, total);
+
+    _icc_write_u32_be(d, 0, total);
+    store8(d + 8, 2);
+    store8(d + 9, 4 << 4);
+    _icc_write_sig(d, 16, _icc_sig4(82, 71, 66, 32));
+    _icc_write_sig(d, 36, _icc_sig_acsp());
+    _icc_write_u32_be(d, 128, 1);
+    _icc_write_sig(d, 132, _icc_sig4(65, 50, 66, 48));
+    _icc_write_u32_be(d, 136, tag_off);
+    _icc_write_u32_be(d, 140, total - tag_off);
+
+    if (scale16 == 1) { _icc_write_sig(d, tag_off, _icc_sig4(109, 102, 116, 50)); }
+    if (scale16 == 0) { _icc_write_sig(d, tag_off, _icc_sig4(109, 102, 116, 49)); }
+    store8(d + tag_off + 8, 3);
+    store8(d + tag_off + 9, 3);
+    store8(d + tag_off + 10, grid);
+    if (scale16 == 1) {
+        _icc_write_u16_be(d, tag_off + 48, in_entries);
+        _icc_write_u16_be(d, tag_off + 50, in_entries);
+    }
+
+    # Identity input curves: a full-range ramp in both encodings.
+    var ch = 0;
+    while (ch < 3) {
+        var i = 0;
+        while (i < in_entries) {
+            var o = in_start + (ch * in_entries + i) * width;
+            if (scale16 == 1) { _icc_write_u16_be(d, o, i * 65535); }
+            if (scale16 == 0) { store8(d + o, i); }
+            i = i + 1;
+        }
+        ch = ch + 1;
+    }
+
+    # Cell c decodes as b = c % grid, g = (c / grid) % grid, r = c / grid^2 —
+    # the b-fastest order the spec mandates.
+    var c = 0;
+    while (c < cells) {
+        var cb = c % grid;
+        var cg = (c / grid) % grid;
+        var cr = c / (grid * grid);
+        var v0 = 0;
+        var v1 = 0;
+        var v2 = 0;
+        if (scale16 == 1) { v0 = cr * 32768; v1 = cg * 16384; v2 = cb * 8192; }
+        if (scale16 == 0) { v0 = cr * 128; v1 = cg * 64; v2 = cb * 32; }
+        if (scale16 == 1) {
+            _icc_write_u16_be(d, lut_start + (c * 3) * 2, v0);
+            _icc_write_u16_be(d, lut_start + (c * 3 + 1) * 2, v1);
+            _icc_write_u16_be(d, lut_start + (c * 3 + 2) * 2, v2);
+        }
+        if (scale16 == 0) {
+            store8(d + lut_start + c * 3, v0);
+            store8(d + lut_start + c * 3 + 1, v1);
+            store8(d + lut_start + c * 3 + 2, v2);
+        }
+        c = c + 1;
+    }
+    return bv;
+}
+
+var lx = fl_alloc(8);
+var ly = fl_alloc(8);
+var lz = fl_alloc(8);
+var llen = fl_alloc(8);
+
+# --- mft2, 16-bit ---
+var m2bv = build_lut_profile(1, 2, llen);
+var m2p = icc_lut_profile_from_bytes(bv_data(m2bv), load64(llen), err);
+assert_eq(load64(err), RG_ERR_NONE, "an mft2 LUT profile parses");
+assert_eq(icc_lut_profile_grid_size(m2p), 2, "the grid size is read from the tag header");
+assert_eq(icc_lut_profile_major(m2p), 2, "the LUT parser reads the same major version");
+assert_eq(icc_lut_profile_minor(m2p), 4, "and the same minor version (high nibble of byte 9)");
+assert_eq(icc_lut_profile_color_space_byte(m2p, 0), 82, "the colour space is 'RGB '");
+assert_eq(icc_lut_profile_lut_len(m2p), 24, "a 2x2x2 grid holds 8 cells of 3 channels");
+assert_eq(icc_lut_profile_curve_len(m2p), 2, "mft2 input curves use the declared entry count");
+
+# 32768/65535, 16384/65535, 8192/65535 — the exact quantised values, not the
+# 0.5/0.25/0.125 they approximate.
+icc_lut_profile_apply(m2p, F64_ONE, 0, 0, lx, ly, lz);
+assert_eq(approx(load64(lx), 0.50000763, 0.000001), 1, "pure red reads channel 0 of the r=1 cell");
+assert_eq(approx(load64(ly), 0, 0.000001), 1, "and leaves channel 1 at zero");
+assert_eq(approx(load64(lz), 0, 0.000001), 1, "and channel 2 at zero");
+
+# The three corners must land on three DIFFERENT channels at three different
+# magnitudes. If the LUT were indexed r-fastest, pure red would read the cell
+# that pure blue should — and this triple is what catches it.
+icc_lut_profile_apply(m2p, 0, F64_ONE, 0, lx, ly, lz);
+assert_eq(approx(load64(ly), 0.25000381, 0.000001), 1, "pure green reads channel 1");
+assert_eq(approx(load64(lx), 0, 0.000001), 1, "green does not leak into channel 0");
+icc_lut_profile_apply(m2p, 0, 0, F64_ONE, lx, ly, lz);
+assert_eq(approx(load64(lz), 0.12500191, 0.000001), 1, "pure blue reads channel 2");
+assert_eq(approx(load64(lx), 0, 0.000001), 1, "blue does not leak into channel 0");
+
+# Halfway along an axis is a genuine interpolation, not a corner lookup: the
+# 0.5 exercises fr, and the identity input curve's own interpolation.
+icc_lut_profile_apply(m2p, 0.5, 0, 0, lx, ly, lz);
+assert_eq(approx(load64(lx), 0.25000381, 0.000001), 1, "half red interpolates to half the corner value");
+icc_lut_profile_apply(m2p, 0, 0.5, 0, lx, ly, lz);
+assert_eq(approx(load64(ly), 0.12500191, 0.000001), 1, "half green interpolates on the g axis");
+
+# All three at once: every one of the eight corners contributes.
+icc_lut_profile_apply(m2p, F64_ONE, F64_ONE, F64_ONE, lx, ly, lz);
+assert_eq(approx(load64(lx), 0.50000763, 0.000001), 1, "white reads the far corner, channel 0");
+assert_eq(approx(load64(ly), 0.25000381, 0.000001), 1, "white, channel 1");
+assert_eq(approx(load64(lz), 0.12500191, 0.000001), 1, "white, channel 2");
+
+# Out-of-range input is clamped rather than indexing past the grid.
+icc_lut_profile_apply(m2p, 2.0, f64_neg(F64_ONE), 0, lx, ly, lz);
+assert_eq(approx(load64(lx), 0.50000763, 0.000001), 1, "input above 1.0 clamps to the top of the grid");
+assert_eq(approx(load64(ly), 0, 0.000001), 1, "input below 0.0 clamps to the bottom");
+# Fractional blue with a DIFFERENT fraction on red. Everything above either
+# lands on a corner or varies one axis at a time, which leaves the b-axis lerp
+# and the b1 corner fetches doing no observable work: with fb == 0 the far
+# corners are multiplied away, and with fr == fb the two weights are
+# interchangeable. 0.5 red against 0.25 blue separates all of it.
+icc_lut_profile_apply(m2p, 0, 0, 0.25, lx, ly, lz);
+assert_eq(approx(load64(lz), 0.03125048, 0.000001), 1, "quarter blue is a real lerp along the b axis");
+icc_lut_profile_apply(m2p, 0.5, 0, 0.25, lx, ly, lz);
+assert_eq(approx(load64(lx), 0.25000381, 0.000001), 1, "red is weighted by fr");
+assert_eq(approx(load64(lz), 0.03125048, 0.000001), 1, "and blue by fb, which is a different fraction");
+
+icc_lut_profile_free(m2p);
+bv_free(m2bv);
+
+# --- mft1, 8-bit with fixed 256-entry tables ---
+var m1bv = build_lut_profile(0, 2, llen);
+var m1p = icc_lut_profile_from_bytes(bv_data(m1bv), load64(llen), err);
+assert_eq(load64(err), RG_ERR_NONE, "an mft1 LUT profile parses");
+assert_eq(icc_lut_profile_curve_len(m1p), 256, "mft1 input tables are a fixed 256 entries");
+assert_eq(icc_lut_profile_grid_size(m1p), 2, "mft1 reads the grid size from the same offset");
+# 128/255, 64/255, 32/255 — the 8-bit divisor is 255, not 256 and not 65535.
+icc_lut_profile_apply(m1p, F64_ONE, 0, 0, lx, ly, lz);
+assert_eq(approx(load64(lx), 0.50196078, 0.000001), 1, "mft1 samples are scaled by 255");
+icc_lut_profile_apply(m1p, 0, F64_ONE, F64_ONE, lx, ly, lz);
+assert_eq(approx(load64(ly), 0.25098039, 0.000001), 1, "mft1 channel 1");
+assert_eq(approx(load64(lz), 0.12549020, 0.000001), 1, "mft1 channel 2");
+icc_lut_profile_free(m1p);
+bv_free(m1bv);
+
+# --- a larger grid, where the cell stride actually matters ---
+var m4bv = build_lut_profile(1, 4, llen);
+var m4p = icc_lut_profile_from_bytes(bv_data(m4bv), load64(llen), err);
+assert_eq(load64(err), RG_ERR_NONE, "a 4x4x4 LUT profile parses");
+assert_eq(icc_lut_profile_lut_len(m4p), 192, "a 4x4x4 grid holds 64 cells of 3 channels");
+# With grid 4 the cell values run 0..3, so the top corner is 3*32768 = 98304,
+# which does NOT fit a u16 — build_lut_profile writes it truncated, and the
+# point here is the addressing, so check an interior cell instead. At r = 1/3
+# the sample lands exactly on grid index 1.
+icc_lut_profile_apply(m4p, f64_div(F64_ONE, 3.0), 0, 0, lx, ly, lz);
+assert_eq(approx(load64(lx), 0.50000763, 0.000001), 1, "r = 1/3 lands exactly on grid index 1");
+assert_eq(approx(load64(ly), 0, 0.000001), 1, "and the other channels stay at the origin cell");
+icc_lut_profile_free(m4p);
+bv_free(m4bv);
+
+# --- the grid cap, isolated from the buffer bound ---
+# A grid of 65 in a buffer too small to hold it is rejected either way, so the
+# cap needs a profile that is otherwise completely well-formed. This one is:
+# 65^3 cells really are present, 1.6 MB of them, and only the cap rejects it.
+var gbv = build_lut_profile(1, 65, llen);
+assert_eq(icc_lut_profile_from_bytes(bv_data(gbv), load64(llen), err), 0,
+          "a grid of 65 is rejected even when the LUT data is all there");
+assert_eq(load64(err), RG_ERR_INVALID_FORMAT, "the grid cap reports INVALID_FORMAT");
+bv_free(gbv);
+# The same construction at 64 parses, which proves the rejection above was the
+# cap and not the size.
+var g64 = build_lut_profile(1, 64, llen);
+var g64p = icc_lut_profile_from_bytes(bv_data(g64), load64(llen), err);
+assert_eq(load64(err), RG_ERR_NONE, "a grid of exactly 64 is inside the cap and parses");
+assert_eq(icc_lut_profile_grid_size(g64p), 64, "and reports its grid size");
+icc_lut_profile_free(g64p);
+bv_free(g64);
+
+# --- malformed LUT profiles ---
+var lbad = build_lut_profile(1, 2, llen);
+var lbd = bv_data(lbad);
+var ltotal = load64(llen);
+
+# No A2B0 tag at all — this is what a matrix/TRC profile looks like to the LUT
+# parser, and it must be a clean rejection rather than a misparse.
+_icc_write_sig(lbd, 132, _icc_sig_rxyz());
+assert_eq(icc_lut_profile_from_bytes(lbd, ltotal, err), 0, "a profile with no A2B0 tag is rejected");
+assert_eq(load64(err), RG_ERR_INVALID_FORMAT, "the missing A2B0 reports INVALID_FORMAT");
+_icc_write_sig(lbd, 132, _icc_sig4(65, 50, 66, 48));
+
+# 'mAB ' is the v4 LUT type. rust-old's doc comment claims support but its match
+# arms only handle mft1/mft2, so a v4 profile is rejected — preserved as-is.
+_icc_write_sig(lbd, 144, _icc_sig4(109, 65, 66, 32));
+assert_eq(icc_lut_profile_from_bytes(lbd, ltotal, err), 0, "an mAB (v4) A2B0 tag is rejected as unsupported");
+_icc_write_sig(lbd, 144, _icc_sig4(109, 102, 116, 50));
+
+# Only 3-in / 3-out is supported.
+store8(lbd + 144 + 8, 4);
+assert_eq(icc_lut_profile_from_bytes(lbd, ltotal, err), 0, "a 4-input-channel LUT is rejected");
+store8(lbd + 144 + 8, 3);
+store8(lbd + 144 + 9, 1);
+assert_eq(icc_lut_profile_from_bytes(lbd, ltotal, err), 0, "a 1-output-channel LUT is rejected");
+store8(lbd + 144 + 9, 3);
+
+# The grid cap. 65 cells per side would ask for 65^3 * 3 f64s; the cap stops it
+# before the allocation, and it is the byte's value that is checked, so 255 is
+# rejected for the same reason.
+store8(lbd + 144 + 10, 65);
+assert_eq(icc_lut_profile_from_bytes(lbd, ltotal, err), 0, "a grid size of 65 exceeds the cap");
+store8(lbd + 144 + 10, 255);
+assert_eq(icc_lut_profile_from_bytes(lbd, ltotal, err), 0, "a grid size of 255 exceeds the cap");
+store8(lbd + 144 + 10, 64);
+# A grid of exactly 64 is inside the cap, so it gets past the check and is then
+# rejected for the honest reason: the LUT does not fit this buffer.
+assert_eq(icc_lut_profile_from_bytes(lbd, ltotal, err), 0, "a grid of 64 that overruns the buffer is rejected");
+store8(lbd + 144 + 10, 2);
+assert_eq(load64(err) == RG_ERR_NONE, 0, "the error code is still set from the last failure");
+
+# Truncating the profile below the declared LUT extent. The pre-check must be
+# what rejects it — it reports INVALID_FORMAT, where the per-read bounds checks
+# inside the table loops report PARSE. The distinction matters because the
+# pre-check runs BEFORE the LUT allocation, and a hostile profile declaring a
+# 64-cell grid should not get 1.6 MB allocated on its way to being rejected.
+assert_eq(icc_lut_profile_from_bytes(lbd, ltotal - 4, err), 0, "a truncated LUT profile is rejected");
+assert_eq(load64(err), RG_ERR_PARSE,
+          "a plain truncation is caught by the tag table, which bounds offset + size first");
+# To reach the mft2 pre-check the tag must FIT the shortened buffer while the
+# LUT extent it declares does not. Shrinking the tag size does exactly that:
+# the tag table is satisfied, and the mft2 pre-check is the next thing to
+# object. It reports INVALID_FORMAT, and it runs BEFORE the LUT allocation —
+# which is the point of having it, since a hostile profile declaring a 64-cell
+# grid should not get 1.6 MB allocated on its way to being rejected.
+_icc_write_u32_be(lbd, 140, ltotal - 4 - 144);
+assert_eq(icc_lut_profile_from_bytes(lbd, ltotal - 4, err), 0, "a LUT extending past the buffer is rejected");
+assert_eq(load64(err), RG_ERR_INVALID_FORMAT,
+          "the LUT overrun is caught by the mft2 pre-check, before the allocation");
+_icc_write_u32_be(lbd, 140, ltotal - 144);
+
+# mft2's output table is never READ — only the input curves and the LUT are —
+# but its declared size still has to be accounted for when bounding the tag,
+# because it sits after the LUT in the tag body. The fixture happens to declare
+# equal input and output entry counts, so a bounds check that used the input
+# count would agree with the correct one everywhere. Here they differ.
+_icc_write_u16_be(lbd, 144 + 50, 1000);
+assert_eq(icc_lut_profile_from_bytes(lbd, ltotal, err), 0,
+          "an output table declared past the end of the profile is rejected");
+assert_eq(load64(err), RG_ERR_INVALID_FORMAT, "the output-table overrun reports INVALID_FORMAT");
+_icc_write_u16_be(lbd, 144 + 50, 2);
+assert_eq(icc_lut_profile_from_bytes(lbd, 100, err), 0, "a profile shorter than the header is rejected");
+store8(lbd + 36, 0);
+assert_eq(icc_lut_profile_from_bytes(lbd, ltotal, err), 0, "the LUT parser checks the acsp signature too");
+store8(lbd + 36, 97);
+
+# The profile is intact again after all that poking, which proves each case
+# above failed for the reason named and not because the fixture was ruined.
+var lok = icc_lut_profile_from_bytes(lbd, ltotal, err);
+assert_eq(load64(err), RG_ERR_NONE, "the fixture still parses once every field is restored");
+icc_lut_profile_free(lok);
+bv_free(lbad);
+
+fl_free(lx); fl_free(ly); fl_free(lz); fl_free(llen);
+
+icc_profile_free(prof);
+bv_free(pbv);
+fl_free(xyz); fl_free(lenp); fl_free(err);
+
+var exit_code = assert_summary();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

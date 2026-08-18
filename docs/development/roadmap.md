@@ -161,9 +161,39 @@ while the YUV inverse shifts an `i16` whose `(U-128)` is genuinely negative, so
 positive and blue came back 255 instead of 0. Neither answer generalises; check
 the Rust operand type at every shift.
 
-### M4 — ICC
+### M4 — ICC ✅
 
-`icc` + the 5 parametric curve types.
+`src/icc.cyr` (1,018 lines), `tests/icc.tcyr` (169 assertions). **Both** profile
+parsers are ported, not just the matrix/TRC one:
+
+- **`IccProfile`** — the matrix/TRC form. Tag table, `curv` tags (count 0 =
+  linear, 1 = u8Fixed8 gamma, else a u16 table), `para` tags (all five function
+  types), the column-major primaries matrix, and `srgb_v2_profile`.
+- **`IccLutProfile`** — the `A2B0` LUT form, `mft2` (16-bit) and `mft1` (8-bit),
+  with per-channel input curves and trilinear interpolation through a 3D CLUT.
+  This was nearly missed: it is a second, independent parser sharing only the
+  header and tag-table code with the first, and the roadmap's carried-forward
+  list had it filed as "coverage currently minimal" rather than as unported
+  surface. rust-old's doc comment advertises `mAB ` (v4) support that its match
+  arms do not implement; the port preserves the actual behaviour and rejects
+  `mAB `, with a test pinning that so it reads as deliberate.
+
+**This is the one module whose input is untrusted** — every other module
+consumes buffers ranga itself produced. Every multi-byte read is big-endian and
+bounds-checked, the tag count is capped at 1024, and the LUT grid is capped at
+64 (an unchecked 255 would ask for 397 MB from a single byte).
+
+**Mutation testing: 38 mutants, 34 killed.** The pass was worth more here than
+anywhere else so far — the first round killed only 12 of 17 and the survivors
+were not near-misses but *whole unexecuted paths*: the generated sRGB profile
+only ever emits `curv` with count 1, so five of the six curve types and the
+entire table branch had no coverage at all despite the suite passing. Two
+further rounds found an assertion tolerance loose enough to hide a 13% error,
+and three fixtures whose parameters made the mutant and the original agree by
+coincidence (`e == f`, `in_entries == out_entries`, a value that clamped to the
+same bound either way). The four documented survivors are recorded in the module
+header; all are clamps whose wrong value is multiplied by zero — real
+protections against a heap over-read, invisible to any output assertion.
 
 ### M5 — External deps
 
