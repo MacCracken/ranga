@@ -6,6 +6,7 @@
 include "src/error.cyr"
 include "src/bytevec.cyr"
 include "src/pixel.cyr"
+include "src/simd_u8.cyr"
 include "src/blend.cyr"
 
 alloc_init();
@@ -222,6 +223,70 @@ store8(rs + 3, 0);
 store8(rd, 77); store8(rd + 1, 77); store8(rd + 2, 77); store8(rd + 3, 77);
 assert_eq(blend_row_normal(rs, rd, 1, 255), RG_ERR_NONE, "zero-alpha row succeeds");
 assert_eq(px4(rd, 77, 77, 77, 77), 1, "a zero-alpha source pixel is skipped entirely");
+
+# blend_row_normal is vectorised (2 px/iter + scalar tail), so it needs
+# odd-length coverage. Three pixels is one SIMD pair plus one tail pixel, and
+# both paths must agree with the single-pixel function.
+var vs = fl_alloc(12);
+var vd = fl_alloc(12);
+var ve = fl_alloc(12);
+var vi = 0;
+while (vi < 3) {
+    store8(vs + vi * 4, 200); store8(vs + vi * 4 + 1, 100);
+    store8(vs + vi * 4 + 2, 50); store8(vs + vi * 4 + 3, 128 + vi);
+    store8(vd + vi * 4, 30); store8(vd + vi * 4 + 1, 60);
+    store8(vd + vi * 4 + 2, 90); store8(vd + vi * 4 + 3, 200);
+    store8(ve + vi * 4, 30); store8(ve + vi * 4 + 1, 60);
+    store8(ve + vi * 4 + 2, 90); store8(ve + vi * 4 + 3, 200);
+    vi = vi + 1;
+}
+# Reference: the single-pixel function, applied three times.
+vi = 0;
+while (vi < 3) { blend_pixel(vs + vi * 4, ve + vi * 4, BM_NORMAL, 200, ve + vi * 4); vi = vi + 1; }
+blend_row_normal(vs, vd, 3, 200);
+var vok = 1;
+vi = 0;
+while (vi < 12) {
+    if (load8(vd + vi) != load8(ve + vi)) { vok = 0; }
+    vi = vi + 1;
+}
+assert_eq(vok, 1, "vectorised blend_row_normal (2 pairs + tail) matches blend_pixel byte for byte");
+fl_free(vs); fl_free(vd); fl_free(ve);
+
+# FULL-ROW differential: the vectorised path against the scalar path it
+# replaced, over a 257-pixel row (odd, so the tail runs) with varied data and
+# several opacities. The 25x speedup this kernel gives is only meaningful if it
+# is byte-identical to the implementation it replaced, and three pixels is not
+# enough evidence for that.
+var N = 257;
+var fs = fl_alloc(N * 4);
+var fa = fl_alloc(N * 4);
+var fb = fl_alloc(N * 4);
+var ops = fl_alloc(5);
+store8(ops, 0); store8(ops + 1, 1); store8(ops + 2, 128);
+store8(ops + 3, 254); store8(ops + 4, 255);
+var mismatch = 0;
+var oi2 = 0;
+while (oi2 < 5) {
+    var fi = 0;
+    while (fi < N * 4) {
+        var sv = (fi * 37 + (fi >> 3)) & 255;
+        store8(fs + fi, sv);
+        store8(fa + fi, (fi * 53 + 11) & 255);
+        store8(fb + fi, (fi * 53 + 11) & 255);
+        fi = fi + 1;
+    }
+    blend_row_normal_scalar(fs, fa, N, load8(ops + oi2));
+    blend_row_normal(fs, fb, N, load8(ops + oi2));
+    fi = 0;
+    while (fi < N * 4) {
+        if (load8(fa + fi) != load8(fb + fi)) { mismatch = mismatch + 1; }
+        fi = fi + 1;
+    }
+    oi2 = oi2 + 1;
+}
+assert_eq(mismatch, 0, "vectorised blend_row_normal is byte-identical to the scalar path over 257px x 5 opacities");
+fl_free(fs); fl_free(fa); fl_free(fb); fl_free(ops);
 
 # A negative count is a no-op rather than a wild loop.
 assert_eq(blend_row_normal(rs, rd, (0 - 1), 255), RG_ERR_NONE, "a negative count is a no-op");

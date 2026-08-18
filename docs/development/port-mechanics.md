@@ -344,6 +344,17 @@ mutation swapping `affine_transform` to the uninitialised path SURVIVED the full
 suite for exactly that reason. The comment on `bv_uninit` is the only guard —
 treat it as review discipline, not a tested invariant.
 
+### Prove a vector path actually runs
+
+Correct SIMD is invisible to assertions — the fallback agrees by construction.
+Force the scalar path and re-measure: `blend_row_normal` went 1.87 µs → 49.8 µs,
+which is the proof. One minute per kernel, and the only thing standing between
+you and a silently-dead vector path.
+
+Pair it with a **full-row differential** against the scalar implementation the
+kernel replaced (257 px — odd, so the tail runs — across several parameter
+values). Three-pixel spot checks are not evidence for a 25× claim.
+
 ### Mutation-test each module the moment its suite goes green
 
 Twenty sed-level defects take about two minutes and are a far better use of time

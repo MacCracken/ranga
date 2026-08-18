@@ -124,17 +124,31 @@ three consecutive API 529 failures made the agent path unreliable.
       call sites.
 - [x] `invert` — vectorised with the pass-1 primitives, no new assembly:
       `255 - c` on a byte IS a saturating subtract.
-- [ ] `blend_row_normal` (12.9×) — needs a per-pixel alpha broadcast (pshuflw)
-      plus a vector div255; materially more complex than the luma kernel.
+- [x] `_sx_blend_row_sse2` — Porter-Duff source-over, 2 px/iter.
+      **46.70 µs → 1.87 µs (25×), now 0.5× Rust** — i.e. faster than the Rust
+      original, which is the first benchmark where that is true. Proven
+      byte-identical to the scalar path over 257 px × 5 opacities, and confirmed
+      to actually execute by forcing the scalar path (49.8 µs).
 - [ ] `_cv_yuv_row_to_rgba` — got a 1.43× loop hoist but no kernel yet.
-      Plan §3 item 4 (256-bit AVX2) sits behind both.
+      Plan §3 item 4 (256-bit AVX2) sits behind it.
+
+**int→f32 probe: no cheap win, closed.** `f32_from(f64_from(n))` is cvtsi2sd +
+cvtsd2ss; there is no `cvtsi2ss` path in the compiler and mabda's
+`native_int_to_f32_bits` is the same two-step. Measured in the blur inner shape:
+`load8` alone 1 ns, the full convert-and-multiply-add 2 ns — so eliminating the
+conversion entirely would at best halve the blur, leaving it ~10× off. The
+remaining blur gap is Rust **auto-vectorising** a loop Cyrius runs scalar, not
+conversion overhead. Closing it needs a SIMD blur kernel, not a cheaper cast.
 
 ⚠ **A correct SIMD path is invisible to output testing.** Mutating the group
 count so fewer pixels take the vector path leaves every assertion passing,
 because the scalar fallback agrees by construction. These tests prove the paths
-AGREE; proving which one *ran* needs a benchmark or instrumentation. Budget for
-that when the remaining kernels land — otherwise a silently-disabled SIMD path
-looks exactly like a working one.
+AGREE; proving which one *ran* needs a benchmark.
+
+**The technique that settles it:** force the scalar path (set `pairs = 0`) and
+re-measure. `blend_row_normal` went 1.87 µs → 49.8 µs, which is proof the kernel
+executes. Do this once per kernel — it costs a minute and is the only evidence
+that a vector path is not silently dead.
 
 Not fanned out to agents, per `port-mechanics.md` — and the shift-direction bug
 below is exactly why.

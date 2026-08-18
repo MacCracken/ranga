@@ -251,9 +251,32 @@ fn blend_row_normal_scalar(src, dst, n, opacity) {
 # bounds. A bad call is a no-op, matching Rust's early return.
 fn blend_row_normal(src, dst, n, opacity) {
     if (n < 0) { return RG_ERR_NONE; }
-    # The SIMD kernels slot in here (plan §3 items 3-5); until then every call
-    # takes the scalar path, which is behaviourally identical.
-    return blend_row_normal_scalar(src, dst, n, opacity);
+
+    var pairs = n / 2;
+    if (pairs > 0) {
+        # The constants block folds opacity in, so it is built once per row.
+        # It must be 16-byte aligned for the kernel's SSE memory operands;
+        # _sx_blend_consts over-allocates and returns the raw pointer through
+        # `raw` for freeing — the aligned pointer is interior and must NOT be
+        # passed to fl_free.
+        var raw = fl_alloc(8);
+        if (raw == 0) { return blend_row_normal_scalar(src, dst, n, opacity); }
+        var c = _sx_blend_consts(opacity & 255, raw);
+        if (c == 0) {
+            fl_free(raw);
+            return blend_row_normal_scalar(src, dst, n, opacity);
+        }
+        _sx_blend_row_sse2(src, dst, pairs, c);
+        fl_free(load64(raw));
+        fl_free(raw);
+    }
+
+    # Odd trailing pixel.
+    var done = pairs * 2;
+    if (done < n) {
+        blend_row_normal_scalar(src + done * 4, dst + done * 4, n - done, opacity);
+    }
+    return RG_ERR_NONE;
 }
 
 # ── blend_row_normal_argb (ARGB8) ────────

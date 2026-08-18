@@ -299,6 +299,112 @@ assert_eq(load8(ldst), 42, "pairs == 0 writes nothing (the test/jz guard)");
 
 fl_free(lsrc); fl_free(ldst); fl_free(coef);
 
+# ================================================================
+# Porter-Duff blend row (SSE2) — differential against scalar
+# ================================================================
+test_group("blend row sse2");
+
+fn ref_div255(v) { var t = v + 128; return (t + (t >> 8)) >> 8; }
+
+# Independent scalar reference for one pixel, written from the formula rather
+# than from the kernel.
+fn ref_blend(sp, dp, op, out) {
+    var sa = ref_div255(load8(sp + 3) * op);
+    var inv = 255 - sa;
+    store8(out, ref_div255(load8(sp) * sa + load8(dp) * inv));
+    store8(out + 1, ref_div255(load8(sp + 1) * sa + load8(dp + 1) * inv));
+    store8(out + 2, ref_div255(load8(sp + 2) * sa + load8(dp + 2) * inv));
+    store8(out + 3, ref_div255(255 * sa + load8(dp + 3) * inv));
+    return 0;
+}
+
+var braw = fl_alloc(8);
+var bsrc = fl_alloc(16);
+var bdst = fl_alloc(16);
+var bexp = fl_alloc(16);
+
+# The constants block must be 16-byte ALIGNED — the kernel's SSE memory
+# operands fault otherwise, and fl_alloc makes no such promise.
+var bc = _sx_blend_consts(255, braw);
+assert_eq(bc != 0, 1, "blend constants allocate");
+assert_eq(bc & 15, 0, "the constants block is 16-byte aligned");
+assert_eq(load16(bc + 16), 128, "the 128 lane is set");
+assert_eq(load16(bc + 32), 255, "the 255 lane is set");
+assert_eq(load16(bc + 48), 0xFFFF, "colour lane 0 is kept by the clear mask");
+assert_eq(load16(bc + 48 + 6), 0, "alpha lane 3 is cleared by the clear mask");
+assert_eq(load16(bc + 80 + 6), 255, "alpha lane 3 gets 255 from the set mask");
+assert_eq(load16(bc + 80), 0, "colour lane 0 gets nothing from the set mask");
+
+# Fully opaque source at full opacity replaces the destination exactly.
+setb(bsrc, 0, 200); setb(bsrc, 1, 100); setb(bsrc, 2, 50); setb(bsrc, 3, 255);
+setb(bsrc, 4, 10); setb(bsrc, 5, 20); setb(bsrc, 6, 30); setb(bsrc, 7, 255);
+setb(bdst, 0, 0); setb(bdst, 1, 0); setb(bdst, 2, 0); setb(bdst, 3, 0);
+setb(bdst, 4, 0); setb(bdst, 5, 0); setb(bdst, 6, 0); setb(bdst, 7, 0);
+_sx_blend_row_sse2(bsrc, bdst, 1, bc);
+assert_eq(load8(bdst), 200, "opaque src replaces dst (pixel 0 red)");
+assert_eq(load8(bdst + 3), 255, "opaque src gives alpha 255");
+assert_eq(load8(bdst + 4), 10, "SECOND pixel of the pair is blended too");
+assert_eq(load8(bdst + 7), 255, "second pixel alpha");
+
+# A fully transparent source leaves the destination untouched — the scalar
+# version early-outs here; the kernel gets the same answer arithmetically.
+setb(bsrc, 3, 0);
+setb(bdst, 0, 77); setb(bdst, 1, 88); setb(bdst, 2, 99); setb(bdst, 3, 111);
+_sx_blend_row_sse2(bsrc, bdst, 1, bc);
+assert_eq(load8(bdst), 77, "transparent src leaves dst red");
+assert_eq(load8(bdst + 3), 111, "transparent src leaves dst ALPHA (no skip needed)");
+fl_free(braw);
+
+# Differential sweep: source alpha and opacity across their range, with the two
+# pixels of the pair carrying DIFFERENT values.
+var bm = 0;
+var sa_i = 0;
+while (sa_i < 256) {
+    var op_i = 0;
+    while (op_i < 256) {
+        var raw2 = fl_alloc(8);
+        var c2 = _sx_blend_consts(op_i, raw2);
+        setb(bsrc, 0, 200); setb(bsrc, 1, 100); setb(bsrc, 2, 50); setb(bsrc, 3, sa_i);
+        setb(bsrc, 4, 17); setb(bsrc, 5, 240); setb(bsrc, 6, 130); setb(bsrc, 7, 255 - sa_i);
+        setb(bdst, 0, 30); setb(bdst, 1, 60); setb(bdst, 2, 90); setb(bdst, 3, 120);
+        setb(bdst, 4, 210); setb(bdst, 5, 5); setb(bdst, 6, 160); setb(bdst, 7, 45);
+        ref_blend(bsrc, bdst, op_i, bexp);
+        ref_blend(bsrc + 4, bdst + 4, op_i, bexp + 4);
+        _sx_blend_row_sse2(bsrc, bdst, 1, c2);
+        var ci2 = 0;
+        while (ci2 < 8) {
+            if (load8(bdst + ci2) != load8(bexp + ci2)) { bm = bm + 1; }
+            ci2 = ci2 + 1;
+        }
+        fl_free(raw2);
+        op_i = op_i + 37;
+    }
+    sa_i = sa_i + 37;
+}
+assert_eq(bm, 0, "SSE2 blend matches the scalar reference across alpha x opacity");
+
+# Multiple pairs, exercising the internal loop and its rel32 backward jump.
+var raw3 = fl_alloc(8);
+var c3 = _sx_blend_consts(128, raw3);
+var mi2 = 0;
+while (mi2 < 4) {
+    setb(bsrc, mi2 * 4, 255); setb(bsrc, mi2 * 4 + 1, 0);
+    setb(bsrc, mi2 * 4 + 2, 0); setb(bsrc, mi2 * 4 + 3, 255);
+    setb(bdst, mi2 * 4, 0); setb(bdst, mi2 * 4 + 1, 0);
+    setb(bdst, mi2 * 4 + 2, 0); setb(bdst, mi2 * 4 + 3, 0);
+    mi2 = mi2 + 1;
+}
+_sx_blend_row_sse2(bsrc, bdst, 2, c3);
+assert_eq(load8(bdst), 128, "half opacity gives 128 on the first pixel");
+assert_eq(load8(bdst + 12), 128, "the internal loop reaches the LAST pair");
+assert_eq(load8(bdst + 3), 128, "alpha composites to 128 as well");
+
+setb(bdst, 0, 9);
+_sx_blend_row_sse2(bsrc, bdst, 0, c3);
+assert_eq(load8(bdst), 9, "pairs == 0 writes nothing");
+fl_free(raw3);
+fl_free(bsrc); fl_free(bdst); fl_free(bexp);
+
 fl_free(a); fl_free(b); fl_free(o); fl_free(m); fl_free(nm);
 fl_free(px); fl_free(shifted); fl_free(val);
 

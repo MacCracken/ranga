@@ -673,6 +673,137 @@ fn _sx_luma_coef(out, cr, cg, cb) {
     return RG_ERR_NONE;
 }
 
+# ── Porter-Duff source-over row (SSE2) ────────
+# Normal-mode blend of `pairs` groups of TWO RGBA8 pixels, src over dst,
+# in place over dst.
+#
+#   out.rgb = div255(src.rgb * sa + dst.rgb * (255 - sa))
+#   out.a   = div255(255     * sa + dst.a   * (255 - sa))
+#   sa      = div255(src.a * opacity)
+#
+# THE ALPHA TRICK. The colour and alpha channels use the same expression except
+# that alpha multiplies 255 where colour multiplies the source byte. Rather than
+# handle lane 3 separately, the kernel FORCES the source alpha lanes to 255
+# before the multiply (pand to clear, por to set), after the real alpha has
+# already been broadcast out into `sa`. One masked pair replaces a whole
+# separate path.
+#
+# THE SKIP IS NOT NEEDED. The scalar version early-outs when sa == 0. In vector
+# form that would need a select, and it is unnecessary: with sa == 0 the
+# expression reduces to div255(0 + dst*255) == dst for colour and dst.a for
+# alpha, which is exactly what skipping produces. Likewise the scalar
+# `.min(255)` on alpha is unreachable — sa + inv == 255, so the numerator peaks
+# at 255*255 and div255 maps that to exactly 255.
+#
+# `consts` must be 16-BYTE ALIGNED — legacy SSE instructions with a memory
+# operand fault otherwise, and fl_alloc makes no alignment promise. Build it
+# with _sx_blend_consts, which over-allocates and aligns.
+#   +0  (unused)      +16 128 x8 i16     +32 255 x8 i16
+#   +48 clear-alpha   +64 opacity x8     +80 255-in-alpha-lane
+fn _sx_blend_row_sse2(src, dst, pairs, consts) {
+    #ifdef CYRIUS_ARCH_X86
+    asm {
+        0x56;                                   # push rsi
+        0x57;                                   # push rdi
+        0x51;                                   # push rcx
+        0x48; 0x8B; 0x75; 0xF8;                 # mov rsi, [rbp-8]   ; src
+        0x48; 0x8B; 0x7D; 0xF0;                 # mov rdi, [rbp-16]  ; dst
+        0x48; 0x8B; 0x4D; 0xE8;                 # mov rcx, [rbp-24]  ; pairs
+        0x48; 0x8B; 0x45; 0xE0;                 # mov rax, [rbp-32]  ; consts
+        0x66; 0x0F; 0xEF; 0xFF;                 # pxor xmm7, xmm7
+        0x48; 0x85; 0xC9;                       # test rcx, rcx
+        0x0F; 0x84; 0x85; 0x00; 0x00; 0x00;     # jz done
+        0xF3; 0x0F; 0x7E; 0x06;                 # movq xmm0, [rsi]      ; src 2px
+        0xF3; 0x0F; 0x7E; 0x0F;                 # movq xmm1, [rdi]      ; dst 2px
+        0x66; 0x0F; 0x60; 0xC7;                 # punpcklbw xmm0, xmm7  ; S as i16
+        0x66; 0x0F; 0x60; 0xCF;                 # punpcklbw xmm1, xmm7  ; D as i16
+        0xF2; 0x0F; 0x70; 0xD0; 0xFF;           # pshuflw xmm2, xmm0, 0xFF
+        0xF3; 0x0F; 0x70; 0xD2; 0xFF;           # pshufhw xmm2, xmm2, 0xFF  ; alpha bcast
+        0x66; 0x0F; 0xD5; 0x50; 0x40;           # pmullw xmm2, [rax+64]     ; * opacity
+        0x66; 0x0F; 0xFD; 0x50; 0x10;           # paddw xmm2, [rax+16]      ; div255 begin
+        0x66; 0x0F; 0x6F; 0xDA;                 # movdqa xmm3, xmm2
+        0x66; 0x0F; 0x71; 0xD3; 0x08;           # psrlw xmm3, 8
+        0x66; 0x0F; 0xFD; 0xD3;                 # paddw xmm2, xmm3
+        0x66; 0x0F; 0x71; 0xD2; 0x08;           # psrlw xmm2, 8            ; sa
+        0x66; 0x0F; 0xDB; 0x40; 0x30;           # pand xmm0, [rax+48]      ; clear S alpha
+        0x66; 0x0F; 0xEB; 0x40; 0x50;           # por xmm0, [rax+80]       ; S alpha := 255
+        0x66; 0x0F; 0x6F; 0x58; 0x20;           # movdqa xmm3, [rax+32]    ; 255
+        0x66; 0x0F; 0xF9; 0xDA;                 # psubw xmm3, xmm2         ; inv
+        0x66; 0x0F; 0xD5; 0xC2;                 # pmullw xmm0, xmm2        ; S' * sa
+        0x66; 0x0F; 0xD5; 0xCB;                 # pmullw xmm1, xmm3        ; D * inv
+        0x66; 0x0F; 0xFD; 0xC1;                 # paddw xmm0, xmm1
+        0x66; 0x0F; 0xFD; 0x40; 0x10;           # paddw xmm0, [rax+16]     ; div255 begin
+        0x66; 0x0F; 0x6F; 0xD8;                 # movdqa xmm3, xmm0
+        0x66; 0x0F; 0x71; 0xD3; 0x08;           # psrlw xmm3, 8
+        0x66; 0x0F; 0xFD; 0xC3;                 # paddw xmm0, xmm3
+        0x66; 0x0F; 0x71; 0xD0; 0x08;           # psrlw xmm0, 8
+        0x66; 0x0F; 0x67; 0xC0;                 # packuswb xmm0, xmm0
+        0x66; 0x0F; 0xD6; 0x07;                 # movq [rdi], xmm0         ; 2px out
+        0x48; 0x83; 0xC6; 0x08;                 # add rsi, 8
+        0x48; 0x83; 0xC7; 0x08;                 # add rdi, 8
+        0x48; 0xFF; 0xC9;                       # dec rcx
+        0x0F; 0x85; 0x7B; 0xFF; 0xFF; 0xFF;     # jnz loop
+        0x59;                                   # pop rcx
+        0x5F;                                   # pop rdi
+        0x5E;                                   # pop rsi
+    }
+    #endif
+    #ifndef CYRIUS_ARCH_X86
+    var op = load16(consts + 64);
+    var i = 0;
+    while (i < pairs * 2) {
+        var s = src + i * 4;
+        var d = dst + i * 4;
+        var sa = _sx_div255(load8(s + 3) * op);
+        var inv = 255 - sa;
+        store8(d, _sx_div255(load8(s) * sa + load8(d) * inv));
+        store8(d + 1, _sx_div255(load8(s + 1) * sa + load8(d + 1) * inv));
+        store8(d + 2, _sx_div255(load8(s + 2) * sa + load8(d + 2) * inv));
+        store8(d + 3, _sx_div255(255 * sa + load8(d + 3) * inv));
+        i = i + 1;
+    }
+    #endif
+    return RG_ERR_NONE;
+}
+
+#must_use
+fn _sx_div255(v) {
+    var t = v + 128;
+    return (t + (t >> 8)) >> 8;
+}
+
+# Build the 96-byte constants block the blend kernel expects, 16-byte ALIGNED.
+# Returns the raw allocation through `raw_out` so the caller can free it — the
+# aligned pointer is an interior pointer and must NOT be passed to fl_free.
+#must_use
+fn _sx_blend_consts(opacity, raw_out) {
+    var raw = fl_calloc(96 + 16);
+    if (raw == 0) { return 0; }
+    store64(raw_out, raw);
+    # Round up to the next 16-byte boundary. `& (0 - 16)` clears the low 4 bits.
+    var c = (raw + 15) & (0 - 16);
+    var i = 0;
+    while (i < 8) {
+        store16(c + 16 + i * 2, 128);
+        store16(c + 32 + i * 2, 255);
+        store16(c + 64 + i * 2, opacity & 255);
+        # Lanes 3 and 7 are the alpha lanes of the two pixels.
+        var is_alpha = 0;
+        if (i == 3) { is_alpha = 1; }
+        if (i == 7) { is_alpha = 1; }
+        if (is_alpha == 1) {
+            store16(c + 48 + i * 2, 0);
+            store16(c + 80 + i * 2, 255);
+        }
+        if (is_alpha == 0) {
+            store16(c + 48 + i * 2, 0xFFFF);
+            store16(c + 80 + i * 2, 0);
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
 # --- pixel.cyr ---
 
 # pixel.cyr -- pixel formats, buffers, views, and the buffer pool
@@ -5945,9 +6076,32 @@ fn blend_row_normal_scalar(src, dst, n, opacity) {
 # bounds. A bad call is a no-op, matching Rust's early return.
 fn blend_row_normal(src, dst, n, opacity) {
     if (n < 0) { return RG_ERR_NONE; }
-    # The SIMD kernels slot in here (plan §3 items 3-5); until then every call
-    # takes the scalar path, which is behaviourally identical.
-    return blend_row_normal_scalar(src, dst, n, opacity);
+
+    var pairs = n / 2;
+    if (pairs > 0) {
+        # The constants block folds opacity in, so it is built once per row.
+        # It must be 16-byte aligned for the kernel's SSE memory operands;
+        # _sx_blend_consts over-allocates and returns the raw pointer through
+        # `raw` for freeing — the aligned pointer is interior and must NOT be
+        # passed to fl_free.
+        var raw = fl_alloc(8);
+        if (raw == 0) { return blend_row_normal_scalar(src, dst, n, opacity); }
+        var c = _sx_blend_consts(opacity & 255, raw);
+        if (c == 0) {
+            fl_free(raw);
+            return blend_row_normal_scalar(src, dst, n, opacity);
+        }
+        _sx_blend_row_sse2(src, dst, pairs, c);
+        fl_free(load64(raw));
+        fl_free(raw);
+    }
+
+    # Odd trailing pixel.
+    var done = pairs * 2;
+    if (done < n) {
+        blend_row_normal_scalar(src + done * 4, dst + done * 4, n - done, opacity);
+    }
+    return RG_ERR_NONE;
 }
 
 # ── blend_row_normal_argb (ARGB8) ────────
