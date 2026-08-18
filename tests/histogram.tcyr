@@ -1,0 +1,634 @@
+# histogram.tcyr — luminance/RGB histograms, chi-squared, equalize, auto-levels
+# Ported from rust-old/src/histogram.rs #[cfg(test)] and its 5 doctests.
+
+include "src/error.cyr"
+include "src/bytevec.cyr"
+include "src/pixel.cyr"
+include "src/histogram.cyr"
+
+alloc_init();
+
+var err = fl_alloc(8);
+
+# f64 approximate equality. Every histogram value is a division, so exact
+# equality would fail on the last mantissa bit for no useful reason.
+fn approx(a, b, eps) {
+    if (f64_lt(f64_abs(f64_sub(a, b)), eps) == 1) { return 1; }
+    return 0;
+}
+
+# Fill every byte of an Rgba8 buffer with `v` — Rust's `vec![v; w * h * 4]`.
+fn fill_all(b, v) {
+    bv_fill(pixel_buffer_bv(b), v);
+    return 0;
+}
+
+# Write one RGBA pixel by linear index, so a test image reads as a table.
+fn put(b, i, r, g, bl, a) {
+    var p = pixel_buffer_data(b) + i * 4;
+    store8(p, r);
+    store8(p + 1, g);
+    store8(p + 2, bl);
+    store8(p + 3, a);
+    return 0;
+}
+
+#  Byte at linear index `i`, channel `c` — Rust's `buf.data()[i * 4 + c]`.
+fn chan(b, i, c) {
+    return load8(pixel_buffer_data(b) + i * 4 + c);
+}
+
+# ================================================================
+# Hist — the port's Vec<f64>
+# ================================================================
+test_group("hist record");
+
+var hv = hist_new(4);
+assert_eq(hist_len(hv), 4, "hist_new sets the length");
+# Zero bits ARE +0.0 — that is what lets one calloc serve as both vec![0u64; n]
+# and vec![0.0; n]. If this ever stopped holding, every empty-buffer path breaks.
+assert_eq(approx(hist_get(hv, 0), 0, 0.0000001), 1, "a fresh hist reads back as 0.0, not garbage");
+assert_eq(hist_set(hv, 0, 0.25), 1, "hist_set in range returns 1");
+assert_eq(approx(hist_get(hv, 0), 0.25, 0.0000001), 1, "hist_get returns what hist_set wrote");
+assert_eq(hist_set(hv, 4, 0.25), 0, "hist_set past the end returns 0");
+assert_eq(hist_set(hv, (0 - 1), 0.25), 0, "hist_set negative index returns 0");
+assert_eq(hist_get(hv, 4), 0, "hist_get past the end returns 0.0");
+assert_eq(hist_free(0), RG_ERR_NONE, "hist_free(0) is a no-op");
+hist_free(hv);
+
+# ================================================================
+# luminance_histogram — doctest parity
+# ================================================================
+test_group("luminance histogram");
+
+# Doctest: PixelBuffer::new(vec![128; 8*8*4], 8, 8, Rgba8), 256 bins.
+#   hist.len() == 256 and the values sum to 1.0.
+var buf8 = pixel_buffer_zeroed(8, 8, PF_RGBA8, err);
+assert_eq(load64(err), RG_ERR_NONE, "8x8 buffer allocates");
+fill_all(buf8, 128);
+
+var lh = luminance_histogram(buf8, 256, err);
+assert_eq(load64(err), RG_ERR_NONE, "luminance_histogram succeeds");
+assert_eq(hist_len(lh), 256, "hist.len() == 256 (doctest)");
+assert_eq(approx(hist_sum(lh), F64_ONE, 0.000001), 1, "(sum - 1.0).abs() < 1e-6 (doctest)");
+
+# 77 + 150 + 29 == 256, so a uniform 128 image has luminance exactly 128 and all
+# the mass lands in one bin. A mistyped coefficient moves the peak off 128 while
+# still summing to 1.0 — which is why the peak is pinned, not just the sum.
+assert_eq(approx(hist_get(lh, 128), F64_ONE, 0.000001), 1, "uniform 128 puts all mass in bin 128");
+assert_eq(approx(hist_get(lh, 127), 0, 0.000001), 1, "no mass leaks into bin 127");
+assert_eq(approx(hist_get(lh, 129), 0, 0.000001), 1, "no mass leaks into bin 129");
+hist_free(lh);
+
+# Fewer bins: scale = bins/256, so 128 lands in bin (128 * 4/256) = 2 of 4.
+var lh4 = luminance_histogram(buf8, 4, err);
+assert_eq(load64(err), RG_ERR_NONE, "4-bin histogram succeeds");
+assert_eq(hist_len(lh4), 4, "4-bin histogram has 4 entries");
+assert_eq(approx(hist_get(lh4, 2), F64_ONE, 0.000001), 1, "128 with 4 bins lands in bin 2");
+assert_eq(approx(hist_sum(lh4), F64_ONE, 0.000001), 1, "4-bin histogram still sums to 1.0");
+hist_free(lh4);
+
+# Saturated white is luminance 255, and 255 * (4/256) = 3.98 truncates to bin 3
+# — the top bin, reached by the truncation itself. (The `.min(bins - 1)` the
+# original carries is unreachable for byte input: lum * bins/256 < bins for
+# every lum <= 255, whatever `bins` is. It is kept in the port because Rust has
+# it and because it is the only guard if the coefficients ever change; no
+# assertion here can exercise it, and pretending otherwise would be a lie.)
+fill_all(buf8, 255);
+var lhw = luminance_histogram(buf8, 4, err);
+assert_eq(approx(hist_get(lhw, 3), F64_ONE, 0.000001), 1, "white saturates into the last bin, not past it");
+hist_free(lhw);
+
+var lhw256 = luminance_histogram(buf8, 256, err);
+assert_eq(approx(hist_get(lhw256, 255), F64_ONE, 0.000001), 1, "white is luminance 255 exactly");
+hist_free(lhw256);
+
+# --- bin index TRUNCATES, it does not round ---
+# Rust is `(lum as f64 * scale) as usize`, and `as` truncates. Every case above
+# lands on an exact bin boundary, where truncation and rounding agree, so a
+# mutant adding +0.5 passed the whole suite. Grey 96 with 4 bins is 1.5 — the
+# one place they disagree.
+fill_all(buf8, 96);
+var lhtrunc = luminance_histogram(buf8, 4, err);
+assert_eq(approx(hist_get(lhtrunc, 1), F64_ONE, 0.000001), 1, "96 with 4 bins truncates into bin 1, not bin 2");
+assert_eq(approx(hist_get(lhtrunc, 2), 0, 0.000001), 1, "bin 2 is empty — rounding would have put it there");
+hist_free(lhtrunc);
+
+# --- the scale denominator is 256, not 255 ---
+# This is the same off-by-one class the CHANGELOG records for composite's
+# div255, and for bins == 256 the two denominators are indistinguishable. Grey
+# 219 with 7 bins separates them: 219*7/256 = 5.99 -> bin 5, 219*7/255 = 6.01 -> bin 6.
+fill_all(buf8, 219);
+var lhden = luminance_histogram(buf8, 7, err);
+assert_eq(approx(hist_get(lhden, 5), F64_ONE, 0.000001), 1, "219 with 7 bins lands in bin 5 (scale is bins/256)");
+assert_eq(approx(hist_get(lhden, 6), 0, 0.000001), 1, "bin 6 is empty — a /255 scale would have put it there");
+hist_free(lhden);
+
+# Black is luminance 0.
+fill_all(buf8, 0);
+var lhb = luminance_histogram(buf8, 256, err);
+assert_eq(approx(hist_get(lhb, 0), F64_ONE, 0.000001), 1, "black is luminance 0");
+hist_free(lhb);
+
+# BT.601 weights the three channels very differently — 77 / 150 / 29 — and each
+# saturated primary lands in its own bin: 77*255>>8 = 76, 150*255>>8 = 149,
+# 29*255>>8 = 28.
+#
+# ⚠ Each primary gets its OWN buffer, deliberately. A single image holding one
+# green pixel and one blue pixel is symmetric under a green/blue coefficient
+# SWAP: it still puts half the mass in bin 149 and half in bin 28, just from the
+# other pixel. That test passes against a swapped kernel — measured, it did.
+# Only a one-primary-at-a-time image pins which coefficient is which.
+var buf2 = pixel_buffer_zeroed(2, 1, PF_RGBA8, err);
+
+put(buf2, 0, 255, 0, 0, 255);
+put(buf2, 1, 255, 0, 0, 255);
+var lh_r = luminance_histogram(buf2, 256, err);
+assert_eq(approx(hist_get(lh_r, 76), F64_ONE, 0.000001), 1, "pure red is luminance 76 (coefficient 77)");
+hist_free(lh_r);
+
+put(buf2, 0, 0, 255, 0, 255);
+put(buf2, 1, 0, 255, 0, 255);
+var lh_g = luminance_histogram(buf2, 256, err);
+assert_eq(approx(hist_get(lh_g, 149), F64_ONE, 0.000001), 1, "pure green is luminance 149 (coefficient 150)");
+hist_free(lh_g);
+
+put(buf2, 0, 0, 0, 255, 255);
+put(buf2, 1, 0, 0, 255, 255);
+var lh_b = luminance_histogram(buf2, 256, err);
+assert_eq(approx(hist_get(lh_b, 28), F64_ONE, 0.000001), 1, "pure blue is luminance 28 (coefficient 29)");
+hist_free(lh_b);
+
+# The three coefficients sum to 256, which is what makes `>> 8` an exact divide
+# and puts a neutral grey at exactly its own value. Mixing one primary per
+# buffer above and the grey identity here pins the whole kernel.
+put(buf2, 0, 0, 255, 0, 255);
+put(buf2, 1, 0, 0, 255, 255);
+var lhc = luminance_histogram(buf2, 256, err);
+assert_eq(approx(hist_get(lhc, 149), 0.5, 0.000001), 1, "a mixed image splits mass across both bins");
+assert_eq(approx(hist_get(lhc, 28), 0.5, 0.000001), 1, "and the other half lands in the blue bin");
+hist_free(lhc);
+
+# Guards. bins == 0 is Rust's Other("bins must be > 0").
+assert_eq(luminance_histogram(buf8, 0, err), 0, "bins == 0 returns no histogram");
+assert_eq(load64(err), RG_ERR_OTHER, "bins == 0 is RG_ERR_OTHER");
+assert_eq(luminance_histogram(buf8, (0 - 1), err), 0, "negative bins returns no histogram");
+assert_eq(load64(err), RG_ERR_INVALID_PARAMETER, "negative bins is RG_ERR_INVALID_PARAMETER");
+
+# Rgba8-only, like the original.
+var yuv = pixel_buffer_zeroed(8, 8, PF_YUV420P, err);
+assert_eq(luminance_histogram(yuv, 256, err), 0, "non-Rgba8 returns no histogram");
+assert_eq(load64(err), RG_ERR_INVALID_FORMAT, "non-Rgba8 is RG_ERR_INVALID_FORMAT");
+
+# An empty buffer is `vec![0.0; bins]`, not a divide by zero.
+var empty = pixel_buffer_zeroed(0, 0, PF_RGBA8, err);
+var lhe = luminance_histogram(empty, 8, err);
+assert_eq(load64(err), RG_ERR_NONE, "empty buffer is not an error");
+assert_eq(hist_len(lhe), 8, "empty buffer still returns `bins` entries");
+assert_eq(approx(hist_sum(lhe), 0, 0.000001), 1, "empty buffer sums to 0.0, not NaN");
+hist_free(lhe);
+
+# ================================================================
+# rgb_histograms — doctest parity
+# ================================================================
+test_group("rgb histograms");
+
+var trio = fl_alloc(24);
+
+# Doctest: 4x4 all-128 buffer; r.len() == 256 and (r[128] - 1.0).abs() < 1e-6.
+var buf4 = pixel_buffer_zeroed(4, 4, PF_RGBA8, err);
+fill_all(buf4, 128);
+assert_eq(rgb_histograms(buf4, trio), RG_ERR_NONE, "rgb_histograms succeeds");
+var rh = load64(trio);
+var gh = load64(trio + 8);
+var bh = load64(trio + 16);
+assert_eq(hist_len(rh), 256, "r.len() == 256 (doctest)");
+assert_eq(hist_len(gh), 256, "g.len() == 256 (cfg(test))");
+assert_eq(hist_len(bh), 256, "b.len() == 256 (cfg(test))");
+assert_eq(approx(hist_get(rh, 128), F64_ONE, 0.000001), 1, "(r[128] - 1.0).abs() < 1e-6 (doctest)");
+assert_eq(approx(hist_sum(rh), F64_ONE, 0.000001), 1, "r sums to 1.0");
+assert_eq(approx(hist_sum(bh), F64_ONE, 0.000001), 1, "b sums to 1.0");
+hist_free(rh); hist_free(gh); hist_free(bh);
+
+# The three histograms must be INDEPENDENT — a single shared buffer written
+# three times would pass every length check above and still be wrong. A pixel
+# with three different channel values is what separates them.
+var buf3 = pixel_buffer_zeroed(2, 1, PF_RGBA8, err);
+put(buf3, 0, 10, 20, 30, 255);
+put(buf3, 1, 10, 20, 30, 255);
+assert_eq(rgb_histograms(buf3, trio), RG_ERR_NONE, "rgb_histograms on a 3-valued image");
+var rh3 = load64(trio);
+var gh3 = load64(trio + 8);
+var bh3 = load64(trio + 16);
+assert_eq(approx(hist_get(rh3, 10), F64_ONE, 0.000001), 1, "red channel counts value 10");
+assert_eq(approx(hist_get(gh3, 20), F64_ONE, 0.000001), 1, "green channel counts value 20");
+assert_eq(approx(hist_get(bh3, 30), F64_ONE, 0.000001), 1, "blue channel counts value 30");
+assert_eq(approx(hist_get(rh3, 20), 0, 0.000001), 1, "red does not see green's value");
+assert_eq(approx(hist_get(gh3, 10), 0, 0.000001), 1, "green does not see red's value");
+hist_free(rh3); hist_free(gh3); hist_free(bh3);
+
+# Alpha is NOT histogrammed — only channels 0..2. A buffer whose alpha differs
+# from its colour would otherwise show a fourth peak.
+put(buf3, 0, 10, 20, 30, 77);
+put(buf3, 1, 10, 20, 30, 77);
+# Return consumed rather than discarded — rgb_histograms is #must_use, matching
+# the Rust original, and a bare call is a compile warning.
+assert_eq(rgb_histograms(buf3, trio), RG_ERR_NONE, "rgb_histograms recomputed for the next check");
+var rh4 = load64(trio);
+assert_eq(approx(hist_get(rh4, 77), 0, 0.000001), 1, "alpha does not leak into the red histogram");
+hist_free(rh4); hist_free(load64(trio + 8)); hist_free(load64(trio + 16));
+
+# Guards: format, and the empty case.
+assert_eq(rgb_histograms(yuv, trio), RG_ERR_INVALID_FORMAT, "rgb_histograms rejects non-Rgba8");
+assert_eq(load64(trio), 0, "a rejected call leaves the out slots at 0");
+assert_eq(load64(trio + 16), 0, "a rejected call leaves the third slot at 0 too");
+
+assert_eq(rgb_histograms(empty, trio), RG_ERR_NONE, "empty buffer is not an error");
+var rhe = load64(trio);
+assert_eq(hist_len(rhe), 256, "empty buffer still returns 256 entries");
+assert_eq(approx(hist_sum(rhe), 0, 0.000001), 1, "empty buffer sums to 0.0, not NaN");
+hist_free(rhe); hist_free(load64(trio + 8)); hist_free(load64(trio + 16));
+
+# ================================================================
+# chi_squared — doctest parity + the 1.0.0 length validation
+# ================================================================
+test_group("chi squared");
+
+# Doctest: a = b = [0.25; 4] gives 0.
+var ca = hist_new(4);
+var cb = hist_new(4);
+var ci = 0;
+while (ci < 4) {
+    hist_set(ca, ci, 0.25);
+    hist_set(cb, ci, 0.25);
+    ci = ci + 1;
+}
+var chi_same = chi_squared(ca, cb, err);
+assert_eq(load64(err), RG_ERR_NONE, "chi_squared on equal lengths succeeds");
+assert_eq(approx(chi_same, 0, 0.0000000001), 1, "chi_squared(a, a).abs() < 1e-10 (doctest)");
+
+# Doctest: c = [1,0,0,0], d = [0,0,0,1] gives a positive value. The exact answer
+# is 0.5 * (1 + 1) == 1.0 — two disjoint unit spikes. Pinning the value rather
+# than just the sign is what catches the final `* 0.5` being dropped or applied
+# per-term instead of once to the total.
+var cc = hist_new(4);
+var cd = hist_new(4);
+hist_set(cc, 0, F64_ONE);
+hist_set(cd, 3, F64_ONE);
+var chi_diff = chi_squared(cc, cd, err);
+assert_eq(f64_gt(chi_diff, 0), 1, "chi_squared(c, d) > 0.0 (doctest)");
+assert_eq(approx(chi_diff, F64_ONE, 0.0000000001), 1, "two disjoint unit spikes score exactly 1.0");
+
+# Symmetric, by construction.
+assert_eq(approx(chi_squared(cd, cc, err), chi_diff, 0.0000000001), 1, "chi_squared is symmetric");
+
+# The empty-bin guard. Both inputs zero in a bin must contribute 0, not NaN from
+# 0/0 — an all-zero pair is the sharpest form of that.
+var cz1 = hist_new(4);
+var cz2 = hist_new(4);
+var chi_zero = chi_squared(cz1, cz2, err);
+assert_eq(approx(chi_zero, 0, 0.0000000001), 1, "all-zero histograms score 0.0, not NaN");
+assert_eq(f64_eq(chi_zero, chi_zero), 1, "the all-zero result is a number, not NaN");
+
+# The threshold is `sum > 1e-10`, not `sum > 0`. An exact-zero pair cannot tell
+# those apart, so the guard's actual purpose — skipping a denominator small
+# enough to blow the quotient up — went untested. A bin holding 1e-11 against
+# an empty one is below the threshold and must contribute nothing; with a
+# `> 0` guard it contributes ~5e-12 instead.
+var ce1 = hist_new(4);
+var ce2 = hist_new(4);
+hist_set(ce1, 0, 0.00000000001);
+var chi_eps = chi_squared(ce1, ce2, err);
+assert_eq(load64(err), RG_ERR_NONE, "sub-threshold chi-squared succeeds");
+assert_eq(approx(chi_eps, 0, 0.0000000000001), 1, "a sub-1e-10 bin contributes exactly 0, not a tiny quotient");
+hist_free(ce1); hist_free(ce2);
+
+# Half-overlap: a = [0.5, 0.5, 0, 0], b = [0.5, 0, 0.5, 0].
+#   bin 0: sum 1.0, diff 0     -> 0
+#   bin 1: sum 0.5, diff 0.5   -> 0.25 / 0.5 = 0.5
+#   bin 2: sum 0.5, diff -0.5  -> 0.5
+#   total 1.0 * 0.5 = 0.5
+var ch1 = hist_new(4);
+var ch2 = hist_new(4);
+hist_set(ch1, 0, 0.5); hist_set(ch1, 1, 0.5);
+hist_set(ch2, 0, 0.5); hist_set(ch2, 2, 0.5);
+assert_eq(approx(chi_squared(ch1, ch2, err), 0.5, 0.0000000001), 1, "half-overlapping distributions score 0.5");
+
+# ⚠ 1.0.0 HARDENING. This used to be `a.iter().zip(b.iter())`, which stops at
+# the shorter input: comparing a 4-bin histogram against a 3-bin one silently
+# scored 3 bins and reported a confident, wrong number. It is now an error.
+var cshort = hist_new(3);
+hist_set(cshort, 0, F64_ONE);
+var chi_bad = chi_squared(cc, cshort, err);
+assert_eq(load64(err), RG_ERR_DIMENSION_MISMATCH, "mismatched lengths are a dimension mismatch");
+assert_eq(chi_bad, 0, "a rejected chi_squared returns 0.0");
+# The pre-hardening behaviour: zip would have compared cc[0..3] against
+# cshort[0..3], both [1,0,0], and returned 0.0 with no error at all. Asserting
+# the ERROR rather than the value is what pins the fix — the truncated answer
+# happens to be 0.0 here, which is exactly why the silent version survived.
+var chi_rev = chi_squared(cshort, cc, err);
+assert_eq(load64(err), RG_ERR_DIMENSION_MISMATCH, "the mismatch is caught in either argument order");
+assert_eq(chi_rev, 0, "the reversed rejection also returns 0.0");
+
+hist_free(ca); hist_free(cb); hist_free(cc); hist_free(cd);
+hist_free(cz1); hist_free(cz2); hist_free(ch1); hist_free(ch2); hist_free(cshort);
+
+# Two real histograms from the same image are identical; from different images
+# they are not. This is the end-to-end use the function exists for.
+fill_all(buf8, 128);
+var hA = luminance_histogram(buf8, 256, err);
+var hB = luminance_histogram(buf8, 256, err);
+assert_eq(approx(chi_squared(hA, hB, err), 0, 0.0000000001), 1, "the same image scores 0 against itself");
+fill_all(buf8, 200);
+var hC = luminance_histogram(buf8, 256, err);
+assert_eq(f64_gt(chi_squared(hA, hC, err), 0), 1, "different images score above 0");
+hist_free(hA); hist_free(hB); hist_free(hC);
+
+# ================================================================
+# equalize
+# ================================================================
+test_group("equalize");
+
+# cfg(test) equalize_uniform_unchanged: an 8x8 all-128 image. Every pixel has
+# luminance 128, so cdf_min == 1.0 and denom == 0 -> the guard fires and the
+# buffer comes back UNTOUCHED. (The Rust test's comment claims it maps to 255;
+# the early return means it does not, and the test only checks uniformity, so
+# both readings pass there. Pinning the actual value here.)
+fill_all(buf8, 128);
+assert_eq(equalize(buf8), RG_ERR_NONE, "equalize on a uniform image succeeds");
+var uniform_ok = 1;
+var ui = 0;
+while (ui < 64) {
+    if (chan(buf8, ui, 0) != 128) { uniform_ok = 0; }
+    if (chan(buf8, ui, 1) != 128) { uniform_ok = 0; }
+    if (chan(buf8, ui, 2) != 128) { uniform_ok = 0; }
+    ui = ui + 1;
+}
+assert_eq(uniform_ok, 1, "a uniform image is left unchanged by the degenerate-CDF guard");
+
+# Doctest: vec![50,50,50,255].repeat(64) as 8x8. Also uniform, so also a no-op —
+# the doctest only asserts it does not error.
+fill_all(buf8, 50);
+var pi = 0;
+while (pi < 64) {
+    put(buf8, pi, 50, 50, 50, 255);
+    pi = pi + 1;
+}
+assert_eq(equalize(buf8), RG_ERR_NONE, "equalize on the doctest image succeeds");
+assert_eq(chan(buf8, 0, 0), 50, "the doctest image is uniform, so it is unchanged");
+
+# The real path. Four grey pixels, four distinct luminances, so:
+#   cdf_min = 0.25, denom = 0.75
+#   lut[darkest] = 0, then 85, then 170, then lut[255] = 255
+# and each pixel is scaled by lut[lum] / lum. Four equally-weighted levels
+# always come out as the even 0 / 85 / 170 / 255 ramp regardless of where the
+# input levels sat — which is exactly what equalization claims to do.
+var buf4g = pixel_buffer_zeroed(4, 1, PF_RGBA8, err);
+put(buf4g, 0, 0, 0, 0, 255);
+put(buf4g, 1, 100, 100, 100, 255);
+put(buf4g, 2, 200, 200, 200, 255);
+put(buf4g, 3, 255, 255, 255, 255);
+assert_eq(equalize(buf4g), RG_ERR_NONE, "equalize on a 4-level ramp succeeds");
+assert_eq(chan(buf4g, 0, 0), 0, "equalize maps the darkest level to 0");
+assert_eq(chan(buf4g, 1, 0), 85, "equalize maps 100 -> 85");
+assert_eq(chan(buf4g, 2, 0), 170, "equalize maps 200 -> 170");
+assert_eq(chan(buf4g, 3, 0), 255, "equalize maps 255 -> 255");
+
+# ⚠ The SAME even ramp, but from input levels chosen so the apply pass tells
+# single from double precision. 100/200 above does NOT: 100 * (85/100) rounds to
+# 85.0 in both widths. 39 and 78 do — scale = 85/39 and 170/78 are the ratios
+# where the two disagree.
+#   f32: 39 * f32(85/39) = 85.0        -> 85      (Rust, and this port)
+#   f64: 39 * (85/39)    = 84.99999... -> 84
+#   f32: 78 * f32(170/78) = 170.0      -> 170
+#   f64: 78 * (170/78)   = 169.99999.. -> 169
+# Both measured, not derived. This is the assertion that fails if the apply
+# pass is ever "simplified" to f64, or if `_hist_f32_*` loses its `: f32`
+# parameter annotations and silently becomes integer arithmetic.
+var bufw = pixel_buffer_zeroed(4, 1, PF_RGBA8, err);
+put(bufw, 0, 0, 0, 0, 255);
+put(bufw, 1, 39, 39, 39, 255);
+put(bufw, 2, 78, 78, 78, 255);
+put(bufw, 3, 255, 255, 255, 255);
+assert_eq(equalize(bufw), RG_ERR_NONE, "equalize on the width-discriminating ramp succeeds");
+assert_eq(chan(bufw, 0, 0), 0, "equalize maps 0 -> 0");
+assert_eq(chan(bufw, 1, 0), 85, "equalize maps 39 -> 85 (f32; f64 gives 84)");
+assert_eq(chan(bufw, 2, 0), 170, "equalize maps 78 -> 170 (f32; f64 gives 169)");
+assert_eq(chan(bufw, 3, 0), 255, "equalize maps 255 -> 255");
+
+# The `+ 0.5` in the LUT is round-half-up ahead of a TRUNCATING cast, exactly as
+# in linear_to_srgb — drop it and every LUT entry that is not already an integer
+# floors instead. It takes an unevenly-spaced input to see: five clustered dark
+# levels plus one bright one flatten to the even 0/64/128/191/255 ramp with the
+# rounding term, and to 0/62/127/191/255 without it. Both measured.
+# (The tidy 4-level ramps above cannot catch this: their LUT entries land on
+# exact integers, where +0.5 changes nothing.)
+var bufr = pixel_buffer_zeroed(5, 1, PF_RGBA8, err);
+put(bufr, 0, 4, 4, 4, 255);
+put(bufr, 1, 11, 11, 11, 255);
+put(bufr, 2, 13, 13, 13, 255);
+put(bufr, 3, 15, 15, 15, 255);
+put(bufr, 4, 195, 195, 195, 255);
+assert_eq(equalize(bufr), RG_ERR_NONE, "equalize on a clustered image succeeds");
+assert_eq(chan(bufr, 0, 0), 0, "clustered darks flatten to an even ramp: 0");
+assert_eq(chan(bufr, 1, 0), 64, "even ramp: 64 (without the +0.5 this is 62)");
+assert_eq(chan(bufr, 2, 0), 128, "even ramp: 128 (without the +0.5 this is 127)");
+assert_eq(chan(bufr, 3, 0), 191, "even ramp: 191");
+assert_eq(chan(bufr, 4, 0), 255, "even ramp: 255");
+
+# The old_lum == 0 branch, exercised properly. A pixel can have luminance 0 with
+# a NON-zero channel — 77 * 3 = 231, which is still under 256 — and that is the
+# only input that separates the branch from the general path. Without it the
+# scale is lut[0] / 0 — a 0.0/0.0 NaN — and whatever the clamp then makes of a
+# NaN is not black: measured, the mutant leaves the channel at 3. lut[0] is
+# always 0 (bin 0 either IS cdf_min, or is below it and clamps), so the branch
+# writes black.
+var bufblk = pixel_buffer_zeroed(3, 1, PF_RGBA8, err);
+put(bufblk, 0, 3, 0, 0, 255);
+put(bufblk, 1, 100, 100, 100, 255);
+put(bufblk, 2, 255, 255, 255, 255);
+assert_eq(equalize(bufblk), RG_ERR_NONE, "equalize on a near-black pixel succeeds");
+assert_eq(chan(bufblk, 0, 0), 0, "a lum-0 pixel with a non-zero channel is written black, not NaN-clamped");
+assert_eq(chan(bufblk, 0, 1), 0, "and its green channel too");
+assert_eq(chan(bufblk, 0, 2), 0, "and its blue channel too");
+assert_eq(chan(bufblk, 1, 0), 127, "the mid pixel still equalizes normally");
+
+# The scaling preserves the RGB ratio rather than greying the pixel out — that
+# is the whole reason equalize works on luminance and rescales, instead of
+# writing the new luminance into all three channels.
+var bufhue = pixel_buffer_zeroed(4, 1, PF_RGBA8, err);
+put(bufhue, 0, 0, 0, 0, 255);
+put(bufhue, 1, 100, 50, 25, 255);
+put(bufhue, 2, 200, 200, 200, 255);
+put(bufhue, 3, 255, 255, 255, 255);
+assert_eq(equalize(bufhue), RG_ERR_NONE, "equalize on a coloured image succeeds");
+var hr = chan(bufhue, 1, 0);
+var hg = chan(bufhue, 1, 1);
+var hb = chan(bufhue, 1, 2);
+assert_gt(hr, hg, "the red > green ordering survives equalization");
+assert_gt(hg, hb, "the green > blue ordering survives equalization");
+assert_eq(chan(bufhue, 1, 3), 255, "alpha is not touched by equalize");
+
+# The old_lum == 0 branch: a black pixel has no ratio to scale, so the new
+# luminance is written to all three channels. Give it a non-zero LUT entry by
+# making bin 0 not the darkest occupied bin... which is impossible, so instead
+# check the documented behaviour directly — black stays neutral grey.
+assert_eq(chan(bufhue, 0, 0), chan(bufhue, 0, 1), "a black pixel stays neutral through the ol == 0 branch");
+
+# --- the upper clamp in _hist_f32_to_u8 ---
+# A saturated primary scaled up by its luminance ratio overflows 255. Without
+# the clamp the f32->u8 truncation wraps and red comes back 87 instead of 255.
+# Every other equalize case here keeps channel <= luminance, so the clamp was
+# entirely unexercised: deleting it left the suite green.
+var bufsat = pixel_buffer_zeroed(2, 1, PF_RGBA8, err);
+put(bufsat, 0, 255, 0, 0, 255);
+put(bufsat, 1, 0, 0, 0, 255);
+assert_eq(equalize(bufsat), RG_ERR_NONE, "equalize on a saturated primary succeeds");
+assert_eq(chan(bufsat, 0, 0), 255, "the upper clamp holds a saturated red at 255 (unclamped wraps to 87)");
+pixel_buffer_free(bufsat);
+
+# --- alpha is genuinely preserved, not merely 255-in-255-out ---
+# Every other buffer here uses alpha 255, which survives any plausible
+# corruption, so "alpha is not touched" was not discriminating. A mid alpha is.
+var bufal = pixel_buffer_zeroed(2, 1, PF_RGBA8, err);
+put(bufal, 0, 100, 100, 100, 40);
+put(bufal, 1, 150, 150, 150, 200);
+assert_eq(equalize(bufal), RG_ERR_NONE, "equalize with mixed alpha succeeds");
+assert_eq(chan(bufal, 0, 3), 40, "equalize leaves a non-255 alpha byte-identical");
+assert_eq(chan(bufal, 1, 3), 200, "equalize leaves the second alpha byte-identical");
+pixel_buffer_free(bufal);
+assert_eq(chan(bufhue, 0, 1), chan(bufhue, 0, 2), "all three channels of a black pixel agree");
+
+# Guards.
+assert_eq(equalize(yuv), RG_ERR_INVALID_FORMAT, "equalize rejects non-Rgba8");
+assert_eq(equalize(empty), RG_ERR_NONE, "equalize on an empty buffer is a no-op, not a divide by zero");
+
+# ================================================================
+# auto_levels
+# ================================================================
+test_group("auto levels");
+
+# Doctest + cfg(test) auto_levels_stretches: [100,100,100,255, 150,150,150,255]
+# at 2x1. range = 50, gain = 255/50 = 5.1, offset = 100.
+#   data[0] < 100 and data[4] > 150 (doctest)
+#   data[0] < 10  and data[4] > 245 (cfg(test))
+var buflv = pixel_buffer_zeroed(2, 1, PF_RGBA8, err);
+put(buflv, 0, 100, 100, 100, 255);
+put(buflv, 1, 150, 150, 150, 255);
+assert_eq(auto_levels(buflv), RG_ERR_NONE, "auto_levels succeeds");
+assert_lt(chan(buflv, 0, 0), 100, "the darker pixel is pulled toward 0 (doctest)");
+assert_gt(chan(buflv, 1, 0), 150, "the brighter pixel is pushed toward 255 (doctest)");
+assert_lt(chan(buflv, 0, 0), 10, "min maps near 0 (cfg(test))");
+assert_gt(chan(buflv, 1, 0), 245, "max maps near 255 (cfg(test))");
+
+# ⚠ The exact endpoints, and they are SINGLE-precision answers. 255.0f32/50.0f32
+# is 5.099999904632568, and 50 * that rounds UP to exactly 255.0 in f32 but down
+# to 254.99999999999997 in f64. Measured both ways: f32 gives 255, f64 gives 254.
+# This assertion is the reason `_hist_f32_*` take `: f32` parameters.
+assert_eq(chan(buflv, 0, 0), 0, "min maps to exactly 0");
+assert_eq(chan(buflv, 1, 0), 255, "max maps to exactly 255 (f32; f64 would give 254)");
+assert_eq(chan(buflv, 1, 3), 255, "alpha is not touched by auto_levels");
+
+# Same non-discriminating-alpha problem as equalize above: 255 survives any
+# plausible corruption, so pin a mid alpha through auto_levels too.
+var bufla = pixel_buffer_zeroed(2, 1, PF_RGBA8, err);
+put(bufla, 0, 60, 60, 60, 40);
+put(bufla, 1, 190, 190, 190, 200);
+assert_eq(auto_levels(bufla), RG_ERR_NONE, "auto_levels with mixed alpha succeeds");
+assert_eq(chan(bufla, 0, 3), 40, "auto_levels leaves a non-255 alpha byte-identical");
+assert_eq(chan(bufla, 1, 3), 200, "auto_levels leaves the second alpha byte-identical");
+pixel_buffer_free(bufla);
+
+# cfg(test) auto_levels_already_full_range: [0,0,0,255, 255,255,255,255] must
+# come back byte-identical. gain = 255/255 = 1.0 and offset = 0, so this pins
+# the identity case rather than just "does not error".
+var buffull = pixel_buffer_zeroed(2, 1, PF_RGBA8, err);
+put(buffull, 0, 0, 0, 0, 255);
+put(buffull, 1, 255, 255, 255, 255);
+assert_eq(auto_levels(buffull), RG_ERR_NONE, "auto_levels on a full-range image succeeds");
+assert_eq(chan(buffull, 0, 0), 0, "full-range 0 stays 0");
+assert_eq(chan(buffull, 1, 0), 255, "full-range 255 stays 255");
+assert_eq(chan(buffull, 0, 3), 255, "full-range alpha stays 255");
+
+# The range < 1.0 branch. A constant channel has range 0, and Rust returns the
+# IDENTITY (0.0, 1.0) rather than (min, 255/0) — so a flat image is passed
+# through, NOT blown up to 255 or poisoned with an infinity.
+var bufflat = pixel_buffer_zeroed(2, 1, PF_RGBA8, err);
+put(bufflat, 0, 77, 77, 77, 255);
+put(bufflat, 1, 77, 77, 77, 255);
+assert_eq(auto_levels(bufflat), RG_ERR_NONE, "auto_levels on a flat image succeeds");
+assert_eq(chan(bufflat, 0, 0), 77, "a zero-range channel is passed through unchanged");
+assert_eq(chan(bufflat, 1, 0), 77, "and so is the second pixel");
+
+# range == 1 is the OTHER side of that boundary: 1.0 is not < 1.0, so it DOES
+# stretch, by a gain of 255. Getting the comparison backwards would be invisible
+# without pinning both sides.
+var bufone = pixel_buffer_zeroed(2, 1, PF_RGBA8, err);
+put(bufone, 0, 77, 77, 77, 255);
+put(bufone, 1, 78, 78, 78, 255);
+assert_eq(auto_levels(bufone), RG_ERR_NONE, "auto_levels on a 1-level range succeeds");
+assert_eq(chan(bufone, 0, 0), 0, "a range of exactly 1 still stretches: min -> 0");
+assert_eq(chan(bufone, 1, 0), 255, "a range of exactly 1 still stretches: max -> 255");
+
+# PER-CHANNEL, not luminance-based. Each channel gets its own min/max, so a
+# channel that is already full-range is untouched while a compressed one is
+# expanded. A single shared luminance gain would shift the colour instead.
+var bufpc = pixel_buffer_zeroed(2, 1, PF_RGBA8, err);
+put(bufpc, 0, 0, 100, 100, 255);
+put(bufpc, 1, 255, 150, 100, 255);
+assert_eq(auto_levels(bufpc), RG_ERR_NONE, "auto_levels on a per-channel image succeeds");
+assert_eq(chan(bufpc, 0, 0), 0, "the already-full red channel is unchanged at 0");
+assert_eq(chan(bufpc, 1, 0), 255, "the already-full red channel is unchanged at 255");
+assert_eq(chan(bufpc, 0, 1), 0, "the compressed green channel stretches its own min to 0");
+assert_eq(chan(bufpc, 1, 1), 255, "the compressed green channel stretches its own max to 255");
+assert_eq(chan(bufpc, 0, 2), 100, "the flat blue channel is left alone by its own guard");
+
+# Guards.
+assert_eq(auto_levels(yuv), RG_ERR_INVALID_FORMAT, "auto_levels rejects non-Rgba8");
+assert_eq(auto_levels(empty), RG_ERR_NONE, "auto_levels on an empty buffer is a no-op");
+
+# ================================================================
+# equalize / auto_levels agree on what a histogram says
+# ================================================================
+test_group("end to end");
+
+# After auto_levels the luminance histogram must actually reach both ends of
+# the range — that is the operation's whole purpose, and it is a claim neither
+# a per-pixel assertion nor a round-trip makes.
+var bufe2e = pixel_buffer_zeroed(4, 1, PF_RGBA8, err);
+put(bufe2e, 0, 100, 100, 100, 255);
+put(bufe2e, 1, 120, 120, 120, 255);
+put(bufe2e, 2, 130, 130, 130, 255);
+put(bufe2e, 3, 150, 150, 150, 255);
+var before = luminance_histogram(bufe2e, 256, err);
+assert_eq(approx(hist_get(before, 0), 0, 0.000001), 1, "before auto_levels nothing sits at black");
+assert_eq(approx(hist_get(before, 255), 0, 0.000001), 1, "before auto_levels nothing sits at white");
+auto_levels(bufe2e);
+var after = luminance_histogram(bufe2e, 256, err);
+assert_eq(f64_gt(hist_get(after, 0), 0), 1, "after auto_levels the darkest pixel is at black");
+assert_eq(f64_gt(hist_get(after, 255), 0), 1, "after auto_levels the brightest pixel is at white");
+assert_eq(approx(hist_sum(after), F64_ONE, 0.000001), 1, "the stretched histogram still sums to 1.0");
+assert_eq(f64_gt(chi_squared(before, after, err), 0), 1, "auto_levels changed the distribution");
+hist_free(before); hist_free(after);
+
+pixel_buffer_free(bufe2e);
+pixel_buffer_free(bufpc);
+pixel_buffer_free(bufone);
+pixel_buffer_free(bufflat);
+pixel_buffer_free(buffull);
+pixel_buffer_free(buflv);
+pixel_buffer_free(bufhue);
+pixel_buffer_free(bufblk);
+pixel_buffer_free(bufr);
+pixel_buffer_free(bufw);
+pixel_buffer_free(buf4g);
+pixel_buffer_free(buf3);
+pixel_buffer_free(buf4);
+pixel_buffer_free(buf2);
+pixel_buffer_free(empty);
+pixel_buffer_free(yuv);
+pixel_buffer_free(buf8);
+
+var exit_code = assert_summary();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

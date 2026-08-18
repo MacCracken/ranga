@@ -1,0 +1,783 @@
+# composite.tcyr — compositing: alpha, masks, transitions, fills, gradients
+# Ported from rust-old/src/composite.rs #[cfg(test)] (18 tests) and its 13
+# doctests, plus the assertions that pin the traps those two sets miss.
+
+include "src/error.cyr"
+include "src/bytevec.cyr"
+include "src/pixel.cyr"
+include "src/composite.cyr"
+
+alloc_init();
+
+# ── test-local helpers ────────
+# A colour record is 4 caller-owned bytes; these keep the assertions on one
+# line each instead of four store8s per colour.
+fn mkcolor(r, g, b, a) {
+    var c = fl_alloc(4);
+    store8(c, r);
+    store8(c + 1, g);
+    store8(c + 2, b);
+    store8(c + 3, a);
+    return c;
+}
+
+fn mkbuf(w, h, fmt) {
+    var e = fl_alloc(8);
+    var v = pixel_buffer_zeroed(w, h, fmt, e);
+    fl_free(e);
+    return v;
+}
+
+# A 1x1 buffer holding one pixel — the shape almost every Rust unit test uses.
+fn mkpx(fmt, c0, c1, c2, c3) {
+    var v = mkbuf(1, 1, fmt);
+    var p = pixel_buffer_data(v);
+    store8(p, c0);
+    store8(p + 1, c1);
+    store8(p + 2, c2);
+    store8(p + 3, c3);
+    return v;
+}
+
+# Byte `i` of a buffer.
+fn pxb(buf, i) { return load8(pixel_buffer_data(buf) + i); }
+
+# Write pixel `idx` of a buffer.
+fn setpx(buf, idx, c0, c1, c2, c3) {
+    var p = pixel_buffer_data(buf) + idx * 4;
+    store8(p, c0);
+    store8(p + 1, c1);
+    store8(p + 2, c2);
+    store8(p + 3, c3);
+    return 0;
+}
+
+# 1 if pixel `idx` holds exactly these four bytes.
+fn px4(buf, idx, c0, c1, c2, c3) {
+    var p = pixel_buffer_data(buf) + idx * 4;
+    if (load8(p) != c0) { return 0; }
+    if (load8(p + 1) != c1) { return 0; }
+    if (load8(p + 2) != c2) { return 0; }
+    if (load8(p + 3) != c3) { return 0; }
+    return 1;
+}
+
+# 1 if every byte of two buffers matches.
+fn buf_eq(a, b) {
+    if (pixel_buffer_len(a) != pixel_buffer_len(b)) { return 0; }
+    var pa = pixel_buffer_data(a);
+    var pb = pixel_buffer_data(b);
+    var n = pixel_buffer_len(a);
+    var i = 0;
+    while (i < n) {
+        if (load8(pa + i) != load8(pb + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn f32c(x) { return f32_from(x); }
+
+var err = fl_alloc(8);
+
+var C_RED   = mkcolor(255, 0, 0, 255);
+var C_BLUE  = mkcolor(0, 0, 255, 255);
+
+# ================================================================
+# div255 — the 1.0.0 rounding fix
+# ================================================================
+test_group("div255");
+
+assert_eq(_div255(0), 0, "div255(0) == 0");
+assert_eq(_div255(255 * 255), 255, "div255(255*255) == 255 (no overshoot)");
+assert_eq(_div255(255 * 128), 128, "div255(255*128) == 128");
+
+# THE assertion this module exists for. 1.0.0 replaced `x * a / 255` with
+# div255 because the truncating form is one level too dark: 404 / 255 == 1,
+# but 404 / 255 rounds to 2. A port that "simplifies" back to `/ 255` fails
+# here and nowhere else in the suite.
+assert_eq(_div255(4 * 101), 2, "div255(4*101) == 2, not the truncating 1");
+assert_eq(4 * 101 / 255, 1, "...and the naive form really does give 1");
+
+# Identity across the whole domain: scaling by a full 255 alpha must be exact
+# for every byte. A rounding term off by one shows up somewhere in 0..255.
+var d255_ok = 1;
+var i = 0;
+while (i < 256) {
+    if (_div255(i * 255) != i) { d255_ok = 0; }
+    i = i + 1;
+}
+assert_eq(d255_ok, 1, "div255(x*255) == x for all 256 byte values");
+
+# ================================================================
+# premultiply_alpha / unpremultiply_alpha
+# ================================================================
+test_group("premultiply");
+
+# Doctest: [255, 128, 64, 128] -> data[0] == 128.
+var pm = mkpx(PF_RGBA8, 255, 128, 64, 128);
+assert_eq(premultiply_alpha(pm), RG_ERR_NONE, "premultiply_alpha succeeds");
+assert_eq(pxb(pm, 0), 128, "premultiply 255*128/255 == 128 (doctest)");
+# The full pixel, so the other two channels are pinned as well — and this is
+# exactly the buffer the unpremultiply doctest starts from.
+assert_eq(px4(pm, 0, 128, 64, 32, 128), 1, "premultiply [255,128,64,128] -> [128,64,32,128]");
+
+# Doctest: [128, 64, 32, 128] -> data[0] > 250.
+var up = mkpx(PF_RGBA8, 128, 64, 32, 128);
+assert_eq(unpremultiply_alpha(up), RG_ERR_NONE, "unpremultiply_alpha succeeds");
+assert_eq(pxb(up, 0) > 250, 1, "unpremultiply 128/(128/255) ~ 255 (doctest)");
+assert_eq(px4(up, 0, 255, 127, 63, 128), 1, "unpremultiply [128,64,32,128] -> [255,127,63,128]");
+
+# premultiply_fully_opaque_unchanged.
+var opq = mkpx(PF_RGBA8, 200, 100, 50, 255);
+premultiply_alpha(opq);
+assert_eq(px4(opq, 0, 200, 100, 50, 255), 1, "alpha 255 leaves RGB unchanged");
+
+# ...and exhaustively, because "unchanged at full alpha" is the identity that
+# pins div255's rounding across the whole byte range rather than at one point.
+var sweep = mkbuf(16, 16, PF_RGBA8);
+var sp = pixel_buffer_data(sweep);
+i = 0;
+while (i < 256) {
+    store8(sp + i * 4, i);
+    store8(sp + i * 4 + 1, 255 - i);
+    store8(sp + i * 4 + 2, i);
+    store8(sp + i * 4 + 3, 255);
+    i = i + 1;
+}
+var sweep_copy = pixel_buffer_clone(sweep);
+premultiply_alpha(sweep);
+assert_eq(buf_eq(sweep, sweep_copy), 1, "premultiply at alpha 255 is the identity for all 256 values");
+
+# The div255 fix at THIS call site. 4 * 101 = 404, which rounds to 2 and
+# truncates to 1 — the one-level-too-dark bug 1.0.0 removed. Every other
+# premultiply assertion here passes with either form.
+var d255px = mkpx(PF_RGBA8, 4, 4, 4, 101);
+premultiply_alpha(d255px);
+assert_eq(px4(d255px, 0, 2, 2, 2, 101), 1, "premultiply uses div255: 4 x 101 -> 2, not 1");
+
+# premultiply_fully_transparent_zeroes.
+var tr = mkpx(PF_RGBA8, 200, 100, 50, 0);
+premultiply_alpha(tr);
+assert_eq(px4(tr, 0, 0, 0, 0, 0), 1, "alpha 0 zeroes RGB and keeps alpha 0");
+
+# premultiply_unpremultiply_roundtrip — within one level on each channel.
+var rt = mkpx(PF_RGBA8, 200, 100, 50, 128);
+premultiply_alpha(rt);
+assert_eq(pxb(rt, 0) != 200, 1, "premultiply actually changed the red channel");
+unpremultiply_alpha(rt);
+assert_eq(px4(rt, 0, 199, 99, 49, 128), 1, "round-trip lands within one level (200,100,50)");
+
+# A zero alpha carries no recoverable colour, so unpremultiply must SKIP it
+# rather than divide by zero.
+var z = mkpx(PF_RGBA8, 200, 100, 50, 0);
+unpremultiply_alpha(z);
+assert_eq(px4(z, 0, 200, 100, 50, 0), 1, "unpremultiply leaves alpha-0 pixels untouched");
+
+# A hand-built buffer can hold a channel above its alpha; the result saturates.
+var sat = mkpx(PF_RGBA8, 200, 0, 0, 100);
+unpremultiply_alpha(sat);
+assert_eq(pxb(sat, 0), 255, "unpremultiply saturates at 255 (200*255/100 == 510)");
+
+# Format guard.
+var argb1 = mkbuf(1, 1, PF_ARGB8);
+assert_eq(premultiply_alpha(argb1), RG_ERR_INVALID_FORMAT, "premultiply rejects Argb8");
+assert_eq(unpremultiply_alpha(argb1), RG_ERR_INVALID_FORMAT, "unpremultiply rejects Argb8");
+
+pixel_buffer_free(pm); pixel_buffer_free(up); pixel_buffer_free(opq); pixel_buffer_free(d255px);
+pixel_buffer_free(sweep); pixel_buffer_free(sweep_copy); pixel_buffer_free(tr);
+pixel_buffer_free(rt); pixel_buffer_free(z); pixel_buffer_free(sat);
+
+# ================================================================
+# apply_mask
+# ================================================================
+test_group("apply mask");
+
+# Doctest + apply_mask_half_alpha: alpha halved by a 128 mask.
+var mb = mkpx(PF_RGBA8, 255, 0, 0, 255);
+var mk = mkpx(PF_RGBA8, 128, 128, 128, 255);
+assert_eq(apply_mask(mb, mk), RG_ERR_NONE, "apply_mask succeeds");
+assert_eq(pxb(mb, 3), 128, "alpha halved by the mask (doctest)");
+assert_eq(px4(mb, 0, 255, 0, 0, 128), 1, "apply_mask touches ONLY alpha");
+
+# The RED channel is the mask value; G, B and A of the mask are ignored. A
+# port that averaged the channels or reached for the mask's alpha instead
+# passes the test above and fails this one.
+var mb2 = mkpx(PF_RGBA8, 255, 0, 0, 255);
+var mk2 = mkpx(PF_RGBA8, 128, 255, 255, 0);
+apply_mask(mb2, mk2);
+assert_eq(pxb(mb2, 3), 128, "only the mask's red channel is read");
+
+# div255 again, on the second call site 1.0.0 fixed.
+var mb3 = mkpx(PF_RGBA8, 0, 0, 0, 4);
+var mk3 = mkpx(PF_RGBA8, 101, 0, 0, 255);
+apply_mask(mb3, mk3);
+assert_eq(pxb(mb3, 3), 2, "apply_mask uses div255: alpha 4 x mask 101 -> 2, not 1");
+
+# A 255 mask is the identity.
+var mb4 = mkpx(PF_RGBA8, 10, 20, 30, 200);
+var mk4 = mkpx(PF_RGBA8, 255, 0, 0, 255);
+apply_mask(mb4, mk4);
+assert_eq(px4(mb4, 0, 10, 20, 30, 200), 1, "a full-white mask is the identity");
+
+# Size and format guards.
+var big = mkbuf(2, 2, PF_RGBA8);
+assert_eq(apply_mask(big, mk4), RG_ERR_DIMENSION_MISMATCH, "apply_mask rejects a size mismatch");
+assert_eq(apply_mask(argb1, mk4), RG_ERR_INVALID_FORMAT, "apply_mask rejects a non-Rgba8 target");
+assert_eq(apply_mask(mb4, argb1), RG_ERR_INVALID_FORMAT, "apply_mask rejects a non-Rgba8 mask");
+
+pixel_buffer_free(mb); pixel_buffer_free(mk); pixel_buffer_free(mb2); pixel_buffer_free(mk2);
+pixel_buffer_free(mb3); pixel_buffer_free(mk3); pixel_buffer_free(mb4); pixel_buffer_free(mk4);
+pixel_buffer_free(big);
+
+# ================================================================
+# dissolve
+# ================================================================
+test_group("dissolve");
+
+var da = mkpx(PF_RGBA8, 255, 0, 0, 255);
+var db = mkpx(PF_RGBA8, 0, 0, 255, 255);
+
+# Doctest: mid[0] and mid[2] both land near 128.
+var mid = dissolve(da, db, f32c(0.5), err);
+assert_eq(load64(err), RG_ERR_NONE, "dissolve succeeds");
+assert_eq(pxb(mid, 0) > 100 && pxb(mid, 0) < 155, 1, "dissolve midpoint red ~128 (doctest)");
+assert_eq(pxb(mid, 2) > 100 && pxb(mid, 2) < 155, 1, "dissolve midpoint blue ~128 (doctest)");
+# Exactly, so the +0.5 rounding term and the alpha path are both pinned.
+assert_eq(px4(mid, 0, 128, 0, 128, 255), 1, "dissolve 0.5 is exactly [128,0,128,255]");
+pixel_buffer_free(mid);
+
+# dissolve_endpoints: 0.0 is fully `a`, 1.0 is fully `b`, byte for byte.
+var at0 = dissolve(da, db, f32c(0), err);
+var at1 = dissolve(da, db, f32c(F64_ONE), err);
+assert_eq(buf_eq(at0, da), 1, "dissolve(0.0) reproduces a exactly");
+assert_eq(buf_eq(at1, db), 1, "dissolve(1.0) reproduces b exactly");
+
+# progress is clamped, not wrapped or extrapolated.
+var over = dissolve(da, db, f32c(2.0), err);
+var under = dissolve(da, db, f32c(f64_neg(F64_ONE)), err);
+assert_eq(buf_eq(over, at1), 1, "progress above 1.0 clamps to 1.0");
+assert_eq(buf_eq(under, at0), 1, "progress below 0.0 clamps to 0.0");
+pixel_buffer_free(over); pixel_buffer_free(under);
+pixel_buffer_free(at0); pixel_buffer_free(at1);
+
+# dissolve_midpoint.
+var ma = mkpx(PF_RGBA8, 200, 0, 0, 255);
+var mbb = mkpx(PF_RGBA8, 0, 200, 0, 255);
+var mm = dissolve(ma, mbb, f32c(0.5), err);
+assert_eq(px4(mm, 0, 100, 100, 0, 255), 1, "dissolve 0.5 of 200/0 is 100 on both channels");
+pixel_buffer_free(mm); pixel_buffer_free(ma); pixel_buffer_free(mbb);
+
+# The caller owns the result; failures return 0 with a code in err_out.
+var wrong = mkbuf(2, 2, PF_RGBA8);
+var bad = dissolve(da, wrong, f32c(0.5), err);
+assert_eq(bad, 0, "dissolve returns 0 on a size mismatch");
+assert_eq(load64(err), RG_ERR_DIMENSION_MISMATCH, "dissolve reports DIMENSION_MISMATCH");
+bad = dissolve(argb1, argb1, f32c(0.5), err);
+assert_eq(load64(err), RG_ERR_INVALID_FORMAT, "dissolve reports INVALID_FORMAT");
+pixel_buffer_free(wrong);
+
+# ================================================================
+# fade
+# ================================================================
+test_group("fade");
+
+# Doctest: 200 * 0.5 -> 100.
+var fb = mkpx(PF_RGBA8, 200, 200, 200, 255);
+assert_eq(fade(fb, f32c(0.5)), RG_ERR_NONE, "fade succeeds");
+assert_eq(pxb(fb, 0), 100, "fade 0.5 of 200 is 100 (doctest)");
+assert_eq(pxb(fb, 3), 255, "fade preserves alpha");
+
+# fade_zero_is_black — and alpha still survives, which is the whole point of
+# fading to black rather than to transparent.
+var fz = mkpx(PF_RGBA8, 200, 200, 200, 255);
+fade(fz, f32c(0));
+assert_eq(px4(fz, 0, 0, 0, 0, 255), 1, "fade 0.0 is black with alpha intact");
+
+# fade(1.0) is the identity for EVERY byte value. Without the +0.5 rounding
+# term this drifts down a level across most of the range.
+var fid = mkbuf(16, 16, PF_RGBA8);
+var fp = pixel_buffer_data(fid);
+i = 0;
+while (i < 256) {
+    store8(fp + i * 4, i);
+    store8(fp + i * 4 + 1, i);
+    store8(fp + i * 4 + 2, i);
+    store8(fp + i * 4 + 3, 255);
+    i = i + 1;
+}
+var fid_copy = pixel_buffer_clone(fid);
+fade(fid, f32c(F64_ONE));
+assert_eq(buf_eq(fid, fid_copy), 1, "fade(1.0) is the identity for all 256 byte values");
+
+# Clamping, and the format guard.
+var fc = mkpx(PF_RGBA8, 200, 200, 200, 255);
+fade(fc, f32c(2.0));
+assert_eq(pxb(fc, 0), 200, "progress above 1.0 clamps to full brightness");
+assert_eq(fade(argb1, f32c(0.5)), RG_ERR_INVALID_FORMAT, "fade rejects Argb8");
+
+pixel_buffer_free(fb); pixel_buffer_free(fz); pixel_buffer_free(fc);
+pixel_buffer_free(fid); pixel_buffer_free(fid_copy);
+
+# ================================================================
+# wipe
+# ================================================================
+test_group("wipe");
+
+# Doctest: 8x1, a white, b black, progress 0.5.
+var wa = mkbuf(8, 1, PF_RGBA8);
+var wb = mkbuf(8, 1, PF_RGBA8);
+bv_fill(pixel_buffer_bv(wa), 255);
+var wr = wipe(wa, wb, f32c(0.5), err);
+assert_eq(load64(err), RG_ERR_NONE, "wipe succeeds");
+assert_eq(pxb(wr, 0), 0, "wipe left half comes from b (doctest)");
+assert_eq(pxb(wr, 7 * 4), 255, "wipe right half comes from a (doctest)");
+
+# The boundary is exact: threshold = trunc(0.5 * 8) = 4, so column 3 is still
+# b and column 4 is already a. An off-by-one in the comparison moves it.
+assert_eq(pxb(wr, 3 * 4), 0, "column 3 is b — the last column below the threshold");
+assert_eq(pxb(wr, 4 * 4), 255, "column 4 is a — the first column at the threshold");
+pixel_buffer_free(wr);
+
+# wipe_half on 4x4, which is the shape the Rust unit test uses.
+var wa4 = mkbuf(4, 4, PF_RGBA8);
+var wb4 = mkbuf(4, 4, PF_RGBA8);
+bv_fill(pixel_buffer_bv(wa4), 255);
+var wr4 = wipe(wa4, wb4, f32c(0.5), err);
+assert_eq(pxb(wr4, 0), 0, "4x4 wipe: left half is b");
+assert_eq(pxb(wr4, 3 * 4), 255, "4x4 wipe: right half is a");
+# Every row wipes at the same column, not just the first.
+assert_eq(pxb(wr4, (3 * 4 + 0) * 4), 0, "last row also wipes left from b");
+assert_eq(pxb(wr4, (3 * 4 + 3) * 4), 255, "last row also keeps right from a");
+pixel_buffer_free(wr4);
+
+# Endpoints: 0.0 is fully a (nothing wiped yet), 1.0 is fully b.
+var w0 = wipe(wa4, wb4, f32c(0), err);
+var w1 = wipe(wa4, wb4, f32c(F64_ONE), err);
+assert_eq(buf_eq(w0, wa4), 1, "wipe(0.0) is entirely a");
+assert_eq(buf_eq(w1, wb4), 1, "wipe(1.0) is entirely b");
+pixel_buffer_free(w0); pixel_buffer_free(w1);
+
+var wbad = wipe(wa4, wa, f32c(0.5), err);
+assert_eq(wbad, 0, "wipe returns 0 on a size mismatch");
+assert_eq(load64(err), RG_ERR_DIMENSION_MISMATCH, "wipe reports DIMENSION_MISMATCH");
+
+pixel_buffer_free(wa); pixel_buffer_free(wb); pixel_buffer_free(wa4); pixel_buffer_free(wb4);
+
+# ================================================================
+# fill_solid
+# ================================================================
+test_group("fill solid");
+
+# Doctest: zeroed(4,4) filled red.
+var fs = mkbuf(4, 4, PF_RGBA8);
+assert_eq(fill_solid(fs, C_RED), RG_ERR_NONE, "fill_solid succeeds");
+assert_eq(pxb(fs, 0), 255, "fill_solid red channel (doctest)");
+assert_eq(px4(fs, 0, 255, 0, 0, 255), 1, "first pixel is the whole colour");
+assert_eq(px4(fs, 15, 255, 0, 0, 255), 1, "last pixel is filled too");
+
+# fill_solid_works — and this is the byte-order assertion for the packed
+# store32 path: a reversed pack puts 64 where 128 belongs.
+var fs2 = mkbuf(2, 2, PF_RGBA8);
+var c2 = mkcolor(255, 128, 64, 255);
+fill_solid(fs2, c2);
+assert_eq(pxb(fs2, 0), 255, "fill_solid_works: R");
+assert_eq(pxb(fs2, 5), 128, "fill_solid_works: second pixel G");
+assert_eq(px4(fs2, 1, 255, 128, 64, 255), 1, "packed word keeps R,G,B,A order");
+
+# The uniform-channel memset path must produce the same bytes as the loop.
+var fs3 = mkbuf(3, 2, PF_RGBA8);
+var c3 = mkcolor(7, 7, 7, 7);
+fill_solid(fs3, c3);
+assert_eq(px4(fs3, 0, 7, 7, 7, 7), 1, "memset path fills the first pixel");
+assert_eq(px4(fs3, 5, 7, 7, 7, 7), 1, "memset path reaches the last pixel");
+assert_eq(fill_solid(argb1, C_RED), RG_ERR_INVALID_FORMAT, "fill_solid rejects Argb8");
+
+pixel_buffer_free(fs); pixel_buffer_free(fs2); pixel_buffer_free(fs3);
+fl_free(c2); fl_free(c3);
+
+# ================================================================
+# fill_checkerboard
+# ================================================================
+test_group("checkerboard");
+
+# checkerboard_alternates: 4x4, block 2.
+var ck = mkbuf(4, 4, PF_RGBA8);
+var ca = mkcolor(100, 100, 100, 255);
+var cb = mkcolor(200, 200, 200, 255);
+assert_eq(fill_checkerboard(ck, 2, ca, cb), RG_ERR_NONE, "fill_checkerboard succeeds");
+assert_eq(pxb(ck, 0), 100, "top-left block is colour_a");
+assert_eq(pxb(ck, 2 * 4), 200, "(2,0) is colour_b");
+# The y term matters too — a port that only alternated on x passes both above.
+assert_eq(pxb(ck, (2 * 4) * 4), 200, "(0,2) is colour_b: the y term alternates as well");
+assert_eq(pxb(ck, (2 * 4 + 2) * 4), 100, "(2,2) is colour_a again: x and y cancel");
+
+# Doctest: 16x16, block 8, the two blocks differ.
+var ck2 = mkbuf(16, 16, PF_RGBA8);
+var cl = mkcolor(200, 200, 200, 255);
+var cw = mkcolor(255, 255, 255, 255);
+fill_checkerboard(ck2, 8, cl, cw);
+assert_eq(pxb(ck2, 0) != pxb(ck2, 8 * 4), 1, "blocks alternate at block_size (doctest)");
+assert_eq(pxb(ck2, 0), 200, "doctest block 0 is the light colour");
+assert_eq(pxb(ck2, 8 * 4), 255, "doctest block 1 is the white colour");
+
+# block_size 0 is clamped up to 1 rather than dividing by zero.
+var ck3 = mkbuf(2, 2, PF_RGBA8);
+fill_checkerboard(ck3, 0, ca, cb);
+assert_eq(pxb(ck3, 0), 100, "block_size 0 behaves as 1: (0,0) is a");
+assert_eq(pxb(ck3, 1 * 4), 200, "block_size 0 behaves as 1: (1,0) is b");
+assert_eq(fill_checkerboard(argb1, 2, ca, cb), RG_ERR_INVALID_FORMAT, "checkerboard rejects Argb8");
+
+pixel_buffer_free(ck); pixel_buffer_free(ck2); pixel_buffer_free(ck3);
+fl_free(ca); fl_free(cb); fl_free(cl); fl_free(cw);
+
+# ================================================================
+# gradient_linear
+# ================================================================
+test_group("gradient linear");
+
+# Doctest: 100x1, red to blue.
+var gl = mkbuf(100, 1, PF_RGBA8);
+assert_eq(gradient_linear(gl, C_RED, C_BLUE), RG_ERR_NONE, "gradient_linear succeeds");
+assert_eq(pxb(gl, 0) > 200, 1, "left end is red (doctest)");
+assert_eq(pxb(gl, 99 * 4 + 2) > 200, 1, "right end is blue (doctest)");
+assert_eq(px4(gl, 0, 255, 0, 0, 255), 1, "left end is exactly the start colour");
+assert_eq(px4(gl, 99, 0, 0, 255, 255), 1, "right end is exactly the end colour");
+
+# gradient_endpoints on 10x1.
+var gl10 = mkbuf(10, 1, PF_RGBA8);
+gradient_linear(gl10, C_RED, C_BLUE);
+assert_eq(pxb(gl10, 0) > 200, 1, "10x1 left is mostly red");
+assert_eq(pxb(gl10, 9 * 4 + 2) > 200, 1, "10x1 right is mostly blue");
+
+# The exact midpoint of a 3-wide ramp — t = 1/2 lands on 128 both ways, which
+# pins the `x / max(w-1, 1)` denominator rather than a `x / w` off-by-one.
+var gl3 = mkbuf(3, 1, PF_RGBA8);
+gradient_linear(gl3, C_RED, C_BLUE);
+assert_eq(px4(gl3, 1, 128, 0, 128, 255), 1, "3-wide midpoint is exactly [128,0,128,255]");
+
+# ⚠ A 1-pixel-wide buffer. Without Rust's `.max(1.0)` the denominator is 0,
+# t is 0/0 = NaN, and the NaN saturates to a BLACK column. The start colour is
+# the correct answer and the only one that distinguishes the two.
+var gl1 = mkbuf(1, 4, PF_RGBA8);
+gradient_linear(gl1, C_RED, C_BLUE);
+assert_eq(px4(gl1, 0, 255, 0, 0, 255), 1, "1-wide gradient is the start colour, not NaN-black");
+
+# Every row is identical — the colour depends only on x.
+var glr = mkbuf(4, 3, PF_RGBA8);
+gradient_linear(glr, C_RED, C_BLUE);
+assert_eq(px4(glr, 4, 255, 0, 0, 255), 1, "row 1 starts with the start colour");
+assert_eq(px4(glr, 11, 0, 0, 255, 255), 1, "row 2 ends with the end colour");
+assert_eq(gradient_linear(argb1, C_RED, C_BLUE), RG_ERR_INVALID_FORMAT, "gradient_linear rejects Argb8");
+
+pixel_buffer_free(gl); pixel_buffer_free(gl3); pixel_buffer_free(gl1); pixel_buffer_free(glr);
+
+# ================================================================
+# gradient_linear_angled
+# ================================================================
+test_group("gradient angled");
+
+# IDENTITY: 0 degrees is left-to-right, which is exactly gradient_linear. This
+# pins the whole projection machinery — the direction vector, the corner fold,
+# and the range normalisation — against an independently computed reference,
+# rather than round-tripping the angled path against itself.
+var ga0 = mkbuf(10, 1, PF_RGBA8);
+assert_eq(gradient_linear_angled(ga0, C_RED, C_BLUE, f32c(0)), RG_ERR_NONE, "angled succeeds");
+assert_eq(buf_eq(ga0, gl10), 1, "0 degrees is byte-identical to gradient_linear");
+
+# 180 degrees is the same ramp reversed.
+var ga180 = mkbuf(10, 1, PF_RGBA8);
+gradient_linear_angled(ga180, C_RED, C_BLUE, f32c(180.0));
+assert_eq(pxb(ga180, 2) > 200, 1, "180 degrees puts blue on the left");
+assert_eq(pxb(ga180, 9 * 4) > 200, 1, "180 degrees puts red on the right");
+
+# gradient_angled_vertical: 90 degrees runs top to bottom.
+var ga90 = mkbuf(10, 10, PF_RGBA8);
+gradient_linear_angled(ga90, C_RED, C_BLUE, f32c(90.0));
+assert_eq(pxb(ga90, 0) > 200, 1, "90 degrees: top row is mostly red");
+assert_eq(pxb(ga90, (9 * 10) * 4 + 2) > 200, 1, "90 degrees: bottom row is mostly blue");
+# ...and the top row is uniform, which a swapped dx/dy would break.
+assert_eq(pxb(ga90, 9 * 4), pxb(ga90, 0), "90 degrees: the top row is a constant colour");
+
+# 45 degrees (the doctest angle) runs corner to corner.
+var ga45 = mkbuf(10, 10, PF_RGBA8);
+assert_eq(gradient_linear_angled(ga45, C_RED, C_BLUE, f32c(45.0)), RG_ERR_NONE, "45 degrees succeeds");
+assert_eq(pxb(ga45, 0), 255, "45 degrees: top-left corner is the start colour");
+assert_eq(pxb(ga45, (9 * 10 + 9) * 4 + 2), 255, "45 degrees: bottom-right corner is the end colour");
+
+# A 1x1 buffer projects all four corners onto the same point, so the range is
+# degenerate and Rust returns WITHOUT WRITING.
+#
+# The buffer is pre-filled with a marker rather than left zeroed, and that is
+# the whole point: an implementation that skips the guard and carries the
+# degenerate t through anyway writes ZEROS here, which a zeroed buffer cannot
+# distinguish from "untouched". The marker can.
+var ga1 = mkbuf(1, 1, PF_RGBA8);
+setpx(ga1, 0, 9, 9, 9, 9);
+assert_eq(gradient_linear_angled(ga1, C_RED, C_BLUE, f32c(45.0)), RG_ERR_NONE, "degenerate range returns Ok");
+assert_eq(px4(ga1, 0, 9, 9, 9, 9), 1, "a degenerate range leaves the buffer untouched");
+
+pixel_buffer_free(ga0); pixel_buffer_free(gl10); pixel_buffer_free(ga180);
+pixel_buffer_free(ga90); pixel_buffer_free(ga45); pixel_buffer_free(ga1);
+
+# ================================================================
+# gradient_radial
+# ================================================================
+test_group("gradient radial");
+
+# gradient_radial_center / _edge: 21x21 with centre (10,10) and radius 10.
+var gr = mkbuf(21, 21, PF_RGBA8);
+var c10 = f32c(10.0);
+var rc = gradient_radial(gr, c10, c10, c10, C_RED, C_BLUE);
+assert_eq(rc, RG_ERR_NONE, "gradient_radial succeeds");
+assert_eq(pxb(gr, (10 * 21 + 10) * 4) > 250, 1, "centre is the start colour (R)");
+assert_eq(pxb(gr, (10 * 21 + 10) * 4 + 2) < 5, 1, "centre carries no end colour (B)");
+assert_eq(pxb(gr, (10 * 21 + 20) * 4 + 2) > 200, 1, "the radius boundary is the end colour");
+
+# Beyond the radius the gradient saturates rather than extrapolating: the
+# corner is 14.1 px out, t clamps to 1, and the colour is exactly `end`.
+assert_eq(px4(gr, 0, 0, 0, 255, 255), 1, "past the radius clamps to the end colour");
+
+# Symmetry about the centre — a transposed dx/dy or a sign error breaks it.
+assert_eq(pxb(gr, (10 * 21 + 15) * 4), pxb(gr, (10 * 21 + 5) * 4), "radial is symmetric in x");
+assert_eq(pxb(gr, (15 * 21 + 10) * 4), pxb(gr, (5 * 21 + 10) * 4), "radial is symmetric in y");
+
+# Doctest: 100x100, centre (50,50), radius 40 — centre is red.
+var gr2 = mkbuf(100, 100, PF_RGBA8);
+gradient_radial(gr2, f32c(50.0), f32c(50.0), f32c(40.0), C_RED, C_BLUE);
+assert_eq(pxb(gr2, (50 * 100 + 50) * 4) > 200, 1, "doctest centre is red");
+
+# Radius 0 is floored to 1e-6, so the centre keeps `start` and everything else
+# snaps to `end` — a hard edge, not a division by zero.
+var gr3 = mkbuf(3, 3, PF_RGBA8);
+gradient_radial(gr3, f32c(F64_ONE), f32c(F64_ONE), f32c(0), C_RED, C_BLUE);
+assert_eq(px4(gr3, 4, 255, 0, 0, 255), 1, "radius 0: the centre pixel keeps the start colour");
+assert_eq(px4(gr3, 0, 0, 0, 255, 255), 1, "radius 0: every other pixel is the end colour");
+# A NEGATIVE radius floors to 1e-6 like a zero one. This is the case an
+# unsigned bit compare gets wrong — IEEE-754 is sign-magnitude, so a raw
+# compare ranks every negative ABOVE every positive and would keep -5.0.
+var grn = mkbuf(3, 3, PF_RGBA8);
+gradient_radial(grn, f32c(F64_ONE), f32c(F64_ONE), f32c(f64_neg(5.0)), C_RED, C_BLUE);
+assert_eq(px4(grn, 4, 255, 0, 0, 255), 1, "negative radius floors to 1e-6, centre keeps start");
+assert_eq(px4(grn, 0, 0, 0, 255, 255), 1, "negative radius floors to 1e-6, edge is end");
+
+# A NaN radius takes Rust's NaN-ignoring `f32::max` path and behaves like 1e-6.
+# ganita_f32_max alone would return the NaN and blacken the whole buffer.
+var grnan = mkbuf(3, 3, PF_RGBA8);
+gradient_radial(grnan, f32c(F64_ONE), f32c(F64_ONE), f32_from(_RG_NAN), C_RED, C_BLUE);
+assert_eq(px4(grnan, 4, 255, 0, 0, 255), 1, "NaN radius behaves as 1e-6, not as a NaN wipe");
+
+assert_eq(gradient_radial(argb1, c10, c10, c10, C_RED, C_BLUE), RG_ERR_INVALID_FORMAT,
+          "gradient_radial rejects Argb8");
+
+pixel_buffer_free(gr); pixel_buffer_free(gr2); pixel_buffer_free(gr3);
+pixel_buffer_free(grn); pixel_buffer_free(grnan);
+
+# ================================================================
+# composite_at — Rgba8
+# ================================================================
+test_group("composite_at");
+
+# composite_at_basic: an opaque 2x2 red source at (3,3) on a 10x10 destination.
+var dst = mkbuf(10, 10, PF_RGBA8);
+var src = mkbuf(2, 2, PF_RGBA8);
+i = 0;
+while (i < 4) { setpx(src, i, 255, 0, 0, 255); i = i + 1; }
+assert_eq(composite_at(src, dst, 3, 3, f32c(F64_ONE)), RG_ERR_NONE, "composite_at succeeds");
+assert_eq(pxb(dst, (3 * 10 + 3) * 4) > 200, 1, "red pixel landed at (3,3)");
+# A fully opaque source at full opacity is a straight copy — no rounding drift.
+assert_eq(px4(dst, 3 * 10 + 3, 255, 0, 0, 255), 1, "opaque source at opacity 1.0 copies exactly");
+assert_eq(px4(dst, 5 * 10 + 5, 0, 0, 0, 0), 1, "pixels outside the source footprint are untouched");
+
+# composite_at_clipped: only the top-left source pixel is inside.
+var dclip = mkbuf(10, 10, PF_RGBA8);
+composite_at(src, dclip, 9, 9, f32c(F64_ONE));
+assert_eq(pxb(dclip, (9 * 10 + 9) * 4) > 200, 1, "one pixel survives clipping at the far corner");
+assert_eq(px4(dclip, 0, 0, 0, 0, 0), 1, "clipping did not wrap around to (0,0)");
+
+# composite_at_negative_pos: dst(0,0) receives src(1,1).
+var dneg = mkbuf(10, 10, PF_RGBA8);
+composite_at(src, dneg, (0 - 1), (0 - 1), f32c(F64_ONE));
+assert_eq(pxb(dneg, 0) > 200, 1, "a negative position still paints dst(0,0)");
+assert_eq(px4(dneg, 1 * 10 + 1, 0, 0, 0, 0), 1, "a negative position does not overrun into (1,1)");
+
+# Clipping is a bounds guard, not a cosmetic one. A source hanging off the
+# RIGHT edge must not spill into the first pixel of the NEXT row: without the
+# `x1 = min(x + sw, dw)` clamp, the write at column 10 of row 5 lands on
+# pixel (0, 6), which is a live pixel rather than an obvious crash.
+var dspill = mkbuf(10, 10, PF_RGBA8);
+composite_at(src, dspill, 9, 5, f32c(F64_ONE));
+assert_eq(px4(dspill, 9 * 10 + 9, 0, 0, 0, 0), 1, "right-edge clip: (9,9) is outside the 2x2 footprint");
+assert_eq(px4(dspill, 6 * 10 + 0, 0, 0, 0, 0), 1, "right-edge clip does not wrap into the next row");
+# ...and the same on the left, where an unclamped x0 writes BEFORE the row.
+composite_at(src, dspill, (0 - 1), 5, f32c(F64_ONE));
+assert_eq(px4(dspill, 4 * 10 + 9, 0, 0, 0, 0), 1, "left-edge clip does not wrap into the previous row");
+assert_eq(px4(dspill, 5 * 10 + 0, 255, 0, 0, 255), 1, "left-edge clip still paints column 0");
+
+# composite_at_zero_opacity.
+var dzero = mkbuf(10, 10, PF_RGBA8);
+composite_at(src, dzero, 0, 0, f32c(0));
+assert_eq(pxb(dzero, 0), 0, "opacity 0.0 leaves the destination unchanged");
+
+# Fully outside the destination is a no-op, not an out-of-bounds write.
+var dout = mkbuf(10, 10, PF_RGBA8);
+composite_at(src, dout, 100, 100, f32c(F64_ONE));
+assert_eq(px4(dout, 0, 0, 0, 0, 0), 1, "a fully clipped composite writes nothing");
+composite_at(src, dout, (0 - 5), (0 - 5), f32c(F64_ONE));
+assert_eq(px4(dout, 0, 0, 0, 0, 0), 1, "a fully clipped negative composite writes nothing");
+
+# THE source-over arithmetic, pinned exactly: half-alpha red over opaque blue.
+#   sa  = div255(128*255)          = 128
+#   inv = 127
+#   R   = div255(255*128 + 0*127)  = 128
+#   B   = div255(  0*128 + 255*127)= 127
+#   A   = div255(128*255 + 255*127)= 255
+var over_dst = mkpx(PF_RGBA8, 0, 0, 255, 255);
+var over_src = mkpx(PF_RGBA8, 255, 0, 0, 128);
+composite_at(over_src, over_dst, 0, 0, f32c(F64_ONE));
+assert_eq(px4(over_dst, 0, 128, 0, 127, 255), 1, "source-over half alpha is exactly [128,0,127,255]");
+
+# A fully transparent source contributes nothing at all.
+var tdst = mkpx(PF_RGBA8, 10, 20, 30, 40);
+var tsrc = mkpx(PF_RGBA8, 255, 255, 255, 0);
+composite_at(tsrc, tdst, 0, 0, f32c(F64_ONE));
+assert_eq(px4(tdst, 0, 10, 20, 30, 40), 1, "an alpha-0 source leaves the destination untouched");
+
+# Opacity TRUNCATES to 127, not 128 — Rust's `(opacity * 255.0) as u16`.
+var odst = mkbuf(1, 1, PF_RGBA8);
+var osrc = mkpx(PF_RGBA8, 255, 0, 0, 255);
+composite_at(osrc, odst, 0, 0, f32c(0.5));
+assert_eq(px4(odst, 0, 127, 0, 0, 127), 1, "opacity 0.5 truncates to 127, not 128");
+
+# div255 inside the source-over accumulator. op = 127, src alpha 200:
+# 200*127 = 25400 rounds to 100 and truncates to 99, and the whole pixel shifts
+# with it. This is the third and last div255 call site.
+var ddst = mkbuf(1, 1, PF_RGBA8);
+var dsrc = mkpx(PF_RGBA8, 255, 0, 0, 200);
+composite_at(dsrc, ddst, 0, 0, f32c(0.5));
+assert_eq(px4(ddst, 0, 100, 0, 0, 100), 1, "composite_at uses div255: 200 x 127 -> 100, not 99");
+
+assert_eq(composite_at(argb1, dst, 0, 0, f32c(F64_ONE)), RG_ERR_INVALID_FORMAT,
+          "composite_at rejects an Argb8 source");
+assert_eq(composite_at(src, argb1, 0, 0, f32c(F64_ONE)), RG_ERR_INVALID_FORMAT,
+          "composite_at rejects an Argb8 destination");
+
+pixel_buffer_free(dclip); pixel_buffer_free(dneg); pixel_buffer_free(dzero); pixel_buffer_free(dout);
+pixel_buffer_free(dspill);
+pixel_buffer_free(over_dst); pixel_buffer_free(over_src); pixel_buffer_free(tdst); pixel_buffer_free(tsrc);
+pixel_buffer_free(odst); pixel_buffer_free(osrc); pixel_buffer_free(ddst); pixel_buffer_free(dsrc);
+
+# ================================================================
+# composite_at_argb — the byte order is the whole point
+# ================================================================
+test_group("composite_at_argb");
+
+# Doctest: src [A=200, R=255, G=0, B=0] onto a zeroed Argb8 destination at (1,1).
+#   sa = div255(200*255) = 200, inv = 55
+#   A  = div255(200*255 + 0*55) = 200
+#   R  = div255(255*200 + 0*55) = 200
+var adst = mkbuf(10, 10, PF_ARGB8);
+var asrc = mkbuf(2, 2, PF_ARGB8);
+i = 0;
+while (i < 4) { setpx(asrc, i, 200, 255, 0, 0); i = i + 1; }
+assert_eq(composite_at_argb(asrc, adst, 1, 1, f32c(F64_ONE)), RG_ERR_NONE, "composite_at_argb succeeds");
+assert_eq(px4(adst, 1 * 10 + 1, 200, 200, 0, 0), 1, "argb doctest pixel is [200,200,0,0]");
+assert_eq(px4(adst, 0, 0, 0, 0, 0), 1, "argb composite respects the offset");
+
+# ⚠ THE discriminator. The SAME four bytes [128, 255, 0, 0] mean very
+# different things in the two layouts, and collapsing the two functions into
+# one offset-parameterised version is exactly the mistake this catches:
+#   * as ARGB the source alpha is 128, so the pixel blends to [128,128,0,0];
+#   * as RGBA the source alpha is byte 3 = 0, so the source is invisible and
+#     the destination is left completely alone.
+var xa_dst = mkbuf(1, 1, PF_ARGB8);
+var xa_src = mkpx(PF_ARGB8, 128, 255, 0, 0);
+composite_at_argb(xa_src, xa_dst, 0, 0, f32c(F64_ONE));
+assert_eq(px4(xa_dst, 0, 128, 128, 0, 0), 1, "ARGB reads alpha from byte 0");
+
+var xr_dst = mkbuf(1, 1, PF_RGBA8);
+var xr_src = mkpx(PF_RGBA8, 128, 255, 0, 0);
+composite_at(xr_src, xr_dst, 0, 0, f32c(F64_ONE));
+assert_eq(px4(xr_dst, 0, 0, 0, 0, 0), 1, "RGBA reads alpha from byte 3 — same bytes, no paint");
+
+# The opaque fast path in the ARGB layout.
+var fa_dst = mkpx(PF_ARGB8, 255, 1, 2, 3);
+var fa_src = mkpx(PF_ARGB8, 255, 10, 20, 30);
+composite_at_argb(fa_src, fa_dst, 0, 0, f32c(F64_ONE));
+assert_eq(px4(fa_dst, 0, 255, 10, 20, 30), 1, "an opaque ARGB source copies exactly");
+
+# Zero opacity and clipping behave as in the Rgba8 variant.
+var za_dst = mkbuf(2, 2, PF_ARGB8);
+composite_at_argb(asrc, za_dst, 0, 0, f32c(0));
+assert_eq(px4(za_dst, 0, 0, 0, 0, 0), 1, "argb opacity 0.0 is a no-op");
+composite_at_argb(asrc, za_dst, 50, 50, f32c(F64_ONE));
+assert_eq(px4(za_dst, 0, 0, 0, 0, 0), 1, "argb fully clipped writes nothing");
+
+assert_eq(composite_at_argb(src, adst, 0, 0, f32c(F64_ONE)), RG_ERR_INVALID_FORMAT,
+          "composite_at_argb rejects an Rgba8 source");
+assert_eq(composite_at_argb(asrc, dst, 0, 0, f32c(F64_ONE)), RG_ERR_INVALID_FORMAT,
+          "composite_at_argb rejects an Rgba8 destination");
+
+pixel_buffer_free(adst); pixel_buffer_free(asrc);
+pixel_buffer_free(xa_dst); pixel_buffer_free(xa_src);
+pixel_buffer_free(xr_dst); pixel_buffer_free(xr_src);
+pixel_buffer_free(fa_dst); pixel_buffer_free(fa_src); pixel_buffer_free(za_dst);
+pixel_buffer_free(dst); pixel_buffer_free(src); pixel_buffer_free(argb1);
+pixel_buffer_free(da); pixel_buffer_free(db);
+# C_RED, C_BLUE and err are NOT freed here — the NaN parity group below still
+# uses all three. Freeing them here was a use-after-free that the suite did not
+# catch, because fl_free leaves the payload bytes intact and the reads happened
+# to still see their old values. Teardown moved to the end of the file.
+
+# ================================================================
+# NaN parity
+# ================================================================
+# Rust's float-to-int cast SATURATES — `NaN as u8` and `NaN as u16` are both 0,
+# not the range end — and `f32::clamp` passes a NaN self straight through
+# because `NaN < min` and `NaN > max` are each false. ganita_f32_clamp would
+# instead rank NaN above every finite value and clamp it to the HIGH bound, so
+# every one of these would come out saturated rather than zero. Pinning them
+# keeps a later "just use ganita_f32_clamp" simplification from landing.
+test_group("nan parity");
+
+var qnan = f32_from(_RG_NAN);
+
+var na = mkpx(PF_RGBA8, 200, 100, 50, 255);
+var nb = mkpx(PF_RGBA8, 10, 20, 30, 255);
+var nd = dissolve(na, nb, qnan, err);
+assert_eq(px4(nd, 0, 0, 0, 0, 0), 1, "dissolve with NaN progress yields zeros, not saturation");
+pixel_buffer_free(nd);
+
+var nf = mkpx(PF_RGBA8, 200, 100, 50, 255);
+fade(nf, qnan);
+assert_eq(px4(nf, 0, 0, 0, 0, 255), 1, "fade with NaN progress zeroes RGB and keeps alpha");
+
+# `NaN as u32` is 0, so the threshold is 0 and nothing is wiped.
+var nw = wipe(na, nb, qnan, err);
+assert_eq(buf_eq(nw, na), 1, "wipe with NaN progress leaves the source untouched");
+pixel_buffer_free(nw);
+
+# `NaN as u16` is 0, so a NaN opacity is a no-op rather than full strength.
+var nc_dst = mkpx(PF_RGBA8, 1, 2, 3, 4);
+composite_at(na, nc_dst, 0, 0, qnan);
+assert_eq(px4(nc_dst, 0, 1, 2, 3, 4), 1, "composite_at with NaN opacity paints nothing");
+
+# A NaN angle drives every corner projection to NaN. Rust's NaN-ignoring
+# min/max leave the f32::MAX / f32::MIN sentinels in place, so the range comes
+# out -inf, the degenerate-range guard fires, and the buffer is NOT written.
+# `NaN < 1e-6` is false, so that guard alone does not fire here — the explicit
+# NaN check is what reproduces Rust. Marker-filled for the same reason as the
+# degenerate case above: writing zeros would otherwise look like doing nothing.
+var nang = mkbuf(4, 4, PF_RGBA8);
+bv_fill(pixel_buffer_bv(nang), 9);
+gradient_linear_angled(nang, C_RED, C_BLUE, qnan);
+assert_eq(px4(nang, 0, 9, 9, 9, 9), 1, "a NaN angle leaves the buffer untouched");
+assert_eq(px4(nang, 15, 9, 9, 9, 9), 1, "a NaN angle leaves the last pixel untouched too");
+
+pixel_buffer_free(na); pixel_buffer_free(nb); pixel_buffer_free(nf);
+pixel_buffer_free(nc_dst); pixel_buffer_free(nang);
+fl_free(C_RED); fl_free(C_BLUE); fl_free(err);
+
+var exit_code = assert_summary();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

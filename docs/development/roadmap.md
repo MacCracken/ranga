@@ -70,9 +70,21 @@ multiplies, and decimal float literals past ~9 significant digits parse wrong
 (filed upstream as
 `cyrius/docs/development/issues/2026-08-17-decimal-float-literal-silent-precision-loss.md`).
 
-### M2 — Pixel ops
+### M2 — Pixel ops — in progress (556 assertions green across the port)
 
-`composite`, `histogram`, `transform`, `filter`.
+- [x] `src/composite.cyr` — all 13 fns: premultiply/unpremultiply, apply_mask,
+      dissolve/fade/wipe, fill_solid/fill_checkerboard, three gradients,
+      composite_at + composite_at_argb. 159 assertions, 13 doctests.
+- [x] `src/histogram.cyr` — all 5 fns plus the `Hist` record standing in for
+      `Vec<f64>`. 150 assertions, 5 doctests.
+- [ ] `src/transform.cyr`
+- [ ] `src/filter.cyr`
+
+First fan-out (two port agents + two adversarial verifiers). The verifiers
+earned their keep: a use-after-free in the composite tests, and four histogram
+assertions that passed against deliberately broken code. Both modules were
+*correct* — every gap was test coverage, and the new assertions passed on the
+first run against the existing implementations.
 
 ### M3 — SIMD modules
 

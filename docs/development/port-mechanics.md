@@ -122,11 +122,28 @@ Each of these cost a compile cycle or a wrong guess this round.
 | byte from a buffer | `load8` | zero-extends, so `0xFF` reads back 255 |
 | `[lib] modules = []` | invalid | `distlib` fails; needs ≥1 real module |
 | line length | ≤ 120 chars | lint warns; hoist long assertion args into locals |
+| print an integer | `fmt_int(n)` | there is no `print_int` |
+| `f32_from(0)` | valid | integer 0 is a usable +0.0f source |
+| clamp with a possible NaN | guard explicitly | `ganita_f32_clamp` does **not** match Rust's `f32::clamp` on NaN — Rust passes NaN through (and a following `as u8` saturates it to 0); ganita's monotone key ranks NaN above every finite value and returns the HIGH bound. Any kernel that can produce a NaN before a clamp needs its own guard — `filter.rs` and the blend kernels are the candidates |
+
+⚠ **`cyrius lint` and `cyrius test` report different diagnostics.** Lint reported
+0 warnings on a `.tcyr` whose compile — driven by `cyrius test` — emitted
+`#must_use result of 'chi_squared' is discarded`. A module is not clean until the
+`cyrius test` output is warning-free too, not just the two lint lines. Always run
+all three commands.
 
 ### Two silent-corruption traps, both hit while porting `color.cyr`
 
 Neither errors, neither warns, and both produce plausible-looking output. They
 are the reason the assertions in §4 matter.
+
+**0. There are TWO correct spellings of f32 arithmetic, and one wrong one.**
+The widen-compute-narrow form is *fine* — `f32_from(f64_mul(f32_to(a), f32_to(b)))`
+is bit-identical to native f32 for a single operation, because f64 carries more
+than 2·24+2 mantissa bits so double-rounding cannot bite. `ganita_f32_sqrt`
+already relies on this. Only an end-to-end f64 chain that never narrows its
+intermediates diverges. Do not "fix" a correct widen-narrow helper into the
+trap below.
 
 **1. f32 arithmetic on an untyped operand becomes an integer multiply.**
 The operators dispatch through `EMIT_F32_BINOP` only when the operand carries
@@ -185,3 +202,38 @@ Not all assertions are equal. These earned their place:
 - **Semantic invariants, not just values.** Alpha must not go through the gamma
   transfer — asserting `alpha 128 → 0.502` states the intent, so a later
   "simplification" that routes alpha through `srgb_to_linear` fails here.
+
+### Choose inputs that can actually *discriminate*
+
+Most assertions that look meaningful catch nothing. Four patterns, all found by
+mutation-testing M2 rather than by reasoning:
+
+- **Round numbers cannot detect an f32→f64 widening.** `100 * (85/100)`
+  truncates to 85 at both widths. You have to hunt for ratios that disagree —
+  `39 * (85/39)` is 85 in f32 and 84 in f64. Likewise the `+0.5` round-half-up
+  term is invisible on a tidy 0/85/170/255 ramp, where every LUT entry is
+  already an exact integer; it took a randomised search over 200k images to find
+  a case (4/11/13/15/195) that shifts 64→62 without it.
+- **Symmetric images are blind to coefficient swaps.** A 2×1 image with one pure
+  green and one pure blue pixel passes *unchanged* against a BT.601 kernel with
+  the green and blue coefficients swapped — the mass just moves between the two
+  pixels and bins 149 and 28 still hold 0.5 each. Only one primary per buffer
+  pins which coefficient is which. Same family as the wrong-but-consistent
+  matrix above.
+- **Alpha 255 is not a test of alpha preservation.** It survives essentially any
+  corruption. Use a mid value (40, 200).
+- **Boundaries need both sides.** `bins/256` vs `bins/255` are indistinguishable
+  at `bins == 256`; grey 219 with 7 bins separates them (bin 5 vs bin 6). Truncation
+  vs rounding needs an input landing on `x.5`, not on a bin edge.
+
+**Budget a numeric-oracle pass per module.** Deriving discriminating inputs by
+hand gets the rounding wrong; a short Python/numpy search finds them reliably.
+
+### Mutation-test each module the moment its suite goes green
+
+Twenty sed-level defects take about two minutes and are a far better use of time
+than writing more assertions blind. On `histogram` this exposed three assertions
+that looked meaningful and caught nothing, plus one piece of genuinely
+unreachable defensive code — which is better documented as unreachable than
+papered over with a fake assertion. Fold it into the per-module pipeline (§1C)
+as a stage after test-green.

@@ -1,0 +1,517 @@
+# histogram.cyr -- luminance / per-channel histograms, equalization, auto-levels
+# Ported from rust-old/src/histogram.rs (364 lines).
+#
+# ── Vec<f64> ────────
+# Rust hands back `Vec<f64>` and `[Vec<f64>; 3]`. Cyrius's stdlib `vec` stores
+# i64 SLOTS with no f64 flavour — the slot width happens to match, but nothing
+# in that API says "these are floats", so a later `vec_sum` over one would
+# silently integer-add the bit patterns. So this module carries its own record,
+# in the raw-byte-offset style bytevec/pixel/color settled on:
+#
+#   Hist (8 + n*8 bytes, ONE allocation)
+#     +0        len    i64        number of f64 entries
+#     +8 + i*8  entry  f64 bits   load64/store64
+#
+# Header and payload share an allocation because a histogram is never resized —
+# there is no reason to pay for the second indirection bytevec needs.
+#
+# ⚠ The counting pass stores INTEGER counts in those slots and the normalising
+# pass overwrites each one with its f64 bit pattern. The slots are 8 raw bytes
+# either way and nothing reads them as f64 in between, which is what lets a
+# single allocation serve as both Rust's `vec![0u64; bins]` and the returned
+# `Vec<f64>`. Do not "simplify" by reading a slot with f64_* before normalising.
+#
+# ── OWNERSHIP ────────
+# Rust's Drop is invisible in the source, so it is stated here instead.
+# `luminance_histogram` and `rgb_histograms` hand back allocations the CALLER
+# owns and must release with `hist_free`. `rgb_histograms` produces THREE
+# independent handles and all three must be freed; on failure it releases
+# whatever it had already built and leaves every out-slot at 0, so a caller that
+# frees all three unconditionally is always correct (`hist_free(0)` is a no-op).
+# Nothing in this module frees, clones, or takes ownership of a PixelBuffer.
+#
+# ── ERROR MODEL ────────
+# Rust's `Result<T, E>` splits two ways here, consistently:
+#   * a function with ONE value to hand back returns that value and reports
+#     through an `err_out` pointer — `luminance_histogram`, `chi_squared`.
+#     A negative sentinel is not available for either: a Hist handle is a raw
+#     pointer and a chi-squared result is an f64 bit pattern, and both can
+#     legitimately have the sign bit set.
+#   * a function with NO value, or whose values leave through an out array,
+#     returns the RG_ERR_* code directly — `rgb_histograms`, `equalize`,
+#     `auto_levels`. These are Rust's `Result<()>` plus the [Vec; 3] case.
+#
+# ── FLOAT WIDTH ────────
+# The original is deliberately mixed and this port keeps the split exactly.
+# Histogram accumulation, the CDF and the equalization LUT are f64 in Rust; the
+# per-pixel *apply* passes in `equalize` and `auto_levels` are f32.
+#
+# That is observable, not pedantry. Both of these were measured both ways:
+#   auto_levels, min=100 max=150: gain = 255.0/50.0 = 5.099999904632568, and
+#     50 * gain rounds UP to exactly 255.0 in f32 but to 254.99999999999997 in
+#     f64 — 255 versus 254 out of the same pixel, and the ported doctest
+#     asserts 255.
+#   equalize, old_lum=39 -> lut 85: 39 * f32(85/39) is 85.0, but 39 * (85/39)
+#     in f64 is 84.99999... -> 84.
+# Note that plenty of ratios agree across the two widths — 100 * (85/100) is
+# 85 either way — so a test built from round numbers will NOT catch a widening.
+# tests/histogram.tcyr carries both a round case and a discriminating one.
+
+# ── Hist ────────
+var _HIST_HDR = 8;
+
+# Guard against `bins * 8` wrapping before fl_alloc ever sees it. Rust's Vec
+# would simply fail to allocate; an i64 multiply wraps silently first.
+var _HIST_MAX_BINS = 0x0FFFFFFFFFFFFFF;
+
+# Allocate a zero-filled histogram of `n` entries. Zero bits are +0.0, so this
+# is simultaneously `vec![0u64; n]` and `vec![0.0; n]` — which is exactly the
+# pair of things the Rust needs.
+#must_use
+fn hist_new(n) {
+    if (n < 0) { return 0; }
+    if (n > _HIST_MAX_BINS) { return 0; }
+    var h = fl_calloc(_HIST_HDR + n * 8);
+    if (h == 0) { return 0; }
+    store64(h, n);
+    return h;
+}
+
+#must_use
+fn hist_len(h) { return load64(h); }
+
+# f64 bit pattern at `idx`, or +0.0 (all-zero bits) out of range. Mirrors
+# bv_get's out-of-range 0 rather than trapping.
+#must_use
+fn hist_get(h, idx) {
+    if (idx < 0) { return 0; }
+    if (idx >= load64(h)) { return 0; }
+    return load64(h + _HIST_HDR + idx * 8);
+}
+
+# Write an f64 bit pattern at `idx`. Returns 1 on success, 0 if out of range.
+fn hist_set(h, idx, val) {
+    if (idx < 0) { return 0; }
+    if (idx >= load64(h)) { return 0; }
+    store64(h + _HIST_HDR + idx * 8, val);
+    return 1;
+}
+
+# Sum of the entries as an f64 bit pattern. Not in the Rust surface as a
+# function, but `hist.iter().sum()` appears in two doctests, and having it here
+# keeps those assertions one line instead of an open-coded loop.
+#must_use
+fn hist_sum(h) {
+    var n = load64(h);
+    var acc = 0;
+    var i = 0;
+    while (i < n) {
+        acc = f64_add(acc, load64(h + _HIST_HDR + i * 8));
+        i = i + 1;
+    }
+    return acc;
+}
+
+# Safe on 0, so a caller can free all three rgb_histograms slots unconditionally.
+fn hist_free(h) {
+    if (h == 0) { return RG_ERR_NONE; }
+    fl_free(h);
+    return RG_ERR_NONE;
+}
+
+# ── Single-precision helpers ────────
+# ⚠ The `: f32` annotations are load-bearing, not documentation. Cyrius routes
+# `+ - * /` through EMIT_F32_BINOP only when the operand carries F32_TYID, which
+# comes from a TYPED BINDING or a TYPED PARAMETER. A call result is untyped, so
+# `f32_from(255.0) / range` written inline emits an INTEGER divide of the two
+# bit patterns — it compiles clean, lints clean, and returns garbage (measured:
+# `f32_from(3.0) * r` with r = 2.0 yields 0, not 6). Same reason color.cyr routes
+# its Oklab matrices through `_rg_f32_dot3`. See port-mechanics.md §3.
+#must_use
+fn _hist_f32_mul(a: f32, b: f32) { return a * b; }
+#must_use
+fn _hist_f32_div(a: f32, b: f32) { return a / b; }
+#must_use
+fn _hist_f32_sub(a: f32, b: f32) { return a - b; }
+
+var _HIST_F32_ZERO = f32_from(0);
+var _HIST_F32_ONE  = f32_from(1.0);
+var _HIST_F32_255  = f32_from(255.0);
+
+# Rust's `n as f32` for a byte. Both hops are exact: every u8 is exact in f64,
+# and every integer below 2^24 is exact in f32.
+#must_use
+fn _hist_u8_to_f32(n) {
+    return f32_from(f64_from(n));
+}
+
+# Rust's `x.clamp(0.0, 255.0) as u8`. `as` TRUNCATES toward zero, so any
+# round-half-up term has to be added by the caller before this — matching
+# color.cyr's `_f64_to_u8_round`, which is the same shape at f64 width.
+#must_use
+fn _hist_f32_to_u8(x) {
+    return f64_to(f32_to(ganita_f32_clamp(x, _HIST_F32_ZERO, _HIST_F32_255)));
+}
+
+# BT.601 luminance in integer form, exactly as the Rust writes it.
+#
+# 77 + 150 + 29 == 256, so the `>> 8` is an exact divide by the coefficient sum
+# and the result is always in 0..=255 for byte inputs — the peak, 255 * 256, is
+# 65280, which is why Rust can hold the accumulator in a u16 without overflow.
+# The `.min(255)` the call sites apply is therefore belt-and-braces; it is kept
+# because the original has it and because it is the only thing standing between
+# a future coefficient change and an out-of-bounds LUT index.
+#must_use
+fn _hist_lum601(r, g, b) {
+    return (77 * r + 150 * g + 29 * b) >> 8;
+}
+
+# ── luminance_histogram ────────
+# Rust: `luminance_histogram(&PixelBuffer, usize) -> Result<Vec<f64>>`.
+# Returns a Hist handle the caller owns, or 0 with the code in `err_out`.
+#
+# `bins` normalized values summing to approximately 1.0, using BT.601.
+#must_use
+fn luminance_histogram(buf, bins, err_out) {
+    if (pixel_buffer_format(buf) != PF_RGBA8) {
+        store64(err_out, RG_ERR_INVALID_FORMAT);
+        return 0;
+    }
+    # Rust: `Other("bins must be > 0")`. A negative count is not representable
+    # in Rust's usize at all, so it gets the parameter code rather than Other.
+    if (bins == 0) { store64(err_out, RG_ERR_OTHER); return 0; }
+    if (bins < 0) { store64(err_out, RG_ERR_INVALID_PARAMETER); return 0; }
+
+    var h = hist_new(bins);
+    if (h == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
+
+    # `buf.data.chunks_exact(4)` — floor(len / 4) whole pixels. For a validated
+    # Rgba8 buffer that is width * height, but the length is what Rust iterates.
+    var npix = pixel_buffer_len(buf) / 4;
+    var scale = f64_div(f64_from(bins), 256.0);
+    var p = pixel_buffer_data(buf);
+    var i = 0;
+    while (i < npix) {
+        var q = p + i * 4;
+        var lum = _hist_lum601(load8(q), load8(q + 1), load8(q + 2));
+        # `(lum as f64 * scale) as usize` — `as` truncates, and the product is
+        # never negative, so f64_to matches without a floor.
+        var bin = f64_to(f64_mul(f64_from(lum), scale));
+        if (bin > bins - 1) { bin = bins - 1; }
+        var slot = h + _HIST_HDR + bin * 8;
+        store64(slot, load64(slot) + 1);
+        i = i + 1;
+    }
+
+    # Rust sums the HISTOGRAM here rather than using pixel_count. Identical for
+    # a validated buffer, but kept faithful — the two diverge the moment a
+    # future format lets len / 4 differ from width * height.
+    var total_i = 0;
+    var j = 0;
+    while (j < bins) {
+        total_i = total_i + load64(h + _HIST_HDR + j * 8);
+        j = j + 1;
+    }
+    # Empty buffer: Rust returns `vec![0.0; bins]`, and the counts are already
+    # all-zero bits, which IS +0.0. Nothing to rewrite.
+    if (total_i == 0) { store64(err_out, RG_ERR_NONE); return h; }
+
+    var total = f64_from(total_i);
+    var k = 0;
+    while (k < bins) {
+        var slot2 = h + _HIST_HDR + k * 8;
+        store64(slot2, f64_div(f64_from(load64(slot2)), total));
+        k = k + 1;
+    }
+    store64(err_out, RG_ERR_NONE);
+    return h;
+}
+
+# ── rgb_histograms ────────
+# Rust: `rgb_histograms(&PixelBuffer) -> Result<[Vec<f64>; 3]>`.
+# Writes three 256-entry Hist handles to `out` (24 bytes: +0 r, +8 g, +16 b) and
+# returns RG_ERR_NONE. On any failure all three slots are left at 0 and the code
+# is returned, so the caller's cleanup path never has to distinguish the cases.
+#must_use
+fn rgb_histograms(buf, out) {
+    store64(out, 0);
+    store64(out + 8, 0);
+    store64(out + 16, 0);
+    if (pixel_buffer_format(buf) != PF_RGBA8) { return RG_ERR_INVALID_FORMAT; }
+
+    var rh = hist_new(256);
+    var gh = hist_new(256);
+    var bh = hist_new(256);
+    if (rh == 0) { hist_free(gh); hist_free(bh); return RG_ERR_ALLOCATION; }
+    if (gh == 0) { hist_free(rh); hist_free(bh); return RG_ERR_ALLOCATION; }
+    if (bh == 0) { hist_free(rh); hist_free(gh); return RG_ERR_ALLOCATION; }
+
+    var npix = pixel_buffer_len(buf) / 4;
+    var p = pixel_buffer_data(buf);
+    var i = 0;
+    while (i < npix) {
+        var q = p + i * 4;
+        var rs = rh + _HIST_HDR + load8(q) * 8;
+        var gs = gh + _HIST_HDR + load8(q + 1) * 8;
+        var bs = bh + _HIST_HDR + load8(q + 2) * 8;
+        store64(rs, load64(rs) + 1);
+        store64(gs, load64(gs) + 1);
+        store64(bs, load64(bs) + 1);
+        i = i + 1;
+    }
+
+    # Rust divides by `buf.pixel_count()` here, NOT by the histogram sum the way
+    # luminance_histogram does. Same number for a validated buffer; kept as
+    # written so the two functions stay distinguishable.
+    var count = pixel_buffer_pixel_count(buf);
+    if (count == 0) {
+        store64(out, rh);
+        store64(out + 8, gh);
+        store64(out + 16, bh);
+        return RG_ERR_NONE;
+    }
+
+    var total = f64_from(count);
+    var k = 0;
+    while (k < 256) {
+        var off = _HIST_HDR + k * 8;
+        store64(rh + off, f64_div(f64_from(load64(rh + off)), total));
+        store64(gh + off, f64_div(f64_from(load64(gh + off)), total));
+        store64(bh + off, f64_div(f64_from(load64(bh + off)), total));
+        k = k + 1;
+    }
+    store64(out, rh);
+    store64(out + 8, gh);
+    store64(out + 16, bh);
+    return RG_ERR_NONE;
+}
+
+# ── chi_squared ────────
+# Rust: `chi_squared(&[f64], &[f64]) -> Result<f64>`.
+# Returns the distance as an f64 bit pattern, with the code in `err_out`.
+#
+# ⚠ The length check is 1.0.0 HARDENING and must not be relaxed back. Before
+# it, this was `a.iter().zip(b.iter())`, which stops at the shorter input — so
+# comparing a 256-bin histogram against a 64-bin one silently scored only the
+# first 64 bins and reported a confidently wrong "distance". Mismatched lengths
+# are now RG_ERR_DIMENSION_MISMATCH, and 0.0 comes back with it.
+#
+# 1e-10 serves both of the original's guards: the "both bins are empty" skip
+# here and the "the CDF is degenerate" bail in equalize. One significant digit,
+# so the decimal literal is well inside the lexer's exact range.
+var _HIST_EPS10 = 0.0000000001;   # 1e-10
+
+#must_use
+fn chi_squared(a, b, err_out) {
+    var n = hist_len(a);
+    if (n != hist_len(b)) {
+        store64(err_out, RG_ERR_DIMENSION_MISMATCH);
+        return 0;
+    }
+    var acc = 0;
+    var i = 0;
+    while (i < n) {
+        var ai = load64(a + _HIST_HDR + i * 8);
+        var bi = load64(b + _HIST_HDR + i * 8);
+        var sum = f64_add(ai, bi);
+        # Bins where BOTH inputs are (near) zero contribute nothing and would
+        # divide by zero; Rust guards with `sum > 1e-10` and skips them.
+        if (f64_gt(sum, _HIST_EPS10) == 1) {
+            var d = f64_sub(ai, bi);
+            acc = f64_add(acc, f64_div(f64_mul(d, d), sum));
+        }
+        i = i + 1;
+    }
+    store64(err_out, RG_ERR_NONE);
+    # The 0.5 is applied ONCE to the total, not per term — this is the
+    # symmetric chi-squared, and folding it into the loop would be the same
+    # number only by luck of float associativity.
+    return f64_mul(acc, 0.5);
+}
+
+# ── equalize ────────
+# Rust: `equalize(&mut PixelBuffer) -> Result<()>`. Mutates in place.
+#
+# Rgba8-only, like the original. Standard CDF equalization on BT.601 luminance,
+# with RGB scaled proportionally so hue and saturation survive.
+fn equalize(buf) {
+    if (pixel_buffer_format(buf) != PF_RGBA8) { return RG_ERR_INVALID_FORMAT; }
+
+    # Rust builds the histogram before testing `total == 0.0`; hoisting the test
+    # ahead of the allocation is observably identical, because the histogram of
+    # an empty buffer is discarded unread.
+    var count = pixel_buffer_pixel_count(buf);
+    if (count == 0) { return RG_ERR_NONE; }
+
+    var counts = fl_calloc(256 * 8);
+    if (counts == 0) { return RG_ERR_ALLOCATION; }
+
+    var npix = pixel_buffer_len(buf) / 4;
+    var p = pixel_buffer_data(buf);
+    var i = 0;
+    while (i < npix) {
+        var q = p + i * 4;
+        var lum = _hist_lum601(load8(q), load8(q + 1), load8(q + 2));
+        if (lum > 255) { lum = 255; }
+        store64(counts + lum * 8, load64(counts + lum * 8) + 1);
+        i = i + 1;
+    }
+
+    var cdf = fl_alloc(256 * 8);
+    if (cdf == 0) { fl_free(counts); return RG_ERR_ALLOCATION; }
+    var total = f64_from(count);
+    store64(cdf, f64_div(f64_from(load64(counts)), total));
+    var c = 1;
+    while (c < 256) {
+        var prev = load64(cdf + (c - 1) * 8);
+        store64(cdf + c * 8, f64_add(prev, f64_div(f64_from(load64(counts + c * 8)), total)));
+        c = c + 1;
+    }
+
+    # `cdf.iter().copied().find(|&v| v > 0.0).unwrap_or(0.0)` — the FIRST
+    # strictly-positive entry, which is the mass of the darkest occupied bin.
+    # `find` stops at the first hit; the `found` flag is what reproduces that,
+    # since taking the last match instead would give 1.0 for every image.
+    var cdf_min = 0;
+    var found = 0;
+    var f = 0;
+    while (f < 256) {
+        if (found == 0) {
+            var cv = load64(cdf + f * 8);
+            if (f64_gt(cv, 0) == 1) { cdf_min = cv; found = 1; }
+        }
+        f = f + 1;
+    }
+
+    # A single-valued image drives cdf_min to 1.0 and denom to 0. Rust bails
+    # rather than dividing, so a uniform buffer comes back UNCHANGED — despite
+    # what the Rust test's comment says about it mapping to 255.
+    var denom = f64_sub(F64_ONE, cdf_min);
+    if (f64_lt(denom, _HIST_EPS10) == 1) {
+        fl_free(cdf);
+        fl_free(counts);
+        return RG_ERR_NONE;
+    }
+
+    # old luminance -> new luminance. f64 throughout, as in the original; the
+    # +0.5 is round-half-up ahead of the truncating `as u8`.
+    var lut = fl_alloc(256);
+    if (lut == 0) { fl_free(cdf); fl_free(counts); return RG_ERR_ALLOCATION; }
+    var l = 0;
+    while (l < 256) {
+        var norm = f64_div(f64_sub(load64(cdf + l * 8), cdf_min), denom);
+        var t = f64_add(f64_mul(norm, 255.0), 0.5);
+        store8(lut + l, f64_to(f64_clamp(t, 0, 255.0)));
+        l = l + 1;
+    }
+
+    # Apply. SINGLE precision from here down, matching the original — see the
+    # float-width note in the file header.
+    var j = 0;
+    while (j < npix) {
+        var q2 = p + j * 4;
+        var ol = _hist_lum601(load8(q2), load8(q2 + 1), load8(q2 + 2));
+        if (ol > 255) { ol = 255; }
+        var nl = _hist_u8_to_f32(load8(lut + ol));
+        # A black pixel has no ratio to preserve — scaling by new/0 would be
+        # infinite — so Rust writes the new luminance to all three channels.
+        if (ol == 0) {
+            var v = _hist_f32_to_u8(nl);
+            store8(q2, v);
+            store8(q2 + 1, v);
+            store8(q2 + 2, v);
+        }
+        if (ol != 0) {
+            var s = _hist_f32_div(nl, _hist_u8_to_f32(ol));
+            store8(q2, _hist_f32_to_u8(_hist_f32_mul(_hist_u8_to_f32(load8(q2)), s)));
+            store8(q2 + 1, _hist_f32_to_u8(_hist_f32_mul(_hist_u8_to_f32(load8(q2 + 1)), s)));
+            store8(q2 + 2, _hist_f32_to_u8(_hist_f32_mul(_hist_u8_to_f32(load8(q2 + 2)), s)));
+        }
+        j = j + 1;
+    }
+
+    fl_free(lut);
+    fl_free(cdf);
+    fl_free(counts);
+    return RG_ERR_NONE;
+}
+
+# ── auto_levels ────────
+# Rust's `stretch` closure: (offset, gain) for one channel, written to `out` as
+# two f32 bit patterns (+0 offset, +4 gain).
+#
+# A range under one level is unstretchable — a constant channel would divide by
+# zero — so Rust returns (0.0, 1.0), the IDENTITY mapping, and the channel is
+# passed through untouched. Returning (min, 255/range) there instead would blow
+# a flat channel up to 255 or NaN.
+fn _hist_stretch(min, max, out) {
+    var range = _hist_f32_sub(_hist_u8_to_f32(max), _hist_u8_to_f32(min));
+    if (f64_lt(f32_to(range), F64_ONE) == 1) {
+        store32(out, _HIST_F32_ZERO);
+        store32(out + 4, _HIST_F32_ONE);
+        return RG_ERR_NONE;
+    }
+    store32(out, _hist_u8_to_f32(min));
+    store32(out + 4, _hist_f32_div(_HIST_F32_255, range));
+    return RG_ERR_NONE;
+}
+
+# Rust: `auto_levels(&mut PixelBuffer) -> Result<()>`. Mutates in place.
+#
+# Stretches each channel's own min/max to 0-255. PER-CHANNEL rather than on
+# luminance, deliberately: a single luminance-derived gain shifts the colour of
+# anything that is not neutral grey.
+fn auto_levels(buf) {
+    if (pixel_buffer_format(buf) != PF_RGBA8) { return RG_ERR_INVALID_FORMAT; }
+    if (pixel_buffer_len(buf) == 0) { return RG_ERR_NONE; }
+
+    var min_r = 255;
+    var max_r = 0;
+    var min_g = 255;
+    var max_g = 0;
+    var min_b = 255;
+    var max_b = 0;
+
+    var npix = pixel_buffer_len(buf) / 4;
+    var p = pixel_buffer_data(buf);
+    var i = 0;
+    while (i < npix) {
+        var q = p + i * 4;
+        var r = load8(q);
+        var g = load8(q + 1);
+        var b = load8(q + 2);
+        if (r < min_r) { min_r = r; }
+        if (r > max_r) { max_r = r; }
+        if (g < min_g) { min_g = g; }
+        if (g > max_g) { max_g = g; }
+        if (b < min_b) { min_b = b; }
+        if (b > max_b) { max_b = b; }
+        i = i + 1;
+    }
+
+    var sr = fl_alloc(24);
+    if (sr == 0) { return RG_ERR_ALLOCATION; }
+    _hist_stretch(min_r, max_r, sr);
+    _hist_stretch(min_g, max_g, sr + 8);
+    _hist_stretch(min_b, max_b, sr + 16);
+    var off_r = load32(sr);
+    var gain_r = load32(sr + 4);
+    var off_g = load32(sr + 8);
+    var gain_g = load32(sr + 12);
+    var off_b = load32(sr + 16);
+    var gain_b = load32(sr + 20);
+    fl_free(sr);
+
+    var j = 0;
+    while (j < npix) {
+        var q2 = p + j * 4;
+        var vr = _hist_f32_mul(_hist_f32_sub(_hist_u8_to_f32(load8(q2)), off_r), gain_r);
+        var vg = _hist_f32_mul(_hist_f32_sub(_hist_u8_to_f32(load8(q2 + 1)), off_g), gain_g);
+        var vb = _hist_f32_mul(_hist_f32_sub(_hist_u8_to_f32(load8(q2 + 2)), off_b), gain_b);
+        store8(q2, _hist_f32_to_u8(vr));
+        store8(q2 + 1, _hist_f32_to_u8(vg));
+        store8(q2 + 2, _hist_f32_to_u8(vb));
+        j = j + 1;
+    }
+    return RG_ERR_NONE;
+}

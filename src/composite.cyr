@@ -1,0 +1,712 @@
+# composite.cyr -- compositing: alpha handling, layer masks, transitions,
+# fills, gradients, and positioned source-over.
+# Ported from rust-old/src/composite.rs (791 lines, 13 public fns).
+#
+# ── ERROR MODEL ────────
+# Rust's `Result<T, RangaError>` splits two ways here, and the split is by
+# whether the function produces a value:
+#
+#   * In-place operations (`Result<(), _>`) return an RG_ERR_* code DIRECTLY —
+#     RG_ERR_NONE on success, a negative code on failure. There is no value to
+#     hand back, so an err_out pointer would be pure ceremony.
+#   * Allocating operations — `dissolve` and `wipe`, the only two that build a
+#     new PixelBuffer — return the buffer pointer and report failure through an
+#     `err_out` pointer, exactly like pixel_buffer_new / pixel_buffer_zeroed.
+#     They return 0 on failure.
+#
+# ── OWNERSHIP ────────
+# Rust's Drop is invisible in the source, so it is reconstructed here:
+#   * `dissolve` / `wipe` hand the CALLER a fresh PixelBuffer. The caller frees
+#     it with pixel_buffer_free. Nothing else in this module allocates.
+#   * Every other function borrows: `buf`, `mask`, `src`, `dst` and the colour
+#     records are all caller-owned and untouched by this module's lifetimes.
+#
+# ── COLOUR ARGUMENTS ────────
+# Rust passes `[u8; 4]` by value. Cyrius has no array parameter, so a colour is
+# a POINTER to 4 bytes, matching pixel_buffer_set_rgba's `px` convention. The
+# channel order is the destination buffer's own order: R,G,B,A for the Rgba8
+# functions, A,R,G,B for composite_at_argb. Colour records are read-only and
+# are never freed here.
+#
+# ── DIV255 ────────
+# 1.0.0 changed premultiply_alpha / apply_mask from `x * a / 255` to `div255`.
+# That was a BUG FIX, not a micro-optimisation: `/255` truncates where div255
+# rounds, so a channel could come out one level too dark. `div255(4 * 101)` is
+# 2; the truncating form gives 1. See `_div255` below and the assertion that
+# pins that exact pair in tests/composite.tcyr.
+#
+# ── f32 ────────
+# The transitions and gradients are f32 in the original and stay f32 here.
+# ⚠ Every f32 operation goes through a helper with `: f32` PARAMETERS. Cyrius
+# dispatches f32 arithmetic through EMIT_F32_BINOP only when the operand
+# carries F32_TYID, which comes from a typed binding or a typed parameter — an
+# untyped call result silently emits an INTEGER op instead, with no diagnostic.
+# Same trap color.cyr's `_rg_f32_dot3` exists to avoid; see port-mechanics.md §3.
+
+# ── f32 scalar helpers ────────
+# One typed-parameter wrapper per operator. Nesting these is safe because every
+# argument position is itself a typed parameter, so the operand always carries
+# the type even though the inner call result does not.
+#must_use
+fn _rg_f32_add(a: f32, b: f32) { return a + b; }
+#must_use
+fn _rg_f32_sub(a: f32, b: f32) { return a - b; }
+#must_use
+fn _rg_f32_mul(a: f32, b: f32) { return a * b; }
+#must_use
+fn _rg_f32_div(a: f32, b: f32) { return a / b; }
+#must_use
+fn _rg_f32_lt(a: f32, b: f32) { if (a < b) { return 1; } return 0; }
+
+# `s + t * (e - s)` — the gradient/lerp kernel, in SINGLE precision and in
+# Rust's exact association order. Widening to f64 would round once instead of
+# three times and move byte values at the .5 boundaries.
+#must_use
+fn _rg_f32_lerp(s: f32, e: f32, t: f32) { return s + t * (e - s); }
+
+# `a * inv_t + b * t` — dissolve's cross-fade kernel.
+#must_use
+fn _rg_f32_mix(a: f32, b: f32, t: f32, inv_t: f32) { return a * inv_t + b * t; }
+
+# `cx * dx + cy * dy` — the gradient-direction projection.
+#must_use
+fn _rg_f32_proj(cx: f32, cy: f32, dx: f32, dy: f32) { return cx * dx + cy * dy; }
+
+# `a * a + b * b` — squared distance, before the radial gradient's sqrt.
+#must_use
+fn _rg_f32_len2(a: f32, b: f32) { return a * a + b * b; }
+
+var _RG_F32_ZERO = f32_from(0);
+var _RG_F32_HALF = f32_from(F64_HALF);
+var _RG_F32_ONE  = f32_from(F64_ONE);
+var _RG_F32_255  = f32_from(255.0);
+var _RG_F32_EPS6 = f32_from(0.000001);   # 1e-6, Rust's degenerate-range guard
+
+# Rust's `f32::to_radians` is `self * (consts::PI / 180.0)` with the constant
+# evaluated in SINGLE precision — f32(f32(PI) / 180). Written as the f32 bit
+# pattern rather than derived at run time so the value is auditable; verified
+# to equal both f32(f32(PI)/180) and f32(f64(PI)/180), which agree here.
+var _RG_F32_DEG2RAD = 0x3C8EFA35;   # 0.017453292f
+
+# NaN is the one value with a maximal exponent and a non-zero mantissa. Needed
+# because ganita_f32_min/max order NaN as a large finite value (its monotone
+# key is well-defined but meaningless), where Rust's clamp propagates it.
+#must_use
+fn _rg_f32_is_nan(v) {
+    if ((v & 0x7FFFFFFF) > 0x7F800000) { return 1; }
+    return 0;
+}
+
+# Rust's `f32::clamp(0.0, 1.0)`, NaN semantics included: `NaN < min` and
+# `NaN > max` are both false there, so a NaN passes straight through.
+#must_use
+fn _rg_f32_clamp01(v) {
+    if (_rg_f32_is_nan(v) == 1) { return v & 0xFFFFFFFF; }
+    return ganita_f32_clamp(v, _RG_F32_ZERO, _RG_F32_ONE);
+}
+
+# `(v + 0.5).clamp(0.0, 255.0) as u8` — the tail every f32 pixel path ends in.
+#
+# The +0.5 comes BEFORE the clamp, matching Rust, and it is what makes the cast
+# round rather than floor: `as u8` truncates. Dropping it darkens every channel
+# by up to one level. NaN returns 0 because Rust's float-to-int cast saturates,
+# and a NaN saturates to zero rather than to the range end.
+#must_use
+fn _rg_f32_round_clamp_u8(v) {
+    var s = _rg_f32_add(v, _RG_F32_HALF);
+    if (_rg_f32_is_nan(s) == 1) { return 0; }
+    return f64_to(f32_to(ganita_f32_clamp(s, _RG_F32_ZERO, _RG_F32_255)));
+}
+
+# u8 channel / integer coordinate -> f32 bit pattern. Exact in both directions:
+# every value below 2^24 is representable in single precision.
+#must_use
+fn _rg_u8_to_f32(v) { return f32_from(f64_from(v & 255)); }
+#must_use
+fn _rg_i_to_f32(v) { return f32_from(f64_from(v)); }
+
+# ── div255 ────────
+# Fast, accurate division by 255: `(val + 128 + ((val + 128) >> 8)) >> 8`.
+#
+# This is ROUND(val / 255), not the truncating `val / 255`. The distinction is
+# the 1.0.0 bug fix: for val = 4 * 101 = 404 this gives 2 and `404 / 255` gives
+# 1. Exact for the whole u16 range the callers can produce — the largest
+# argument any call site builds is 255 * 255 = 65025, and 255 * 255 + 0 * 0 for
+# the source-over accumulators, both well inside it.
+#
+# `>>` is fine here rather than a division: every argument is non-negative.
+#must_use
+fn _div255(val) {
+    var tmp = val + 128;
+    return (tmp + (tmp >> 8)) >> 8;
+}
+
+# ── validation ────────
+# Rust's validate_rgba8 carried the operation name into the error string; the
+# codes here drop it, per error.cyr's note that context is logged at the
+# failure site rather than carried in the return value.
+#must_use
+fn _validate_rgba8(buf) {
+    if (pixel_buffer_format(buf) != PF_RGBA8) { return RG_ERR_INVALID_FORMAT; }
+    return RG_ERR_NONE;
+}
+
+#must_use
+fn _validate_argb8(buf) {
+    if (pixel_buffer_format(buf) != PF_ARGB8) { return RG_ERR_INVALID_FORMAT; }
+    return RG_ERR_NONE;
+}
+
+#must_use
+fn _validate_same_size(a, b) {
+    if (pixel_buffer_width(a) != pixel_buffer_width(b)) { return RG_ERR_DIMENSION_MISMATCH; }
+    if (pixel_buffer_height(a) != pixel_buffer_height(b)) { return RG_ERR_DIMENSION_MISMATCH; }
+    return RG_ERR_NONE;
+}
+
+# Byte length rounded down to a whole number of 4-byte pixels — Rust's
+# `chunks_exact_mut(4)`, which drops a trailing partial pixel rather than
+# processing it. A validated PixelBuffer never has one, but the iterator
+# contract is reproduced rather than assumed away.
+#must_use
+fn _pixel_bytes(buf) {
+    return (pixel_buffer_len(buf) / 4) * 4;
+}
+
+# ── Alpha operations ────────
+
+# Convert straight alpha to premultiplied alpha in-place: `R = R * A / 255`.
+# Required for correct Porter-Duff compositing in some pipelines (aethersafta
+# uses premultiplied internally). Alpha itself is left alone.
+fn premultiply_alpha(buf) {
+    var rc = _validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { return rc; }
+    var p = pixel_buffer_data(buf);
+    var n = _pixel_bytes(buf);
+    var i = 0;
+    while (i < n) {
+        var a = load8(p + i + 3);
+        store8(p + i, _div255(load8(p + i) * a));
+        store8(p + i + 1, _div255(load8(p + i + 1) * a));
+        store8(p + i + 2, _div255(load8(p + i + 2) * a));
+        i = i + 4;
+    }
+    return RG_ERR_NONE;
+}
+
+# Convert premultiplied alpha back to straight alpha in-place.
+#
+# A zero alpha carries no colour to recover, so those pixels are SKIPPED — the
+# division would be by zero. Rust `continue`s; the guard is the same thing.
+# The result saturates at 255 because a premultiplied channel can legally
+# exceed its alpha in a hand-built buffer, and 255 * x / a then overshoots.
+fn unpremultiply_alpha(buf) {
+    var rc = _validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { return rc; }
+    var p = pixel_buffer_data(buf);
+    var n = _pixel_bytes(buf);
+    var i = 0;
+    while (i < n) {
+        var a = load8(p + i + 3);
+        if (a != 0) {
+            var r = load8(p + i) * 255 / a;
+            var g = load8(p + i + 1) * 255 / a;
+            var b = load8(p + i + 2) * 255 / a;
+            if (r > 255) { r = 255; }
+            if (g > 255) { g = 255; }
+            if (b > 255) { b = 255; }
+            store8(p + i, r);
+            store8(p + i + 1, g);
+            store8(p + i + 2, b);
+        }
+        i = i + 4;
+    }
+    return RG_ERR_NONE;
+}
+
+# ── Layer mask ────────
+
+# Apply an alpha mask to a buffer in-place.
+#
+# The mask buffer must be Rgba8 with the same dimensions; its RED channel is
+# the mask value (0 = transparent, 255 = opaque) and its other channels are
+# ignored. Each destination alpha is multiplied by it through div255 — the same
+# 1.0.0 rounding fix as premultiply_alpha.
+fn apply_mask(buf, mask) {
+    var rc = _validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { return rc; }
+    rc = _validate_rgba8(mask);
+    if (rc != RG_ERR_NONE) { return rc; }
+    rc = _validate_same_size(buf, mask);
+    if (rc != RG_ERR_NONE) { return rc; }
+    var p = pixel_buffer_data(buf);
+    var m = pixel_buffer_data(mask);
+    # Rust zips two chunks_exact iterators, which stops at the shorter one.
+    var n = _pixel_bytes(buf);
+    var mn = _pixel_bytes(mask);
+    if (mn < n) { n = mn; }
+    var i = 0;
+    while (i < n) {
+        store8(p + i + 3, _div255(load8(p + i + 3) * load8(m + i)));
+        i = i + 4;
+    }
+    return RG_ERR_NONE;
+}
+
+# ── Transitions ────────
+# Replaces tazama's dissolve.comp / fade.comp / wipe.comp shaders.
+
+# Dissolve (cross-fade) between two buffers, `progress` 0.0 = fully `a` to
+# 1.0 = fully `b`. Linear interpolation per BYTE, alpha included.
+#
+# ALLOCATES: returns a new PixelBuffer the caller owns, or 0 with a code in
+# `err_out`. `progress` is an f32 bit pattern.
+#must_use
+fn dissolve(a, b, progress, err_out) {
+    var rc = _validate_rgba8(a);
+    if (rc == RG_ERR_NONE) { rc = _validate_rgba8(b); }
+    if (rc == RG_ERR_NONE) { rc = _validate_same_size(a, b); }
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+
+    var t = _rg_f32_clamp01(progress);
+    var inv_t = _rg_f32_sub(_RG_F32_ONE, t);
+
+    var out = pixel_buffer_zeroed(pixel_buffer_width(a), pixel_buffer_height(a), PF_RGBA8, err_out);
+    if (out == 0) { return 0; }
+
+    var pa = pixel_buffer_data(a);
+    var pb = pixel_buffer_data(b);
+    var po = pixel_buffer_data(out);
+    var n = pixel_buffer_len(a);
+    var i = 0;
+    while (i < n) {
+        var mixed = _rg_f32_mix(_rg_u8_to_f32(load8(pa + i)), _rg_u8_to_f32(load8(pb + i)), t, inv_t);
+        store8(po + i, _rg_f32_round_clamp_u8(mixed));
+        i = i + 1;
+    }
+    return out;
+}
+
+# Fade a buffer by multiplying RGB by `progress` (0.0 = black, 1.0 = full).
+# ALPHA IS PRESERVED — fading to black is not the same as fading to
+# transparent, and conflating them is the classic bug here.
+fn fade(buf, progress) {
+    var rc = _validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { return rc; }
+    var p = _rg_f32_clamp01(progress);
+    var d = pixel_buffer_data(buf);
+    var n = _pixel_bytes(buf);
+    var i = 0;
+    while (i < n) {
+        store8(d + i, _rg_f32_round_clamp_u8(_rg_f32_mul(_rg_u8_to_f32(load8(d + i)), p)));
+        store8(d + i + 1, _rg_f32_round_clamp_u8(_rg_f32_mul(_rg_u8_to_f32(load8(d + i + 1)), p)));
+        store8(d + i + 2, _rg_f32_round_clamp_u8(_rg_f32_mul(_rg_u8_to_f32(load8(d + i + 2)), p)));
+        i = i + 4;
+    }
+    return RG_ERR_NONE;
+}
+
+# Hard wipe transition (left-to-right) between two buffers.
+#
+# Columns left of the threshold come from `b`, the rest from `a` — so
+# progress 0.0 is fully `a` and 1.0 is fully `b`. The threshold truncates
+# (Rust's `as u32`), which is why progress 0.5 on an 8-wide buffer puts the
+# boundary at exactly column 4.
+#
+# ALLOCATES: returns a new PixelBuffer the caller owns, or 0 with a code in
+# `err_out`. Copies whole row SEGMENTS rather than pixel by pixel — the source
+# for a run of columns is constant, so this is two memcpys per row instead of
+# w branches, and byte-for-byte identical.
+#must_use
+fn wipe(a, b, progress, err_out) {
+    var rc = _validate_rgba8(a);
+    if (rc == RG_ERR_NONE) { rc = _validate_rgba8(b); }
+    if (rc == RG_ERR_NONE) { rc = _validate_same_size(a, b); }
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+
+    var w = pixel_buffer_width(a);
+    var h = pixel_buffer_height(a);
+    var t = _rg_f32_clamp01(progress);
+    var thr = 0;
+    if (_rg_f32_is_nan(t) == 0) { thr = f64_to(f32_to(_rg_f32_mul(t, _rg_i_to_f32(w)))); }
+    if (thr < 0) { thr = 0; }
+    if (thr > w) { thr = w; }
+
+    var out = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    if (out == 0) { return 0; }
+
+    var pa = pixel_buffer_data(a);
+    var pb = pixel_buffer_data(b);
+    var po = pixel_buffer_data(out);
+    var row = w * 4;
+    var lead = thr * 4;
+    var y = 0;
+    while (y < h) {
+        var off = y * row;
+        if (lead > 0) { memcpy(po + off, pb + off, lead); }
+        if (lead < row) { memcpy(po + off + lead, pa + off + lead, row - lead); }
+        y = y + 1;
+    }
+    return out;
+}
+
+# ── Fill operations ────────
+
+# Pack an RGBA colour record into one little-endian 32-bit word, so a pixel
+# store is a single store32 rather than four store8s. Byte 0 of the record
+# lands at the lowest address, matching the interleaved layout.
+#must_use
+fn _pack_color(color) {
+    return load8(color) | (load8(color + 1) << 8) | (load8(color + 2) << 16) | (load8(color + 3) << 24);
+}
+
+# Fill a buffer with a solid RGBA colour.
+#
+# Two paths. When all four channels are equal — the common cases, transparent
+# black and opaque white — this is a memset over the whole byte vector, which
+# is what Rust's per-chunk `copy_from_slice` compiles down to anyway. A
+# PixelBuffer's length is always a whole number of pixels
+# (pixel_format_checked_buffer_size guarantees w*h*4), so filling every byte is
+# exactly the chunk loop. Otherwise it is one store32 per pixel.
+fn fill_solid(buf, color) {
+    var rc = _validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { return rc; }
+    var r = load8(color);
+    var g = load8(color + 1);
+    var b = load8(color + 2);
+    var a = load8(color + 3);
+    if (r == g && g == b && b == a) {
+        return bv_fill(pixel_buffer_bv(buf), r);
+    }
+    var word = _pack_color(color);
+    var p = pixel_buffer_data(buf);
+    var n = _pixel_bytes(buf);
+    var i = 0;
+    while (i < n) {
+        store32(p + i, word);
+        i = i + 4;
+    }
+    return RG_ERR_NONE;
+}
+
+# Fill a checkerboard pattern — the standard transparency backdrop.
+#
+# `block_size` is clamped up to 1: Rust's `block_size.max(1)` guards the
+# division, and a 0 there would trap rather than merely look wrong.
+fn fill_checkerboard(buf, block_size, color_a, color_b) {
+    var rc = _validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { return rc; }
+    var bs = block_size;
+    if (bs < 1) { bs = 1; }
+    var wa = _pack_color(color_a);
+    var wb = _pack_color(color_b);
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    var p = pixel_buffer_data(buf);
+    var y = 0;
+    while (y < h) {
+        var yb = y / bs;
+        var base = y * w * 4;
+        var x = 0;
+        while (x < w) {
+            # `is_multiple_of(2)` on a non-negative sum is the low bit.
+            var word = wb;
+            if ((x / bs + yb) & 1 == 0) { word = wa; }
+            store32(p + base + x * 4, word);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+# ── Gradients ────────
+
+# Write one interpolated pixel: `start + t * (end - start)` per channel, in f32.
+fn _write_lerp_px(dst, start, end, t) {
+    store8(dst, _rg_f32_round_clamp_u8(_rg_f32_lerp(_rg_u8_to_f32(load8(start)),
+                                                    _rg_u8_to_f32(load8(end)), t)));
+    store8(dst + 1, _rg_f32_round_clamp_u8(_rg_f32_lerp(_rg_u8_to_f32(load8(start + 1)),
+                                                        _rg_u8_to_f32(load8(end + 1)), t)));
+    store8(dst + 2, _rg_f32_round_clamp_u8(_rg_f32_lerp(_rg_u8_to_f32(load8(start + 2)),
+                                                        _rg_u8_to_f32(load8(end + 2)), t)));
+    store8(dst + 3, _rg_f32_round_clamp_u8(_rg_f32_lerp(_rg_u8_to_f32(load8(start + 3)),
+                                                        _rg_u8_to_f32(load8(end + 3)), t)));
+    return RG_ERR_NONE;
+}
+
+# Fill a buffer with a horizontal linear gradient from `start` to `end`.
+#
+# `t = x / max(w - 1, 1)`. The `max(.., 1)` is not decorative: a 1-pixel-wide
+# buffer would otherwise divide 0 by 0, and the resulting NaN saturates to 0 —
+# a black column where the start colour belongs.
+#
+# The colour depends only on x, so the first row is computed and then memcpy'd
+# down the buffer. Rust recomputes per row; the result is identical.
+fn gradient_linear(buf, start, end) {
+    var rc = _validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { return rc; }
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    if (w < 1) { return RG_ERR_NONE; }
+    if (h < 1) { return RG_ERR_NONE; }
+    var denom = ganita_f32_max(_rg_f32_sub(_rg_i_to_f32(w), _RG_F32_ONE), _RG_F32_ONE);
+    var p = pixel_buffer_data(buf);
+    var x = 0;
+    while (x < w) {
+        _write_lerp_px(p + x * 4, start, end, _rg_f32_div(_rg_i_to_f32(x), denom));
+        x = x + 1;
+    }
+    var row = w * 4;
+    var y = 1;
+    while (y < h) {
+        memcpy(p + y * row, p, row);
+        y = y + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+# Fill a buffer with a linear gradient at an arbitrary angle in degrees:
+# 0 = left-to-right, 90 = top-to-bottom, 180 = right-to-left.
+#
+# The gradient spans the full extent of the image for that direction, found by
+# projecting the four corners onto the direction vector and taking the range.
+# ganita_f32_min/max are used for that fold rather than a raw bit compare —
+# IEEE-754 is sign-magnitude, so an unsigned compare reverses the order among
+# negatives, and a projection is negative for every angle past 90 degrees.
+#
+# A degenerate range leaves the buffer untouched, as in Rust. The NaN guard is
+# ours: ganita_f32_cos widens to f64_cos, whose x87 backing is undefined for
+# |x| >= 2^63 and returns its argument there, so an absurd angle can drive the
+# projections to infinity and the range to inf - inf. Leaving the buffer alone
+# is the honest answer for an input with no meaningful gradient.
+fn gradient_linear_angled(buf, start, end, angle_deg) {
+    var rc = _validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { return rc; }
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    if (w < 1) { return RG_ERR_NONE; }
+    if (h < 1) { return RG_ERR_NONE; }
+
+    var rad = _rg_f32_mul(angle_deg, _RG_F32_DEG2RAD);
+    var dx = ganita_f32_cos(rad);
+    var dy = ganita_f32_sin(rad);
+
+    var wm1 = _rg_f32_sub(_rg_i_to_f32(w), _RG_F32_ONE);
+    var hm1 = _rg_f32_sub(_rg_i_to_f32(h), _RG_F32_ONE);
+    var c0 = _rg_f32_proj(_RG_F32_ZERO, _RG_F32_ZERO, dx, dy);
+    var c1 = _rg_f32_proj(wm1, _RG_F32_ZERO, dx, dy);
+    var c2 = _rg_f32_proj(_RG_F32_ZERO, hm1, dx, dy);
+    var c3 = _rg_f32_proj(wm1, hm1, dx, dy);
+    var min_proj = ganita_f32_min(ganita_f32_min(c0, c1), ganita_f32_min(c2, c3));
+    var max_proj = ganita_f32_max(ganita_f32_max(c0, c1), ganita_f32_max(c2, c3));
+
+    var range = _rg_f32_sub(max_proj, min_proj);
+    if (_rg_f32_is_nan(range) == 1) { return RG_ERR_NONE; }
+    if (_rg_f32_lt(range, _RG_F32_EPS6) == 1) { return RG_ERR_NONE; }
+
+    var p = pixel_buffer_data(buf);
+    var y = 0;
+    while (y < h) {
+        var yf = _rg_i_to_f32(y);
+        var base = y * w * 4;
+        var x = 0;
+        while (x < w) {
+            var proj = _rg_f32_proj(_rg_i_to_f32(x), yf, dx, dy);
+            var t = _rg_f32_clamp01(_rg_f32_div(_rg_f32_sub(proj, min_proj), range));
+            _write_lerp_px(p + base + x * 4, start, end, t);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+# Fill a buffer with a radial gradient from `(cx, cy)` outward, reaching `end`
+# at `radius` and staying there beyond it. Coordinates and radius are f32 bit
+# patterns. The radius is floored at 1e-6 so a zero — or negative — radius
+# produces a hard edge rather than a division by zero.
+#
+# ⚠ The explicit NaN check is not redundant with the max. Rust's `f32::max` is
+# NaN-IGNORING, so `NaN.max(1e-6)` is 1e-6; ganita_f32_max orders by the
+# monotone bit key, under which NaN sorts above every finite value and wins.
+# Without this the whole buffer would come out black for a NaN radius where
+# Rust draws a hard-edged gradient. The max itself is still ganita's, because a
+# NEGATIVE radius is the case a raw unsigned bit compare gets wrong.
+fn gradient_radial(buf, cx, cy, radius, start, end) {
+    var rc = _validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { return rc; }
+    var r = radius;
+    if (_rg_f32_is_nan(r) == 1) { r = _RG_F32_EPS6; }
+    r = ganita_f32_max(r, _RG_F32_EPS6);
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    var p = pixel_buffer_data(buf);
+    var y = 0;
+    while (y < h) {
+        var dyv = _rg_f32_sub(_rg_i_to_f32(y), cy);
+        var base = y * w * 4;
+        var x = 0;
+        while (x < w) {
+            var dxv = _rg_f32_sub(_rg_i_to_f32(x), cx);
+            var dist = ganita_f32_sqrt(_rg_f32_len2(dxv, dyv));
+            var t = _rg_f32_clamp01(_rg_f32_div(dist, r));
+            _write_lerp_px(p + base + x * 4, start, end, t);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+# ── Positioned composite ────────
+# The core aethersafta operation: Porter-Duff "source over" with per-pixel
+# alpha and a per-layer opacity, clipped to the destination.
+
+# Per-layer opacity as a 0-255 integer: `(opacity.clamp(0.0, 1.0) * 255.0) as
+# u16`. The cast truncates, so 0.5 becomes 127, not 128. NaN gives 0 because
+# Rust's float-to-int cast saturates NaN to zero — which makes a NaN opacity a
+# no-op rather than a full-strength paint.
+#must_use
+fn _opacity_u8(opacity) {
+    var c = _rg_f32_clamp01(opacity);
+    if (_rg_f32_is_nan(c) == 1) { return 0; }
+    return f64_to(f32_to(_rg_f32_mul(c, _RG_F32_255)));
+}
+
+# Source-over one RGBA8 pixel: `d` and `s` point at 4 bytes in R,G,B,A order.
+#
+# The `sa >= 255 && op >= 255` straight copy is a PURE OPTIMISATION, verified
+# exhaustively rather than assumed: op == 255 makes sa == div255(s_a * 255) ==
+# s_a, so sa == 255 implies inv == 0, and div255(x * 255 + d * 0) == x for
+# every byte. Removing it changes no output, which is why no assertion in
+# tests/composite.tcyr can distinguish it — worth stating so a later reader
+# does not go hunting for the test that pins it.
+fn _blend_over_rgba(d, s, op) {
+    var sa = _div255(load8(s + 3) * op);
+    if (sa == 0) { return RG_ERR_NONE; }
+    if (sa >= 255 && op >= 255) {
+        store8(d, load8(s));
+        store8(d + 1, load8(s + 1));
+        store8(d + 2, load8(s + 2));
+        store8(d + 3, load8(s + 3));
+        return RG_ERR_NONE;
+    }
+    var inv = 255 - sa;
+    store8(d, _div255(load8(s) * sa + load8(d) * inv));
+    store8(d + 1, _div255(load8(s + 1) * sa + load8(d + 1) * inv));
+    store8(d + 2, _div255(load8(s + 2) * sa + load8(d + 2) * inv));
+    var na = _div255(sa * 255 + load8(d + 3) * inv);
+    if (na > 255) { na = 255; }
+    store8(d + 3, na);
+    return RG_ERR_NONE;
+}
+
+# Source-over one ARGB8 pixel: `d` and `s` point at 4 bytes in A,R,G,B order.
+#
+# Deliberately NOT folded into _blend_over_rgba with an offset parameter. The
+# byte order is the whole reason two functions exist, and the alpha channel is
+# the one with the saturating accumulator — parameterising the offset makes the
+# two layouts look interchangeable when getting them backwards silently swaps a
+# colour channel with coverage.
+fn _blend_over_argb(d, s, op) {
+    var sa = _div255(load8(s) * op);
+    if (sa == 0) { return RG_ERR_NONE; }
+    if (sa >= 255 && op >= 255) {
+        store8(d, load8(s));
+        store8(d + 1, load8(s + 1));
+        store8(d + 2, load8(s + 2));
+        store8(d + 3, load8(s + 3));
+        return RG_ERR_NONE;
+    }
+    var inv = 255 - sa;
+    var na = _div255(sa * 255 + load8(d) * inv);
+    if (na > 255) { na = 255; }
+    store8(d, na);
+    store8(d + 1, _div255(load8(s + 1) * sa + load8(d + 1) * inv));
+    store8(d + 2, _div255(load8(s + 2) * sa + load8(d + 2) * inv));
+    store8(d + 3, _div255(load8(s + 3) * sa + load8(d + 3) * inv));
+    return RG_ERR_NONE;
+}
+
+# Composite `src` onto `dst` at `(x, y)` with `opacity`. Both buffers must be
+# Rgba8. Pixels outside `dst` are clipped, including for a negative position.
+# Replaces aethersafta's compositor::blend_frame().
+fn composite_at(src, dst, x, y, opacity) {
+    var rc = _validate_rgba8(src);
+    if (rc == RG_ERR_NONE) { rc = _validate_rgba8(dst); }
+    if (rc != RG_ERR_NONE) { return rc; }
+
+    var dw = pixel_buffer_width(dst);
+    var dh = pixel_buffer_height(dst);
+    var x0 = x;
+    var y0 = y;
+    if (x0 < 0) { x0 = 0; }
+    if (y0 < 0) { y0 = 0; }
+    var x1 = x + pixel_buffer_width(src);
+    var y1 = y + pixel_buffer_height(src);
+    if (x1 > dw) { x1 = dw; }
+    if (y1 > dh) { y1 = dh; }
+    if (x0 >= x1) { return RG_ERR_NONE; }
+    if (y0 >= y1) { return RG_ERR_NONE; }
+
+    var op = _opacity_u8(opacity);
+    if (op == 0) { return RG_ERR_NONE; }
+
+    var sw = pixel_buffer_width(src);
+    var sp = pixel_buffer_data(src);
+    var dp = pixel_buffer_data(dst);
+    var py = y0;
+    while (py < y1) {
+        var srow = (py - y) * sw;
+        var drow = py * dw;
+        var px = x0;
+        while (px < x1) {
+            _blend_over_rgba(dp + (drow + px) * 4, sp + (srow + px - x) * 4, op);
+            px = px + 1;
+        }
+        py = py + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+# Composite `src` onto `dst` at `(x, y)` — ARGB8 variant, for aethersafta's
+# `[A, R, G, B]` layout. Same clipping and opacity rules as composite_at; only
+# the channel order differs, and that difference is the entire point.
+fn composite_at_argb(src, dst, x, y, opacity) {
+    var rc = _validate_argb8(src);
+    if (rc == RG_ERR_NONE) { rc = _validate_argb8(dst); }
+    if (rc != RG_ERR_NONE) { return rc; }
+
+    var dw = pixel_buffer_width(dst);
+    var dh = pixel_buffer_height(dst);
+    var x0 = x;
+    var y0 = y;
+    if (x0 < 0) { x0 = 0; }
+    if (y0 < 0) { y0 = 0; }
+    var x1 = x + pixel_buffer_width(src);
+    var y1 = y + pixel_buffer_height(src);
+    if (x1 > dw) { x1 = dw; }
+    if (y1 > dh) { y1 = dh; }
+    if (x0 >= x1) { return RG_ERR_NONE; }
+    if (y0 >= y1) { return RG_ERR_NONE; }
+
+    var op = _opacity_u8(opacity);
+    if (op == 0) { return RG_ERR_NONE; }
+
+    var sw = pixel_buffer_width(src);
+    var sp = pixel_buffer_data(src);
+    var dp = pixel_buffer_data(dst);
+    var py = y0;
+    while (py < y1) {
+        var srow = (py - y) * sw;
+        var drow = py * dw;
+        var px = x0;
+        while (px < x1) {
+            _blend_over_argb(dp + (drow + px) * 4, sp + (srow + px - x) * 4, op);
+            px = px + 1;
+        }
+        py = py + 1;
+    }
+    return RG_ERR_NONE;
+}
