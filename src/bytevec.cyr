@@ -54,6 +54,32 @@ fn bv_zeroed(n) {
     return v;
 }
 
+# Allocate `n` bytes WITHOUT zeroing, length already set to n.
+#
+# ⚠ The contents are whatever the allocator last left there. Use this only when
+# the caller provably writes every byte before any read — crop's per-row memcpy,
+# a flip, a format conversion. Anything that SKIPS pixels (affine_transform and
+# perspective_transform leave out-of-source pixels transparent) must keep
+# bv_zeroed, because the zero fill IS the transparent black.
+#
+# This exists because the zero fill is not free: crop was measured at 79.9x
+# Rust, and most of that was fl_calloc zeroing a buffer that the very next loop
+# overwrote in full.
+#must_use
+fn bv_uninit(n) {
+    var v = fl_alloc(_BV_HDR);
+    if (v == 0) { return 0; }
+    var data = 0;
+    if (n > 0) {
+        data = fl_alloc(n);
+        if (data == 0) { fl_free(v); return 0; }
+    }
+    store64(v, data);
+    store64(v + 8, n);
+    store64(v + 16, n);
+    return v;
+}
+
 #must_use
 fn bv_data(v) { return load64(v); }
 #must_use

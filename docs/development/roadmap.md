@@ -152,6 +152,27 @@ the Rust operand type at every shift.
 `gpu_shaders`, `gpu_buffer`, `gpu_context`, `gpu_pipeline` against mabda's
 **native** backends; wgpu is the fallback and leaves mabda's tree at v5.1.
 
+### M-perf — first performance pass ✅
+
+Benchmark harness built (`tests/ranga.bcyr`, 35 CPU benchmarks with names
+matching the Rust criterion series) and
+[`benchmarks-rust-v-cyrius.md`](../benchmarks-rust-v-cyrius.md) filled in.
+
+**Median 10.6x slower than Rust, range 3.8x-79.9x.** Two fixes landed from
+reading the spread rather than the median:
+
+- **Flat hot loops.** Cyrius leaves general inlining off (`_INLINE_OK`), so
+  helper calls in a per-pixel path are real calls. Inlining the blur inner loops
+  gave **2.1x**.
+- **`pixel_buffer_uninit`.** `fl_calloc` zeroes byte-at-a-time over already-zero
+  mmap pages — 369x slower than the allocation itself. Filed upstream; the
+  consumer workaround is 1.35x-1.75x on the memcpy-bound ops and should be
+  reverted if the stdlib fix lands.
+
+Still open: the 10x-20x band is Rust SIMD vs Cyrius scalar and needs the
+remaining `asm { }` kernels. `yuv420p_to_rgba` at 44.2x should get its chroma
+row pointers hoisted before any assembly is written.
+
 ### M7 — Parity
 
 Surface count against `rust-old/`, full benchmark sweep on a quiesced machine,

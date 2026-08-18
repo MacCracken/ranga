@@ -251,7 +251,8 @@ fn crop(buf, left, top, right, bottom, err_out) {
     if (ow == 0) { return pixel_buffer_zeroed(0, 0, PF_RGBA8, err_out); }
     if (oh == 0) { return pixel_buffer_zeroed(0, 0, PF_RGBA8, err_out); }
 
-    var out = pixel_buffer_zeroed(ow, oh, PF_RGBA8, err_out);
+    # Every byte is overwritten by the row memcpy below, so skip the zero fill.
+    var out = pixel_buffer_uninit(ow, oh, PF_RGBA8, err_out);
     if (out == 0) { return 0; }
     var sp = pixel_buffer_data(buf);
     var dp = pixel_buffer_data(out);
@@ -285,7 +286,8 @@ fn resize(buf, new_w, new_h, filter, err_out) {
     if (sw == 0) { return pixel_buffer_zeroed(0, 0, PF_RGBA8, err_out); }
     if (sh == 0) { return pixel_buffer_zeroed(0, 0, PF_RGBA8, err_out); }
 
-    var out = pixel_buffer_zeroed(new_w, new_h, PF_RGBA8, err_out);
+    # All three filters write every destination pixel.
+    var out = pixel_buffer_uninit(new_w, new_h, PF_RGBA8, err_out);
     if (out == 0) { return 0; }
     var sp = pixel_buffer_data(buf);
     var dp = pixel_buffer_data(out);
@@ -398,7 +400,7 @@ fn flip_horizontal(buf, err_out) {
     if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
     var w = pixel_buffer_width(buf);
     var h = pixel_buffer_height(buf);
-    var out = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    var out = pixel_buffer_uninit(w, h, PF_RGBA8, err_out);
     if (out == 0) { return 0; }
     var sp = pixel_buffer_data(buf);
     var dp = pixel_buffer_data(out);
@@ -422,7 +424,7 @@ fn flip_vertical(buf, err_out) {
     if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
     var w = pixel_buffer_width(buf);
     var h = pixel_buffer_height(buf);
-    var out = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    var out = pixel_buffer_uninit(w, h, PF_RGBA8, err_out);
     if (out == 0) { return 0; }
     var sp = pixel_buffer_data(buf);
     var dp = pixel_buffer_data(out);

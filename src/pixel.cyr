@@ -157,6 +157,26 @@ fn pixel_buffer_zeroed(width, height, format, err_out) {
     return b;
 }
 
+# Same shape as pixel_buffer_zeroed but WITHOUT the zero fill — see bv_uninit.
+# Only for callers that write every byte before reading any. A caller that
+# skips pixels (affine/perspective leave them transparent) must use the zeroed
+# form; using this there leaks allocator garbage into the image.
+#must_use
+fn pixel_buffer_uninit(width, height, format, err_out) {
+    var want = pixel_format_checked_buffer_size(format, width, height);
+    if (ranga_is_err(want) == 1) { store64(err_out, want); return 0; }
+    var bv = bv_uninit(want);
+    if (bv == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    var b = fl_alloc(_PB_SIZE);
+    if (b == 0) { bv_free(bv); store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    store64(b, bv);
+    store64(b + 8, width);
+    store64(b + 16, height);
+    store64(b + 24, format);
+    store64(err_out, RG_ERR_NONE);
+    return b;
+}
+
 #must_use
 fn pixel_buffer_bv(b) { return load64(b); }
 # Raw pointer to the first pixel byte — the hot-loop entry point.

@@ -1,21 +1,366 @@
-# ranga benchmarks
-# Stdlib auto-included via cyrius.cyml
+# ranga benchmarks — Cyrius side of docs/benchmarks-rust-v-cyrius.md
 #
-# Pattern: bench_new -> bench_batch_start -> tight loop -> bench_batch_stop -> bench_report.
-# For sub-1us ops use batch_size >= 1000 to amortize clock_gettime overhead
-# (~240 ns per start/stop pair on x86_64 Linux). See lib/bench.cyr header for
-# the full overhead-vs-batching guidance.
+# Names match the Rust criterion benchmarks in docs/rust-v1-bench-history.csv
+# exactly, so the two series line up row for row. Only CPU benchmarks for
+# modules that are ported appear here; GPU and spectral land with M5/M6.
+#
+# BATCHING. bench_batch_start/stop pay ~240 ns per pair for clock_gettime, so
+# anything faster than about a microsecond is run in a batch of 100k-1M and the
+# cost amortised. The full-frame image ops are milliseconds each and run once.
+#
+# ⚠ These numbers are NOT comparable to the Rust series as absolutes — the Rust
+# baseline was taken on a loaded machine under a powersave governor (see the
+# caveat in benchmarks-rust-v-cyrius.md). Treat them as a Cyrius-side baseline
+# and re-run both on a quiesced machine before publishing any delta.
 
-fn bench_noop(): i64 { return 0; }
+include "src/error.cyr"
+include "src/bytevec.cyr"
+include "src/simd_u8.cyr"
+include "src/pixel.cyr"
+include "src/color.cyr"
+include "src/composite.cyr"
+include "src/histogram.cyr"
+include "src/transform.cyr"
+include "src/filter_point.cyr"
+include "src/filter_kernel.cyr"
+include "src/blend.cyr"
+include "src/convert.cyr"
+
+var W = 1920;
+var H = 1080;
+
+fn mkframe(w, h, f, err) {
+    var b = pixel_buffer_zeroed(w, h, f, err);
+    if (b == 0) { return 0; }
+    # A varied fill, not a flat one: uniform data can let a branchy kernel take
+    # one path for every pixel and is not representative.
+    var p = pixel_buffer_data(b);
+    var n = pixel_buffer_len(b);
+    var i = 0;
+    while (i < n) {
+        store8(p + i, (i * 37 + (i >> 5)) & 255);
+        i = i + 1;
+    }
+    return b;
+}
 
 fn main(): i64 {
     alloc_init();
-    var b = bench_new("noop");
-    bench_batch_start(b);
+    var err = fl_alloc(8);
+
+    # ── per-pixel primitives (batched) ──
+    var sp = fl_alloc(4);
+    var dp = fl_alloc(4);
+    var op = fl_alloc(4);
+    store8(sp, 200); store8(sp + 1, 100); store8(sp + 2, 50); store8(sp + 3, 255);
+    store8(dp, 10); store8(dp + 1, 20); store8(dp + 2, 30); store8(dp + 3, 255);
+
+    var b1 = bench_new("blend_pixel_normal");
+    bench_batch_start(b1);
     var i = 0;
-    while (i < 1000000) { bench_noop(); i = i + 1; }
-    bench_batch_stop(b, 1000000);
-    bench_report(b);
+    while (i < 1000000) { blend_pixel(sp, dp, BM_NORMAL, 255, op); i = i + 1; }
+    bench_batch_stop(b1, 1000000);
+    bench_report(b1);
+
+    var b2 = bench_new("blend_pixel_modes/Multiply");
+    bench_batch_start(b2);
+    i = 0;
+    while (i < 1000000) { blend_pixel(sp, dp, BM_MULTIPLY, 255, op); i = i + 1; }
+    bench_batch_stop(b2, 1000000);
+    bench_report(b2);
+
+    var b3 = bench_new("blend_pixel_modes/SoftLight");
+    bench_batch_start(b3);
+    i = 0;
+    while (i < 500000) { blend_pixel(sp, dp, BM_SOFT_LIGHT, 255, op); i = i + 1; }
+    bench_batch_stop(b3, 500000);
+    bench_report(b3);
+
+    var b4 = bench_new("blend_pixel_argb_normal");
+    bench_batch_start(b4);
+    i = 0;
+    while (i < 500000) { blend_pixel_argb(sp, dp, BM_NORMAL, 255, op); i = i + 1; }
+    bench_batch_stop(b4, 500000);
+    bench_report(b4);
+
+    # ── colour science (batched) ──
+    var la = cie_lab_new(50.0, 2.6772, f64_neg(79.7751));
+    var lb = cie_lab_new(50.0, 0, f64_neg(82.7485));
+
+    var b5 = bench_new("delta_e_cie76");
+    bench_batch_start(b5);
+    i = 0;
+    var acc = 0;
+    while (i < 1000000) { acc = acc + delta_e_cie76(la, lb); i = i + 1; }
+    bench_batch_stop(b5, 1000000);
+    bench_report(b5);
+
+    var b6 = bench_new("delta_e_cie94");
+    bench_batch_start(b6);
+    i = 0;
+    while (i < 500000) { acc = acc + delta_e_cie94(la, lb); i = i + 1; }
+    bench_batch_stop(b6, 500000);
+    bench_report(b6);
+
+    var b7 = bench_new("delta_e_ciede2000");
+    bench_batch_start(b7);
+    i = 0;
+    while (i < 200000) { acc = acc + delta_e_ciede2000(la, lb); i = i + 1; }
+    bench_batch_stop(b7, 200000);
+    bench_report(b7);
+
+    # ── row-level blend ──
+    var rowsrc = fl_alloc(W * 4);
+    var rowdst = fl_alloc(W * 4);
+    i = 0;
+    while (i < W * 4) { store8(rowsrc + i, i & 255); store8(rowdst + i, 255 - (i & 255)); i = i + 1; }
+
+    var b8 = bench_new("blend_row_1920px");
+    bench_batch_start(b8);
+    i = 0;
+    while (i < 2000) { blend_row_normal(rowsrc, rowdst, W, 255); i = i + 1; }
+    bench_batch_stop(b8, 2000);
+    bench_report(b8);
+
+    var b9 = bench_new("blend_row_argb_1920px");
+    bench_batch_start(b9);
+    i = 0;
+    while (i < 2000) { blend_row_normal_argb(rowsrc, rowdst, W, 255); i = i + 1; }
+    bench_batch_stop(b9, 2000);
+    bench_report(b9);
+
+    # ── full-frame point filters ──
+    var frame = mkframe(W, H, PF_RGBA8, err);
+
+    var c1 = bench_new("brightness_1080p");
+    bench_batch_start(c1);
+    i = 0;
+    while (i < 20) { brightness(frame, f32_from(0.1)); i = i + 1; }
+    bench_batch_stop(c1, 20);
+    bench_report(c1);
+
+    var c2 = bench_new("grayscale_1080p");
+    bench_batch_start(c2);
+    i = 0;
+    while (i < 20) { grayscale(frame); i = i + 1; }
+    bench_batch_stop(c2, 20);
+    bench_report(c2);
+
+    var c3 = bench_new("invert_1080p");
+    bench_batch_start(c3);
+    i = 0;
+    while (i < 20) { invert(frame); i = i + 1; }
+    bench_batch_stop(c3, 20);
+    bench_report(c3);
+
+    var c4 = bench_new("contrast_1080p");
+    bench_batch_start(c4);
+    i = 0;
+    while (i < 5) { contrast(frame, f32_from(1.2)); i = i + 1; }
+    bench_batch_stop(c4, 5);
+    bench_report(c4);
+
+    var c5 = bench_new("saturation_1080p");
+    bench_batch_start(c5);
+    i = 0;
+    while (i < 5) { saturation(frame, f32_from(1.2)); i = i + 1; }
+    bench_batch_stop(c5, 5);
+    bench_report(c5);
+
+    var c6 = bench_new("threshold_1080p");
+    bench_batch_start(c6);
+    i = 0;
+    while (i < 20) { threshold(frame, 128); i = i + 1; }
+    bench_batch_stop(c6, 20);
+    bench_report(c6);
+
+    # ── transforms ──
+    var t1 = bench_new("flip_horizontal_1080p");
+    bench_batch_start(t1);
+    i = 0;
+    while (i < 10) {
+        var f1 = flip_horizontal(frame, err);
+        pixel_buffer_free(f1);
+        i = i + 1;
+    }
+    bench_batch_stop(t1, 10);
+    bench_report(t1);
+
+    var t2 = bench_new("flip_vertical_1080p");
+    bench_batch_start(t2);
+    i = 0;
+    while (i < 10) {
+        var f2 = flip_vertical(frame, err);
+        pixel_buffer_free(f2);
+        i = i + 1;
+    }
+    bench_batch_stop(t2, 10);
+    bench_report(t2);
+
+    var t3 = bench_new("crop_1080p_to_720p");
+    bench_batch_start(t3);
+    i = 0;
+    while (i < 20) {
+        var f3 = crop(frame, 0, 0, 1280, 720, err);
+        pixel_buffer_free(f3);
+        i = i + 1;
+    }
+    bench_batch_stop(t3, 20);
+    bench_report(t3);
+
+    var t4 = bench_new("resize_bilinear_1080p_to_720p");
+    bench_batch_start(t4);
+    i = 0;
+    while (i < 3) {
+        var f4 = resize(frame, 1280, 720, SF_BILINEAR, err);
+        pixel_buffer_free(f4);
+        i = i + 1;
+    }
+    bench_batch_stop(t4, 3);
+    bench_report(t4);
+
+    var t5 = bench_new("resize_nearest_1080p_to_720p");
+    bench_batch_start(t5);
+    i = 0;
+    while (i < 10) {
+        var f5 = resize(frame, 1280, 720, SF_NEAREST, err);
+        pixel_buffer_free(f5);
+        i = i + 1;
+    }
+    bench_batch_stop(t5, 10);
+    bench_report(t5);
+
+    # ── convert ──
+    var v1 = bench_new("rgba_to_yuv420p_1080p");
+    bench_batch_start(v1);
+    i = 0;
+    while (i < 5) {
+        var y1 = rgba_to_yuv420p(frame, err);
+        pixel_buffer_free(y1);
+        i = i + 1;
+    }
+    bench_batch_stop(v1, 5);
+    bench_report(v1);
+
+    var yuvframe = rgba_to_yuv420p(frame, err);
+    var v2 = bench_new("yuv420p_to_rgba_bt601_1080p");
+    bench_batch_start(v2);
+    i = 0;
+    while (i < 5) {
+        var r2 = yuv420p_to_rgba(yuvframe, err);
+        pixel_buffer_free(r2);
+        i = i + 1;
+    }
+    bench_batch_stop(v2, 5);
+    bench_report(v2);
+
+    var v3 = bench_new("rgba8_to_argb8_1080p");
+    bench_batch_start(v3);
+    i = 0;
+    while (i < 20) {
+        var a3 = rgba8_to_argb8(frame, err);
+        pixel_buffer_free(a3);
+        i = i + 1;
+    }
+    bench_batch_stop(v3, 20);
+    bench_report(v3);
+
+    # ── composite ──
+    var dstframe = mkframe(W, H, PF_RGBA8, err);
+    var p1 = bench_new("premultiply_alpha_1080p");
+    bench_batch_start(p1);
+    i = 0;
+    while (i < 20) { premultiply_alpha(dstframe); i = i + 1; }
+    bench_batch_stop(p1, 20);
+    bench_report(p1);
+
+    var p2 = bench_new("fill_solid_1080p");
+    var solid = fl_alloc(4);
+    store8(solid, 10); store8(solid + 1, 20); store8(solid + 2, 30); store8(solid + 3, 255);
+    bench_batch_start(p2);
+    i = 0;
+    while (i < 50) { fill_solid(dstframe, solid); i = i + 1; }
+    bench_batch_stop(p2, 50);
+    bench_report(p2);
+
+    var p3 = bench_new("composite_at_1080p");
+    bench_batch_start(p3);
+    i = 0;
+    while (i < 10) { composite_at(frame, dstframe, 0, 0, f32_from(0.5)); i = i + 1; }
+    bench_batch_stop(p3, 10);
+    bench_report(p3);
+
+    # ── histogram ──
+    var h1 = bench_new("luminance_histogram_1080p");
+    bench_batch_start(h1);
+    i = 0;
+    while (i < 10) {
+        var hh = luminance_histogram(frame, 256, err);
+        hist_free(hh);
+        i = i + 1;
+    }
+    bench_batch_stop(h1, 10);
+    bench_report(h1);
+
+    var h2 = bench_new("equalize_1080p");
+    bench_batch_start(h2);
+    i = 0;
+    while (i < 3) { equalize(dstframe); i = i + 1; }
+    bench_batch_stop(h2, 3);
+    bench_report(h2);
+
+    var h3 = bench_new("auto_levels_1080p");
+    bench_batch_start(h3);
+    i = 0;
+    while (i < 3) { auto_levels(dstframe); i = i + 1; }
+    bench_batch_stop(h3, 3);
+    bench_report(h3);
+
+    # ── kernel filters (slowest — small iteration counts) ──
+    var small = mkframe(512, 512, PF_RGBA8, err);
+
+    var k1 = bench_new("box_blur_r3_1080p");
+    bench_batch_start(k1);
+    var kb = box_blur(frame, 3, err);
+    pixel_buffer_free(kb);
+    bench_batch_stop(k1, 1);
+    bench_report(k1);
+
+    var k2 = bench_new("gaussian_blur_r3_1080p");
+    bench_batch_start(k2);
+    var kg = gaussian_blur(frame, 3, err);
+    pixel_buffer_free(kg);
+    bench_batch_stop(k2, 1);
+    bench_report(k2);
+
+    var k3 = bench_new("median_r1_512x512");
+    bench_batch_start(k3);
+    var km = median(small, 1, err);
+    pixel_buffer_free(km);
+    bench_batch_stop(k3, 1);
+    bench_report(k3);
+
+    var k4 = bench_new("bilateral_r2_256x256");
+    var tiny = mkframe(256, 256, PF_RGBA8, err);
+    bench_batch_start(k4);
+    var kbl = bilateral(tiny, 2, f32_from(10.0), f32_from(30.0), err);
+    pixel_buffer_free(kbl);
+    bench_batch_stop(k4, 1);
+    bench_report(k4);
+
+    var k5 = bench_new("vignette_1080p");
+    bench_batch_start(k5);
+    i = 0;
+    while (i < 3) { vignette(dstframe, f32_from(0.5)); i = i + 1; }
+    bench_batch_stop(k5, 3);
+    bench_report(k5);
+
+    var k6 = bench_new("noise_gaussian_1080p");
+    bench_batch_start(k6);
+    noise_gaussian(dstframe, f32_from(0.1), 42);
+    bench_batch_stop(k6, 1);
+    bench_report(k6);
+
     return 0;
 }
 

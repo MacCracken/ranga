@@ -168,7 +168,7 @@ fn contrast(buf, factor) {
         var q = p + i * 4;
         var c = 0;
         while (c < 3) {
-            var v: f32 = _fp_u8_to_f32(load8(q + c));
+            var v: f32 = f32_from(f64_from(load8(q + c)));
             store8(q + c, _fp_f32_to_u8((v - mid) * f + mid));
             c = c + 1;
         }
@@ -189,10 +189,15 @@ fn saturation(buf, factor) {
     var i = 0;
     while (i < n) {
         var q = p + i * 4;
-        var r: f32 = _fp_u8_to_f32(load8(q));
-        var g: f32 = _fp_u8_to_f32(load8(q + 1));
-        var b: f32 = _fp_u8_to_f32(load8(q + 2));
-        var gray: f32 = _fp_luma_f32(r, g, b);
+        # Inline: helper calls are real calls (Cyrius leaves general inlining
+        # off by default), and this runs per pixel.
+        var r: f32 = f32_from(f64_from(load8(q)));
+        var g: f32 = f32_from(f64_from(load8(q + 1)));
+        var b: f32 = f32_from(f64_from(load8(q + 2)));
+        var kr: f32 = f32_from(0.299);
+        var kg: f32 = f32_from(0.587);
+        var kb: f32 = f32_from(0.114);
+        var gray: f32 = kr * r + kg * g + kb * b;
         store8(q, _fp_f32_to_u8(gray + f * (r - gray)));
         store8(q + 1, _fp_f32_to_u8(gray + f * (g - gray)));
         store8(q + 2, _fp_f32_to_u8(gray + f * (b - gray)));

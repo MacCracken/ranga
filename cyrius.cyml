@@ -73,4 +73,5 @@ stdlib = [
     "slice",
     "freelist",
     "tagged",
+    "bench",
 ]

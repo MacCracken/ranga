@@ -78,7 +78,7 @@ fn _cv_rgba_to_yuv420p(buf, cr, cg, cb, ur, ug, ub, vr, vg, vb, err_out) {
     if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
     var w = pixel_buffer_width(buf);
     var h = pixel_buffer_height(buf);
-    var out = pixel_buffer_zeroed(w, h, PF_YUV420P, err_out);
+    var out = pixel_buffer_uninit(w, h, PF_YUV420P, err_out);
     if (out == 0) { return 0; }
     var sp = pixel_buffer_data(buf);
     var dp = pixel_buffer_data(out);
@@ -129,7 +129,7 @@ fn _cv_yuv420p_to_rgba(buf, kr, kgu, kgv, kb, err_out) {
     if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
     var w = pixel_buffer_width(buf);
     var h = pixel_buffer_height(buf);
-    var out = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    var out = pixel_buffer_uninit(w, h, PF_RGBA8, err_out);
     if (out == 0) { return 0; }
     var sp = pixel_buffer_data(buf);
     var dp = pixel_buffer_data(out);
@@ -209,7 +209,7 @@ fn argb_to_nv12(buf, err_out) {
     if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
     var w = pixel_buffer_width(buf);
     var h = pixel_buffer_height(buf);
-    var out = pixel_buffer_zeroed(w, h, PF_NV12, err_out);
+    var out = pixel_buffer_uninit(w, h, PF_NV12, err_out);
     if (out == 0) { return 0; }
     var sp = pixel_buffer_data(buf);
     var dp = pixel_buffer_data(out);
@@ -261,7 +261,7 @@ fn nv12_to_rgba(buf, err_out) {
     if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
     var w = pixel_buffer_width(buf);
     var h = pixel_buffer_height(buf);
-    var out = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    var out = pixel_buffer_uninit(w, h, PF_RGBA8, err_out);
     if (out == 0) { return 0; }
     var sp = pixel_buffer_data(buf);
     var dp = pixel_buffer_data(out);
@@ -303,7 +303,7 @@ fn rgb8_to_rgba8(buf, err_out) {
     if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
     var w = pixel_buffer_width(buf);
     var h = pixel_buffer_height(buf);
-    var out = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    var out = pixel_buffer_uninit(w, h, PF_RGBA8, err_out);
     if (out == 0) { return 0; }
     var sp = pixel_buffer_data(buf);
     var dp = pixel_buffer_data(out);
@@ -327,7 +327,7 @@ fn rgba8_to_rgb8(buf, err_out) {
     if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
     var w = pixel_buffer_width(buf);
     var h = pixel_buffer_height(buf);
-    var out = pixel_buffer_zeroed(w, h, PF_RGB8, err_out);
+    var out = pixel_buffer_uninit(w, h, PF_RGB8, err_out);
     if (out == 0) { return 0; }
     var sp = pixel_buffer_data(buf);
     var dp = pixel_buffer_data(out);
@@ -350,7 +350,7 @@ fn argb8_to_rgba8(buf, err_out) {
     if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
     var w = pixel_buffer_width(buf);
     var h = pixel_buffer_height(buf);
-    var out = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    var out = pixel_buffer_uninit(w, h, PF_RGBA8, err_out);
     if (out == 0) { return 0; }
     var sp = pixel_buffer_data(buf);
     var dp = pixel_buffer_data(out);
@@ -374,7 +374,7 @@ fn rgba8_to_argb8(buf, err_out) {
     if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
     var w = pixel_buffer_width(buf);
     var h = pixel_buffer_height(buf);
-    var out = pixel_buffer_zeroed(w, h, PF_ARGB8, err_out);
+    var out = pixel_buffer_uninit(w, h, PF_ARGB8, err_out);
     if (out == 0) { return 0; }
     var sp = pixel_buffer_data(buf);
     var dp = pixel_buffer_data(out);
@@ -400,7 +400,7 @@ fn rgbaf32_to_rgba8(buf, err_out) {
     if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
     var w = pixel_buffer_width(buf);
     var h = pixel_buffer_height(buf);
-    var out = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    var out = pixel_buffer_uninit(w, h, PF_RGBA8, err_out);
     if (out == 0) { return 0; }
     var sp = pixel_buffer_data(buf);
     var dp = pixel_buffer_data(out);
@@ -434,7 +434,7 @@ fn rgba8_to_rgbaf32(buf, err_out) {
     if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
     var w = pixel_buffer_width(buf);
     var h = pixel_buffer_height(buf);
-    var out = pixel_buffer_zeroed(w, h, PF_RGBAF32, err_out);
+    var out = pixel_buffer_uninit(w, h, PF_RGBAF32, err_out);
     if (out == 0) { return 0; }
     var sp = pixel_buffer_data(buf);
     var dp = pixel_buffer_data(out);

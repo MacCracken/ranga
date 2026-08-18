@@ -213,6 +213,32 @@ fn bv_zeroed(n) {
     return v;
 }
 
+# Allocate `n` bytes WITHOUT zeroing, length already set to n.
+#
+# ⚠ The contents are whatever the allocator last left there. Use this only when
+# the caller provably writes every byte before any read — crop's per-row memcpy,
+# a flip, a format conversion. Anything that SKIPS pixels (affine_transform and
+# perspective_transform leave out-of-source pixels transparent) must keep
+# bv_zeroed, because the zero fill IS the transparent black.
+#
+# This exists because the zero fill is not free: crop was measured at 79.9x
+# Rust, and most of that was fl_calloc zeroing a buffer that the very next loop
+# overwrote in full.
+#must_use
+fn bv_uninit(n) {
+    var v = fl_alloc(_BV_HDR);
+    if (v == 0) { return 0; }
+    var data = 0;
+    if (n > 0) {
+        data = fl_alloc(n);
+        if (data == 0) { fl_free(v); return 0; }
+    }
+    store64(v, data);
+    store64(v + 8, n);
+    store64(v + 16, n);
+    return v;
+}
+
 #must_use
 fn bv_data(v) { return load64(v); }
 #must_use
@@ -706,6 +732,26 @@ fn pixel_buffer_zeroed(width, height, format, err_out) {
     var want = pixel_format_checked_buffer_size(format, width, height);
     if (ranga_is_err(want) == 1) { store64(err_out, want); return 0; }
     var bv = bv_zeroed(want);
+    if (bv == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    var b = fl_alloc(_PB_SIZE);
+    if (b == 0) { bv_free(bv); store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    store64(b, bv);
+    store64(b + 8, width);
+    store64(b + 16, height);
+    store64(b + 24, format);
+    store64(err_out, RG_ERR_NONE);
+    return b;
+}
+
+# Same shape as pixel_buffer_zeroed but WITHOUT the zero fill — see bv_uninit.
+# Only for callers that write every byte before reading any. A caller that
+# skips pixels (affine/perspective leave them transparent) must use the zeroed
+# form; using this there leaks allocator garbage into the image.
+#must_use
+fn pixel_buffer_uninit(width, height, format, err_out) {
+    var want = pixel_format_checked_buffer_size(format, width, height);
+    if (ranga_is_err(want) == 1) { store64(err_out, want); return 0; }
+    var bv = bv_uninit(want);
     if (bv == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
     var b = fl_alloc(_PB_SIZE);
     if (b == 0) { bv_free(bv); store64(err_out, RG_ERR_ALLOCATION); return 0; }
@@ -3387,7 +3433,8 @@ fn crop(buf, left, top, right, bottom, err_out) {
     if (ow == 0) { return pixel_buffer_zeroed(0, 0, PF_RGBA8, err_out); }
     if (oh == 0) { return pixel_buffer_zeroed(0, 0, PF_RGBA8, err_out); }
 
-    var out = pixel_buffer_zeroed(ow, oh, PF_RGBA8, err_out);
+    # Every byte is overwritten by the row memcpy below, so skip the zero fill.
+    var out = pixel_buffer_uninit(ow, oh, PF_RGBA8, err_out);
     if (out == 0) { return 0; }
     var sp = pixel_buffer_data(buf);
     var dp = pixel_buffer_data(out);
@@ -3421,7 +3468,8 @@ fn resize(buf, new_w, new_h, filter, err_out) {
     if (sw == 0) { return pixel_buffer_zeroed(0, 0, PF_RGBA8, err_out); }
     if (sh == 0) { return pixel_buffer_zeroed(0, 0, PF_RGBA8, err_out); }
 
-    var out = pixel_buffer_zeroed(new_w, new_h, PF_RGBA8, err_out);
+    # All three filters write every destination pixel.
+    var out = pixel_buffer_uninit(new_w, new_h, PF_RGBA8, err_out);
     if (out == 0) { return 0; }
     var sp = pixel_buffer_data(buf);
     var dp = pixel_buffer_data(out);
@@ -3534,7 +3582,7 @@ fn flip_horizontal(buf, err_out) {
     if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
     var w = pixel_buffer_width(buf);
     var h = pixel_buffer_height(buf);
-    var out = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    var out = pixel_buffer_uninit(w, h, PF_RGBA8, err_out);
     if (out == 0) { return 0; }
     var sp = pixel_buffer_data(buf);
     var dp = pixel_buffer_data(out);
@@ -3558,7 +3606,7 @@ fn flip_vertical(buf, err_out) {
     if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
     var w = pixel_buffer_width(buf);
     var h = pixel_buffer_height(buf);
-    var out = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    var out = pixel_buffer_uninit(w, h, PF_RGBA8, err_out);
     if (out == 0) { return 0; }
     var sp = pixel_buffer_data(buf);
     var dp = pixel_buffer_data(out);
@@ -4132,7 +4180,7 @@ fn contrast(buf, factor) {
         var q = p + i * 4;
         var c = 0;
         while (c < 3) {
-            var v: f32 = _fp_u8_to_f32(load8(q + c));
+            var v: f32 = f32_from(f64_from(load8(q + c)));
             store8(q + c, _fp_f32_to_u8((v - mid) * f + mid));
             c = c + 1;
         }
@@ -4153,10 +4201,15 @@ fn saturation(buf, factor) {
     var i = 0;
     while (i < n) {
         var q = p + i * 4;
-        var r: f32 = _fp_u8_to_f32(load8(q));
-        var g: f32 = _fp_u8_to_f32(load8(q + 1));
-        var b: f32 = _fp_u8_to_f32(load8(q + 2));
-        var gray: f32 = _fp_luma_f32(r, g, b);
+        # Inline: helper calls are real calls (Cyrius leaves general inlining
+        # off by default), and this runs per pixel.
+        var r: f32 = f32_from(f64_from(load8(q)));
+        var g: f32 = f32_from(f64_from(load8(q + 1)));
+        var b: f32 = f32_from(f64_from(load8(q + 2)));
+        var kr: f32 = f32_from(0.299);
+        var kg: f32 = f32_from(0.587);
+        var kb: f32 = f32_from(0.114);
+        var gray: f32 = kr * r + kg * g + kb * b;
         store8(q, _fp_f32_to_u8(gray + f * (r - gray)));
         store8(q + 1, _fp_f32_to_u8(gray + f * (g - gray)));
         store8(q + 2, _fp_f32_to_u8(gray + f * (b - gray)));
@@ -4649,11 +4702,20 @@ fn _fk_blur_pass_h(src, dst, w, h, kernel, klen, radius) {
             var ki = 0;
             while (ki < klen) {
                 var kv: f32 = load32(kernel + ki * 4);
-                var sx = _fk_clampi(x + ki - radius, w - 1);
+                var sx = x + ki - radius;
+                if (sx < 0) { sx = 0; }
+                if (sx > w - 1) { sx = w - 1; }
                 var idx = (y * w + sx) * 4;
-                rv = _fk_fma(rv, _fk_u8_to_f32(load8(src + idx)), kv);
-                gv = _fk_fma(gv, _fk_u8_to_f32(load8(src + idx + 1)), kv);
-                bv = _fk_fma(bv, _fk_u8_to_f32(load8(src + idx + 2)), kv);
+                # Arithmetic written INLINE rather than through _fk_fma /
+                # _fk_u8_to_f32. Cyrius leaves general inlining off by default
+                # (_INLINE_OK, compiler-internal), so each helper is a real
+                # call — six per tap here, on the hottest loop in the library.
+                var sr: f32 = f32_from(f64_from(load8(src + idx)));
+                var sg: f32 = f32_from(f64_from(load8(src + idx + 1)));
+                var sb: f32 = f32_from(f64_from(load8(src + idx + 2)));
+                rv = rv + sr * kv;
+                gv = gv + sg * kv;
+                bv = bv + sb * kv;
                 ki = ki + 1;
             }
             var oi = (y * w + x) * 4;
@@ -4683,11 +4745,16 @@ fn _fk_blur_pass_v(src, dst, w, h, kernel, klen, radius) {
             var ki = 0;
             while (ki < klen) {
                 var kv: f32 = load32(kernel + ki * 4);
-                var sy = _fk_clampi(y + ki - radius, h - 1);
+                var sy = y + ki - radius;
+                if (sy < 0) { sy = 0; }
+                if (sy > h - 1) { sy = h - 1; }
                 var idx = (sy * w + x) * 4;
-                rv = _fk_fma(rv, _fk_u8_to_f32(load8(src + idx)), kv);
-                gv = _fk_fma(gv, _fk_u8_to_f32(load8(src + idx + 1)), kv);
-                bv = _fk_fma(bv, _fk_u8_to_f32(load8(src + idx + 2)), kv);
+                var sr: f32 = f32_from(f64_from(load8(src + idx)));
+                var sg: f32 = f32_from(f64_from(load8(src + idx + 1)));
+                var sb: f32 = f32_from(f64_from(load8(src + idx + 2)));
+                rv = rv + sr * kv;
+                gv = gv + sg * kv;
+                bv = bv + sb * kv;
                 ki = ki + 1;
             }
             var oi = (y * w + x) * 4;
@@ -4825,16 +4892,17 @@ fn vignette(buf, strength) {
         while (x < w) {
             var fx: f32 = f32_from(f64_from(x));
             var fy: f32 = f32_from(f64_from(y));
-            var dx: f32 = _fk_sub(_fk_add(fx, halfv), cx);
-            var dy: f32 = _fk_sub(_fk_add(fy, halfv), cy);
-            var rad: f32 = f32_from(f64_sqrt(f32_to(_fk_add(_fk_mul(dx, dx), _fk_mul(dy, dy)))));
-            var d: f32 = _fk_div(rad, maxd);
-            var factor: f32 = _fk_sub(one, _fk_mul(_fk_mul(st, d), d));
+            var dx: f32 = fx + halfv - cx;
+            var dy: f32 = fy + halfv - cy;
+            var sq: f32 = dx * dx + dy * dy;
+            var rad: f32 = f32_from(f64_sqrt(f32_to(sq)));
+            var d: f32 = rad / maxd;
+            var factor: f32 = one - st * d * d;
             var i = (y * w + x) * 4;
             var c = 0;
             while (c < 3) {
-                var v: f32 = _fk_u8_to_f32(load8(p + i + c));
-                store8(p + i + c, _fk_f32_to_u8(_fk_mul(v, factor)));
+                var v: f32 = f32_from(f64_from(load8(p + i + c)));
+                store8(p + i + c, _fk_f32_to_u8(v * factor));
                 c = c + 1;
             }
             x = x + 1;
@@ -5264,20 +5332,22 @@ fn bilateral(buf, radius, sigma_space, sigma_color, err_out) {
                 while (bx <= radius) {
                     var sx = _fk_clampi(x + bx, w - 1);
                     var si = (sy * w + sx) * 4;
-                    var sr: f32 = _fk_u8_to_f32(load8(sp + si));
-                    var sg: f32 = _fk_u8_to_f32(load8(sp + si + 1));
-                    var sb: f32 = _fk_u8_to_f32(load8(sp + si + 2));
+                    var sr: f32 = f32_from(f64_from(load8(sp + si)));
+                    var sg: f32 = f32_from(f64_from(load8(sp + si + 1)));
+                    var sb: f32 = f32_from(f64_from(load8(sp + si + 2)));
                     var spw: f32 = load32(sw_tab + ((by + radius) * diameter + (bx + radius)) * 4);
-                    var dr: f32 = _fk_sub(sr, cr);
-                    var dg: f32 = _fk_sub(sg, cg);
-                    var db: f32 = _fk_sub(sb, cb);
-                    var cd: f32 = _fk_add(_fk_add(_fk_mul(dr, dr), _fk_mul(dg, dg)), _fk_mul(db, db));
+                    # Inline arithmetic — see the blur passes: helper calls are
+                    # real calls, and this is the innermost loop of the module.
+                    var dr: f32 = sr - cr;
+                    var dg: f32 = sg - cg;
+                    var db: f32 = sb - cb;
+                    var cd: f32 = dr * dr + dg * dg + db * db;
                     var cw: f32 = f32_from(_rg_exp(f64_mul(f32_to(cd), color_coeff)));
-                    var weight: f32 = _fk_mul(spw, cw);
-                    sum_r = _fk_fma(sum_r, sr, weight);
-                    sum_g = _fk_fma(sum_g, sg, weight);
-                    sum_b = _fk_fma(sum_b, sb, weight);
-                    sum_w = _fk_add(sum_w, weight);
+                    var weight: f32 = spw * cw;
+                    sum_r = sum_r + sr * weight;
+                    sum_g = sum_g + sg * weight;
+                    sum_b = sum_b + sb * weight;
+                    sum_w = sum_w + weight;
                     bx = bx + 1;
                 }
                 by = by + 1;
@@ -5835,7 +5905,7 @@ fn _cv_rgba_to_yuv420p(buf, cr, cg, cb, ur, ug, ub, vr, vg, vb, err_out) {
     if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
     var w = pixel_buffer_width(buf);
     var h = pixel_buffer_height(buf);
-    var out = pixel_buffer_zeroed(w, h, PF_YUV420P, err_out);
+    var out = pixel_buffer_uninit(w, h, PF_YUV420P, err_out);
     if (out == 0) { return 0; }
     var sp = pixel_buffer_data(buf);
     var dp = pixel_buffer_data(out);
@@ -5886,7 +5956,7 @@ fn _cv_yuv420p_to_rgba(buf, kr, kgu, kgv, kb, err_out) {
     if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
     var w = pixel_buffer_width(buf);
     var h = pixel_buffer_height(buf);
-    var out = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    var out = pixel_buffer_uninit(w, h, PF_RGBA8, err_out);
     if (out == 0) { return 0; }
     var sp = pixel_buffer_data(buf);
     var dp = pixel_buffer_data(out);
@@ -5966,7 +6036,7 @@ fn argb_to_nv12(buf, err_out) {
     if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
     var w = pixel_buffer_width(buf);
     var h = pixel_buffer_height(buf);
-    var out = pixel_buffer_zeroed(w, h, PF_NV12, err_out);
+    var out = pixel_buffer_uninit(w, h, PF_NV12, err_out);
     if (out == 0) { return 0; }
     var sp = pixel_buffer_data(buf);
     var dp = pixel_buffer_data(out);
@@ -6018,7 +6088,7 @@ fn nv12_to_rgba(buf, err_out) {
     if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
     var w = pixel_buffer_width(buf);
     var h = pixel_buffer_height(buf);
-    var out = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    var out = pixel_buffer_uninit(w, h, PF_RGBA8, err_out);
     if (out == 0) { return 0; }
     var sp = pixel_buffer_data(buf);
     var dp = pixel_buffer_data(out);
@@ -6060,7 +6130,7 @@ fn rgb8_to_rgba8(buf, err_out) {
     if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
     var w = pixel_buffer_width(buf);
     var h = pixel_buffer_height(buf);
-    var out = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    var out = pixel_buffer_uninit(w, h, PF_RGBA8, err_out);
     if (out == 0) { return 0; }
     var sp = pixel_buffer_data(buf);
     var dp = pixel_buffer_data(out);
@@ -6084,7 +6154,7 @@ fn rgba8_to_rgb8(buf, err_out) {
     if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
     var w = pixel_buffer_width(buf);
     var h = pixel_buffer_height(buf);
-    var out = pixel_buffer_zeroed(w, h, PF_RGB8, err_out);
+    var out = pixel_buffer_uninit(w, h, PF_RGB8, err_out);
     if (out == 0) { return 0; }
     var sp = pixel_buffer_data(buf);
     var dp = pixel_buffer_data(out);
@@ -6107,7 +6177,7 @@ fn argb8_to_rgba8(buf, err_out) {
     if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
     var w = pixel_buffer_width(buf);
     var h = pixel_buffer_height(buf);
-    var out = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    var out = pixel_buffer_uninit(w, h, PF_RGBA8, err_out);
     if (out == 0) { return 0; }
     var sp = pixel_buffer_data(buf);
     var dp = pixel_buffer_data(out);
@@ -6131,7 +6201,7 @@ fn rgba8_to_argb8(buf, err_out) {
     if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
     var w = pixel_buffer_width(buf);
     var h = pixel_buffer_height(buf);
-    var out = pixel_buffer_zeroed(w, h, PF_ARGB8, err_out);
+    var out = pixel_buffer_uninit(w, h, PF_ARGB8, err_out);
     if (out == 0) { return 0; }
     var sp = pixel_buffer_data(buf);
     var dp = pixel_buffer_data(out);
@@ -6157,7 +6227,7 @@ fn rgbaf32_to_rgba8(buf, err_out) {
     if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
     var w = pixel_buffer_width(buf);
     var h = pixel_buffer_height(buf);
-    var out = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    var out = pixel_buffer_uninit(w, h, PF_RGBA8, err_out);
     if (out == 0) { return 0; }
     var sp = pixel_buffer_data(buf);
     var dp = pixel_buffer_data(out);
@@ -6191,7 +6261,7 @@ fn rgba8_to_rgbaf32(buf, err_out) {
     if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
     var w = pixel_buffer_width(buf);
     var h = pixel_buffer_height(buf);
-    var out = pixel_buffer_zeroed(w, h, PF_RGBAF32, err_out);
+    var out = pixel_buffer_uninit(w, h, PF_RGBAF32, err_out);
     if (out == 0) { return 0; }
     var sp = pixel_buffer_data(buf);
     var dp = pixel_buffer_data(out);

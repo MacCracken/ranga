@@ -295,6 +295,41 @@ then differentially test the asm against it across an exhaustive sweep. That is
 what makes hand-assembled bytes reviewable — a reader checks the fallback and
 trusts the test, rather than checking the hex.
 
+### Hot loops must be written flat — helper calls are real calls
+
+Cyrius leaves general function inlining **off by default** (`_INLINE_OK`, a
+compiler-internal default-0 a consumer cannot switch on). The readable factoring
+that is right for module surface is wrong on a per-pixel or per-tap path.
+Measured by rewriting the separable blur passes to do their f32 arithmetic
+inline rather than through `_fk_fma` / `_fk_u8_to_f32`:
+
+| | before | after | speedup |
+|---|---:|---:|---:|
+| `box_blur_r3_1080p` | 833.03 ms | 395.10 ms | **2.11x** |
+| `gaussian_blur_r3_1080p` | 832.98 ms | 399.32 ms | **2.09x** |
+| `vignette_1080p` | 178.43 ms | 122.98 ms | 1.45x |
+
+Keep the helpers for clarity everywhere else; flatten the innermost loop.
+
+### Check the allocator before blaming your own code
+
+`fl_calloc` zeroes byte-at-a-time on top of an `mmap` the kernel already zeroed —
+measured **10.9 ms vs 29.6 us** for an 8.3 MB frame, a 369x gap. That single
+stdlib detail was most of `crop` being 79.9x slower than Rust, and none of it
+was in ranga's code. Filed upstream as
+`2026-08-17-fl-calloc-byte-loop-over-already-zero-mmap.md`.
+
+The lesson generalises: when a ported function is dramatically slower than its
+Rust original and the arithmetic looks equivalent, measure the primitives it
+sits on before rewriting the function.
+
+⚠ The consumer-side workaround (`bv_uninit`) has a hazard that **cannot be
+tested**: large allocations come from fresh mmap, so an incorrect use still
+reads as zero in every test and only breaks once the allocator recycles. A
+mutation swapping `affine_transform` to the uninitialised path SURVIVED the full
+suite for exactly that reason. The comment on `bv_uninit` is the only guard —
+treat it as review discipline, not a tested invariant.
+
 ### Mutation-test each module the moment its suite goes green
 
 Twenty sed-level defects take about two minutes and are a far better use of time

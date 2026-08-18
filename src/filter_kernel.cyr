@@ -125,11 +125,20 @@ fn _fk_blur_pass_h(src, dst, w, h, kernel, klen, radius) {
             var ki = 0;
             while (ki < klen) {
                 var kv: f32 = load32(kernel + ki * 4);
-                var sx = _fk_clampi(x + ki - radius, w - 1);
+                var sx = x + ki - radius;
+                if (sx < 0) { sx = 0; }
+                if (sx > w - 1) { sx = w - 1; }
                 var idx = (y * w + sx) * 4;
-                rv = _fk_fma(rv, _fk_u8_to_f32(load8(src + idx)), kv);
-                gv = _fk_fma(gv, _fk_u8_to_f32(load8(src + idx + 1)), kv);
-                bv = _fk_fma(bv, _fk_u8_to_f32(load8(src + idx + 2)), kv);
+                # Arithmetic written INLINE rather than through _fk_fma /
+                # _fk_u8_to_f32. Cyrius leaves general inlining off by default
+                # (_INLINE_OK, compiler-internal), so each helper is a real
+                # call — six per tap here, on the hottest loop in the library.
+                var sr: f32 = f32_from(f64_from(load8(src + idx)));
+                var sg: f32 = f32_from(f64_from(load8(src + idx + 1)));
+                var sb: f32 = f32_from(f64_from(load8(src + idx + 2)));
+                rv = rv + sr * kv;
+                gv = gv + sg * kv;
+                bv = bv + sb * kv;
                 ki = ki + 1;
             }
             var oi = (y * w + x) * 4;
@@ -159,11 +168,16 @@ fn _fk_blur_pass_v(src, dst, w, h, kernel, klen, radius) {
             var ki = 0;
             while (ki < klen) {
                 var kv: f32 = load32(kernel + ki * 4);
-                var sy = _fk_clampi(y + ki - radius, h - 1);
+                var sy = y + ki - radius;
+                if (sy < 0) { sy = 0; }
+                if (sy > h - 1) { sy = h - 1; }
                 var idx = (sy * w + x) * 4;
-                rv = _fk_fma(rv, _fk_u8_to_f32(load8(src + idx)), kv);
-                gv = _fk_fma(gv, _fk_u8_to_f32(load8(src + idx + 1)), kv);
-                bv = _fk_fma(bv, _fk_u8_to_f32(load8(src + idx + 2)), kv);
+                var sr: f32 = f32_from(f64_from(load8(src + idx)));
+                var sg: f32 = f32_from(f64_from(load8(src + idx + 1)));
+                var sb: f32 = f32_from(f64_from(load8(src + idx + 2)));
+                rv = rv + sr * kv;
+                gv = gv + sg * kv;
+                bv = bv + sb * kv;
                 ki = ki + 1;
             }
             var oi = (y * w + x) * 4;
@@ -301,16 +315,17 @@ fn vignette(buf, strength) {
         while (x < w) {
             var fx: f32 = f32_from(f64_from(x));
             var fy: f32 = f32_from(f64_from(y));
-            var dx: f32 = _fk_sub(_fk_add(fx, halfv), cx);
-            var dy: f32 = _fk_sub(_fk_add(fy, halfv), cy);
-            var rad: f32 = f32_from(f64_sqrt(f32_to(_fk_add(_fk_mul(dx, dx), _fk_mul(dy, dy)))));
-            var d: f32 = _fk_div(rad, maxd);
-            var factor: f32 = _fk_sub(one, _fk_mul(_fk_mul(st, d), d));
+            var dx: f32 = fx + halfv - cx;
+            var dy: f32 = fy + halfv - cy;
+            var sq: f32 = dx * dx + dy * dy;
+            var rad: f32 = f32_from(f64_sqrt(f32_to(sq)));
+            var d: f32 = rad / maxd;
+            var factor: f32 = one - st * d * d;
             var i = (y * w + x) * 4;
             var c = 0;
             while (c < 3) {
-                var v: f32 = _fk_u8_to_f32(load8(p + i + c));
-                store8(p + i + c, _fk_f32_to_u8(_fk_mul(v, factor)));
+                var v: f32 = f32_from(f64_from(load8(p + i + c)));
+                store8(p + i + c, _fk_f32_to_u8(v * factor));
                 c = c + 1;
             }
             x = x + 1;
@@ -740,20 +755,22 @@ fn bilateral(buf, radius, sigma_space, sigma_color, err_out) {
                 while (bx <= radius) {
                     var sx = _fk_clampi(x + bx, w - 1);
                     var si = (sy * w + sx) * 4;
-                    var sr: f32 = _fk_u8_to_f32(load8(sp + si));
-                    var sg: f32 = _fk_u8_to_f32(load8(sp + si + 1));
-                    var sb: f32 = _fk_u8_to_f32(load8(sp + si + 2));
+                    var sr: f32 = f32_from(f64_from(load8(sp + si)));
+                    var sg: f32 = f32_from(f64_from(load8(sp + si + 1)));
+                    var sb: f32 = f32_from(f64_from(load8(sp + si + 2)));
                     var spw: f32 = load32(sw_tab + ((by + radius) * diameter + (bx + radius)) * 4);
-                    var dr: f32 = _fk_sub(sr, cr);
-                    var dg: f32 = _fk_sub(sg, cg);
-                    var db: f32 = _fk_sub(sb, cb);
-                    var cd: f32 = _fk_add(_fk_add(_fk_mul(dr, dr), _fk_mul(dg, dg)), _fk_mul(db, db));
+                    # Inline arithmetic — see the blur passes: helper calls are
+                    # real calls, and this is the innermost loop of the module.
+                    var dr: f32 = sr - cr;
+                    var dg: f32 = sg - cg;
+                    var db: f32 = sb - cb;
+                    var cd: f32 = dr * dr + dg * dg + db * db;
                     var cw: f32 = f32_from(_rg_exp(f64_mul(f32_to(cd), color_coeff)));
-                    var weight: f32 = _fk_mul(spw, cw);
-                    sum_r = _fk_fma(sum_r, sr, weight);
-                    sum_g = _fk_fma(sum_g, sg, weight);
-                    sum_b = _fk_fma(sum_b, sb, weight);
-                    sum_w = _fk_add(sum_w, weight);
+                    var weight: f32 = spw * cw;
+                    sum_r = sum_r + sr * weight;
+                    sum_g = sum_g + sg * weight;
+                    sum_b = sum_b + sb * weight;
+                    sum_w = sum_w + weight;
                     bx = bx + 1;
                 }
                 by = by + 1;
