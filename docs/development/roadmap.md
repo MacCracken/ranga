@@ -116,10 +116,18 @@ three consecutive API 529 failures made the agent path unreliable.
 - [x] `brightness` vectorised end-to-end — 4 pixels per iteration with an alpha
       mask-and-restore (paddusb cannot skip a lane), plus a scalar tail. Proven
       to agree with the scalar path on a deliberately non-multiple-of-4 buffer.
-- [ ] Remaining kernels — `_cv_y_row` (pmaddwd), `_cv_yuv_row_to_rgba`,
-      `blend_row_normal`, `grayscale`. All four dispatch points are in place and
-      the primitives + verified ABI are now proven, so these are additive.
-      Plan §3 item 4 (256-bit AVX2) sits behind them.
+- [x] `_sx_luma_row_sse2` — pmaddwd, 2 px/iter, the whole loop inside one
+      `asm { }` block with branch displacements taken from `as`/`objdump`.
+      Differentially tested against an independent scalar reference with
+      DIFFERENT values per lane, across all three coefficient standards.
+      Wired into `_cv_y_row`, `grayscale` and `threshold` — one kernel, four
+      call sites.
+- [x] `invert` — vectorised with the pass-1 primitives, no new assembly:
+      `255 - c` on a byte IS a saturating subtract.
+- [ ] `blend_row_normal` (12.9×) — needs a per-pixel alpha broadcast (pshuflw)
+      plus a vector div255; materially more complex than the luma kernel.
+- [ ] `_cv_yuv_row_to_rgba` — got a 1.43× loop hoist but no kernel yet.
+      Plan §3 item 4 (256-bit AVX2) sits behind both.
 
 ⚠ **A correct SIMD path is invisible to output testing.** Mutating the group
 count so fewer pixels take the vector path leaves every assertion passing,
@@ -178,10 +186,29 @@ reading the spread rather than the median:
 - `yuv420p_to_rgba` **1.40x** — pure loop hoist, chroma row pointers out of the
   inner loop.
 
-Still open: `blend_row_normal` (12.8x) and `grayscale` (10.7x) need kernels of
-their own — grayscale scatters its result back across three channels rather
-than to a separate plane, so it needs a different shape from the luma kernel.
-Plan §3 item 4 (256-bit AVX2) sits behind those.
+**Third pass — one kernel, four call sites.** `_sx_luma_row_sse2` turned out to
+serve `grayscale`, `threshold` and all three YUV forward converters, because
+they share the same integer luma shape:
+
+- `threshold` **1.62x**, `grayscale` **1.50x** — luma vectorised, scatter left
+  scalar.
+
+**Median is now 8.6x (from 10.6x), worst case 46.0x (from 79.9x).**
+
+Still open, in priority order:
+
+1. **`crop` 46.0x and `flip_vertical` 23.9x** — still `memcpy`-bound and still
+   the worst ratios. The real fix is upstream (`fl_calloc`); the consumer
+   workaround has already been applied and this is what remains.
+2. **The blurs at 21.4x** are now the largest ABSOLUTE cost (~396 ms each).
+   Rust's blur is *also* scalar f32 at default features, so this is pure
+   language overhead, and the likely culprit is that
+   `f32_from(f64_from(load8(..)))` is two conversions per sample where Rust's
+   `as f32` is one. Worth investigating a direct int->f32 path before more
+   assembly.
+3. **`blend_row_normal` 12.9x** — needs a per-pixel alpha broadcast (pshuflw)
+   plus a vector div255, materially more complex than the luma kernel.
+4. Plan §3 item 4 (256-bit AVX2) sits behind all of the above.
 
 ### M7 — Parity
 

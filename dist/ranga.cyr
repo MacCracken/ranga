@@ -4390,18 +4390,52 @@ fn curves(buf, lut) {
 # ── grayscale ────────
 # The INTEGER 77/150/29 kernel with `>> 8`, matching grayscale_scalar. Not the
 # float 0.299/0.587/0.114 form — they give different bytes.
+# The luma ARITHMETIC is vectorised by reusing _sx_luma_row_sse2 (2 pixels per
+# iteration, pmaddwd) into a scratch plane; the SCATTER back across R/G/B stays
+# scalar.
+#
+# Splitting it this way is deliberate. A fully-vectorised scatter would need to
+# expand each luma byte across three lanes of a 4-byte pixel while leaving the
+# fourth alone — punpck plus a masked merge, a second kernel's worth of hand
+# assembly. Reusing the already-differentially-tested luma kernel captures the
+# multiply-and-shift half at no new risk, and the remaining scalar half is
+# three stores per pixel rather than three loads, three multiplies, two adds and
+# a shift.
 fn grayscale(buf) {
     var rc = _fp_validate_rgba8(buf);
     if (rc != RG_ERR_NONE) { return rc; }
     var p = pixel_buffer_data(buf);
     var n = pixel_buffer_pixel_count(buf);
-    var i = 0;
+    if (n == 0) { return RG_ERR_NONE; }
+
+    var pairs = n / 2;
+    if (pairs > 0) {
+        var luma = fl_alloc(pairs * 2);
+        if (luma == 0) { return RG_ERR_ALLOCATION; }
+        var coef = fl_alloc(16);
+        if (coef == 0) { fl_free(luma); return RG_ERR_ALLOCATION; }
+        _sx_luma_coef(coef, 77, 150, 29);
+        _sx_luma_row_sse2(p, luma, pairs, coef);
+        var k = 0;
+        var lim = pairs * 2;
+        while (k < lim) {
+            var g = load8(luma + k);
+            var q = p + k * 4;
+            store8(q, g);
+            store8(q + 1, g);
+            store8(q + 2, g);
+            k = k + 1;
+        }
+        fl_free(coef); fl_free(luma);
+    }
+
+    var i = pairs * 2;
     while (i < n) {
-        var q = p + i * 4;
-        var gray = _fp_luma_u8(load8(q), load8(q + 1), load8(q + 2));
-        store8(q, gray);
-        store8(q + 1, gray);
-        store8(q + 2, gray);
+        var q2 = p + i * 4;
+        var gray = _fp_luma_u8(load8(q2), load8(q2 + 1), load8(q2 + 2));
+        store8(q2, gray);
+        store8(q2 + 1, gray);
+        store8(q2 + 2, gray);
         i = i + 1;
     }
     return RG_ERR_NONE;
@@ -4604,20 +4638,48 @@ fn channel_mixer(buf, matrix) {
 
 # ── threshold ────────
 # Integer luminance against `level`, inclusive: `lum >= level` is white.
+# Same split as grayscale: the luma is the SSE2 kernel, the compare-and-scatter
+# is scalar. threshold and grayscale share the integer 77/150/29 kernel exactly,
+# so vectorising one gave the other for free.
 fn threshold(buf, level) {
     var rc = _fp_validate_rgba8(buf);
     if (rc != RG_ERR_NONE) { return rc; }
     var p = pixel_buffer_data(buf);
     var n = pixel_buffer_pixel_count(buf);
-    var i = 0;
+    if (n == 0) { return RG_ERR_NONE; }
+
+    var pairs = n / 2;
+    if (pairs > 0) {
+        var luma = fl_alloc(pairs * 2);
+        if (luma == 0) { return RG_ERR_ALLOCATION; }
+        var coef = fl_alloc(16);
+        if (coef == 0) { fl_free(luma); return RG_ERR_ALLOCATION; }
+        _sx_luma_coef(coef, 77, 150, 29);
+        _sx_luma_row_sse2(p, luma, pairs, coef);
+        var k = 0;
+        var lim = pairs * 2;
+        while (k < lim) {
+            var v = 0;
+            # Inclusive: lum == level is white.
+            if (load8(luma + k) >= level) { v = 255; }
+            var q = p + k * 4;
+            store8(q, v);
+            store8(q + 1, v);
+            store8(q + 2, v);
+            k = k + 1;
+        }
+        fl_free(coef); fl_free(luma);
+    }
+
+    var i = pairs * 2;
     while (i < n) {
-        var q = p + i * 4;
-        var lum = _fp_luma_u8(load8(q), load8(q + 1), load8(q + 2));
-        var v = 0;
-        if (lum >= level) { v = 255; }
-        store8(q, v);
-        store8(q + 1, v);
-        store8(q + 2, v);
+        var q2 = p + i * 4;
+        var lum = _fp_luma_u8(load8(q2), load8(q2 + 1), load8(q2 + 2));
+        var v2 = 0;
+        if (lum >= level) { v2 = 255; }
+        store8(q2, v2);
+        store8(q2 + 1, v2);
+        store8(q2 + 2, v2);
         i = i + 1;
     }
     return RG_ERR_NONE;

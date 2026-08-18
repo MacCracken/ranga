@@ -242,6 +242,31 @@ assert_eq(px3(b6, 1, 149, 149, 149), 1, "grayscale green -> 149");
 # 28, not 29 — this is the integer kernel, not the float one.
 assert_eq(px3(b6, 2, 28, 28, 28), 1, "grayscale blue -> 28, the INTEGER kernel result");
 assert_eq(chan(b6, 2, 3), 200, "grayscale leaves alpha alone");
+# grayscale is vectorised (luma via the SSE2 kernel, scatter scalar), so it
+# needs SIMD-group + odd-tail coverage. Five pixels is two pairs plus one tail.
+var g5 = mkbuf(5, 1);
+put(g5, 0, 255, 0, 0, 11);
+put(g5, 1, 0, 255, 0, 22);
+put(g5, 2, 0, 0, 255, 33);
+put(g5, 3, 128, 128, 128, 44);
+put(g5, 4, 255, 255, 255, 55);
+assert_eq(grayscale(g5), RG_ERR_NONE, "5-pixel grayscale succeeds");
+assert_eq(px3(g5, 0, 76, 76, 76), 1, "SIMD pair 0 pixel 0: red -> 76");
+assert_eq(px3(g5, 1, 149, 149, 149), 1, "SIMD pair 0 pixel 1: green -> 149");
+assert_eq(px3(g5, 2, 28, 28, 28), 1, "SIMD pair 1 pixel 0: blue -> 28");
+assert_eq(px3(g5, 3, 128, 128, 128), 1, "SIMD pair 1 pixel 1: grey stays");
+assert_eq(px3(g5, 4, 255, 255, 255), 1, "SCALAR tail pixel 4: white -> 255");
+assert_eq(chan(g5, 0, 3), 11, "alpha preserved in the SIMD path");
+assert_eq(chan(g5, 4, 3), 55, "alpha preserved in the scalar tail");
+pixel_buffer_free(g5);
+
+# A single pixel is all tail.
+var g1 = mkbuf(1, 1);
+put(g1, 0, 0, 0, 255, 99);
+assert_eq(grayscale(g1), RG_ERR_NONE, "1-pixel grayscale succeeds");
+assert_eq(px3(g1, 0, 28, 28, 28), 1, "a 1-pixel image goes entirely through the tail");
+pixel_buffer_free(g1);
+
 assert_eq(grayscale(argb), RG_ERR_INVALID_FORMAT, "grayscale rejects non-Rgba8");
 
 test_group("invert");
@@ -282,6 +307,24 @@ assert_eq(px3(b8, 0, 255, 255, 255), 1, "lum == level is WHITE (>=, not >)");
 put(b8, 0, 0, 0, 255, 255);
 assert_eq(threshold(b8, 29), RG_ERR_NONE, "threshold one above the luma succeeds");
 assert_eq(px3(b8, 0, 0, 0, 0), 1, "lum one below level is black");
+
+# threshold is vectorised too — 3 pixels is one SIMD pair plus one tail pixel,
+# and the inclusive boundary must hold on BOTH paths.
+var t3 = mkbuf(3, 1);
+put(t3, 0, 0, 0, 255, 255);     # luma 28
+put(t3, 1, 0, 255, 0, 255);     # luma 149
+put(t3, 2, 0, 0, 255, 255);     # luma 28, in the scalar tail
+assert_eq(threshold(t3, 28), RG_ERR_NONE, "3-pixel threshold succeeds");
+assert_eq(px3(t3, 0, 255, 255, 255), 1, "SIMD pair: lum == level is white");
+assert_eq(px3(t3, 1, 255, 255, 255), 1, "SIMD pair: above level is white");
+assert_eq(px3(t3, 2, 255, 255, 255), 1, "SCALAR tail: lum == level is white too");
+put(t3, 0, 0, 0, 255, 255);
+put(t3, 1, 0, 0, 255, 255);
+put(t3, 2, 0, 0, 255, 255);
+assert_eq(threshold(t3, 29), RG_ERR_NONE, "3-pixel threshold above succeeds");
+assert_eq(px3(t3, 0, 0, 0, 0), 1, "SIMD pair: below level is black");
+assert_eq(px3(t3, 2, 0, 0, 0), 1, "SCALAR tail: below level is black");
+pixel_buffer_free(t3);
 
 # ================================================================
 # hue_shift
