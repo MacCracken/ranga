@@ -119,6 +119,8 @@ Each of these cost a compile cycle or a wrong guess this round.
 | f32 math | `ganita_f32_*` (23 fns) | ships in cycc 6.5.24 |
 | f64 cbrt | `_rg_cbrt` (ours) | there is **no** f64 cbrt in the tree |
 | negative literal | `(0 - 1)` | |
+| right shift | `>>` logical, `>>>` arithmetic | ⚠ **reverse of JS/Java.** Pick by the SIGNEDNESS of the Rust operand: a `u64`/`u16` shift needs `>>`, an `i16`/`i32` shift that can go negative needs `>>>`. Getting it wrong is silent — a negative product zero-fills into a large positive |
+| `stack` as an identifier | reserved | v5.5.36 stack-local array qualifier. Using it yields `expected '(', got ')'` pointing at an unrelated line several statements later |
 | byte from a buffer | `load8` | zero-extends, so `0xFF` reads back 255 |
 | `[lib] modules = []` | invalid | `distlib` fails; needs ≥1 real module |
 | line length | ≤ 120 chars | lint warns; hoist long assertion args into locals |

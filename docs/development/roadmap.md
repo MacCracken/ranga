@@ -100,10 +100,29 @@ found a use-after-free in the composite tests and four histogram assertions that
 passed against deliberately broken code. The second half was ported inline after
 three consecutive API 529 failures made the agent path unreliable.
 
-### M3 — SIMD modules — next
+### M3 — SIMD modules — scalar parity ✅ (1,119 assertions green across the port)
 
-`convert`, `blend`. Scalar path first for correctness parity, then the `asm { }`
-kernels — SIMD ships in 2.0.0, not deferred.
+- [x] `src/blend.cyr` — `BlendMode` (12 modes), `blend_pixel`,
+      `blend_pixel_argb`, `blend_row_normal` (+ argb variant), `blend_row`.
+      87 assertions; 14/18 mutants caught, the other 4 provably unobservable.
+- [x] `src/convert.cyr` — all 14 fns: BT.601/709/2020 in both directions,
+      NV12 both ways, and the six interleaved/f32 format converters.
+      96 assertions; 17/17 mutants caught.
+- [ ] `asm { }` vector kernels — the SSE2/AVX2/NEON paths behind
+      `blend_row_normal`, `_cv_y_row` and `_cv_yuv_row_to_rgba`. Both modules
+      dispatch through those three points, so the kernels slot in without
+      touching a caller. Ports plan §3 items 3-5.
+
+Not fanned out to agents, per `port-mechanics.md` — and the shift-direction bug
+below is exactly why.
+
+⚠ **Shift direction is per-call-site, and Cyrius spells it backwards from most
+languages**: `>>` is LOGICAL, `>>>` is ARITHMETIC. Which is correct depends on
+the signedness of the Rust operand — xorshift shifts a `u64` so `>>` is right,
+while the YUV inverse shifts an `i16` whose `(U-128)` is genuinely negative, so
+`>>>` is required. Using `>>` there zero-filled a negative product into a large
+positive and blue came back 255 instead of 0. Neither answer generalises; check
+the Rust operand type at every shift.
 
 ### M4 — ICC
 

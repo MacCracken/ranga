@@ -1,0 +1,454 @@
+# convert.cyr -- pixel format and colour-space conversions
+# Ported from rust-old/src/convert.rs (1272 lines). Private prefix: _cv_
+#
+# SIMD. Rust carries SSE2 and NEON kernels for the Y-row and YUV-inverse loops,
+# each behind a complete scalar fallback. This module ports the SCALAR
+# fallbacks; the vector kernels need `asm { }` blocks (plan §3 items 3-5) and
+# land separately. `_cv_y_row` and `_cv_yuv_row_to_rgba` are the dispatch
+# points, so a vector path slots in without touching any caller.
+#
+# ARITHMETIC. Every conversion here is fixed-point INTEGER — coefficients
+# scaled by 256 and shifted back. There is no float anywhere except the two
+# RgbaF32 converters at the end. That is Rust's design and it is what makes
+# these exactly reproducible; do not "modernise" them into float.
+#
+# ⚠ SHIFT DIRECTION IS NOT UNIFORM, and Cyrius spells it the opposite way round
+# from most languages: `>>` is LOGICAL (zero-fill) and `>>>` is ARITHMETIC
+# (sign-preserving). Which one is correct depends on the signedness of the Rust
+# operand being ported:
+#
+#   luma / forward chroma  -> Rust operand is u16/i32 and the value is never
+#                             negative, so `>>` (logical) is right.
+#   INVERSE chroma         -> Rust operand is i16 and (U-128)/(V-128) are
+#                             genuinely negative, so `>>>` (arithmetic) is
+#                             required. Using `>>` here zero-fills a negative
+#                             product into a huge positive, and blue came back
+#                             255 instead of 0 for pure red.
+#
+# The same question in blend/filter_kernel's xorshift goes the OTHER way — Rust
+# shifts a u64 there, so `>>` is correct. Check the Rust operand type at every
+# shift; neither answer generalises.
+#
+# ERROR MODEL. Every function allocates and returns a new PixelBuffer, so all
+# use the err_out pointer convention and return 0 on failure.
+
+#must_use
+fn _cv_expect_format(buf, want) {
+    if (pixel_buffer_format(buf) != want) { return RG_ERR_INVALID_FORMAT; }
+    return RG_ERR_NONE;
+}
+
+#must_use
+fn _cv_clamp255(v) {
+    if (v < 0) { return 0; }
+    if (v > 255) { return 255; }
+    return v;
+}
+
+#must_use
+fn _cv_div_ceil2(n) { return (n + 1) / 2; }
+
+# ── luma row ────────
+# Y = (cr*R + cg*G + cb*B) >> 8. Each coefficient triple sums to 256, which is
+# what makes `>> 8` an exact divide and maps white to exactly 255 — a triple
+# that does not sum to 256 shifts the whole luma range.
+#
+#   BT.601  (77, 150, 29)
+#   BT.709  (54, 183, 19)
+#   BT.2020 (67, 174, 15)
+fn _cv_y_row(src, dst, n, cr, cg, cb) {
+    var i = 0;
+    while (i < n) {
+        var p = src + i * 4;
+        store8(dst + i, (cr * load8(p) + cg * load8(p + 1) + cb * load8(p + 2)) >> 8);
+        i = i + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+# ── RGBA8 -> YUV420p (shared) ────────
+# 4:2:0 chroma: one U and one V sample per 2x2 pixel block, taken from the
+# block's TOP-LEFT pixel rather than averaged — matching Rust.
+#
+# The `+ 128 * 256` term is the chroma bias: U and V are signed values centred
+# on 128 once stored as bytes.
+#must_use
+fn _cv_rgba_to_yuv420p(buf, cr, cg, cb, ur, ug, ub, vr, vg, vb, err_out) {
+    var rc = _cv_expect_format(buf, PF_RGBA8);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    var out = pixel_buffer_zeroed(w, h, PF_YUV420P, err_out);
+    if (out == 0) { return 0; }
+    var sp = pixel_buffer_data(buf);
+    var dp = pixel_buffer_data(out);
+    var cw = _cv_div_ceil2(w);
+    var ch = _cv_div_ceil2(h);
+
+    var y = 0;
+    while (y < h) {
+        _cv_y_row(sp + y * w * 4, dp + y * w, w, cr, cg, cb);
+        y = y + 1;
+    }
+
+    var u_off = w * h;
+    var v_off = u_off + cw * ch;
+    # Stepping by 2 up to cw*2 / ch*2 stays in bounds for odd dimensions too:
+    # for odd w, cw*2 == w+1 and the last x visited is w-1.
+    var yy = 0;
+    while (yy < ch * 2) {
+        var xx = 0;
+        while (xx < cw * 2) {
+            var i = (yy * w + xx) * 4;
+            var r = load8(sp + i);
+            var g = load8(sp + i + 1);
+            var b = load8(sp + i + 2);
+            var ci = (yy / 2) * cw + (xx / 2);
+            store8(dp + u_off + ci, _cv_clamp255((ur * r + ug * g + ub * b + 128 * 256) >> 8));
+            store8(dp + v_off + ci, _cv_clamp255((vr * r + vg * g + vb * b + 128 * 256) >> 8));
+            xx = xx + 2;
+        }
+        yy = yy + 2;
+    }
+    store64(err_out, RG_ERR_NONE);
+    return out;
+}
+
+# ── YUV420p -> RGBA8 (shared) ────────
+# The inverse matrix, also fixed-point:
+#   R = Y + (kr  * V) >> 8
+#   G = Y - (kgu * U + kgv * V) >> 8
+#   B = Y + (kb  * U) >> 8
+# with U and V first re-centred by subtracting 128. Alpha is set opaque.
+#
+# Chroma indices are clamped to the last row/column, so an odd-sized image
+# reuses the final chroma sample rather than reading past the plane.
+#must_use
+fn _cv_yuv420p_to_rgba(buf, kr, kgu, kgv, kb, err_out) {
+    var rc = _cv_expect_format(buf, PF_YUV420P);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    var out = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    if (out == 0) { return 0; }
+    var sp = pixel_buffer_data(buf);
+    var dp = pixel_buffer_data(out);
+    var cw = _cv_div_ceil2(w);
+    var ch = _cv_div_ceil2(h);
+    var u_off = w * h;
+    var v_off = u_off + cw * ch;
+
+    var y = 0;
+    while (y < h) {
+        var cy = y / 2;
+        if (cy > ch - 1) { cy = ch - 1; }
+        var x = 0;
+        while (x < w) {
+            var cx = x / 2;
+            if (cx > cw - 1) { cx = cw - 1; }
+            var yi = load8(sp + y * w + x);
+            var u = load8(sp + u_off + cy * cw + cx) - 128;
+            var v = load8(sp + v_off + cy * cw + cx) - 128;
+            var oi = (y * w + x) * 4;
+            store8(dp + oi, _cv_clamp255(yi + ((kr * v) >>> 8)));
+            store8(dp + oi + 1, _cv_clamp255(yi - ((kgu * u + kgv * v) >>> 8)));
+            store8(dp + oi + 2, _cv_clamp255(yi + ((kb * u) >>> 8)));
+            store8(dp + oi + 3, 255);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    store64(err_out, RG_ERR_NONE);
+    return out;
+}
+
+# ── the three colour primaries ────────
+#must_use
+fn rgba_to_yuv420p(buf, err_out) {
+    return _cv_rgba_to_yuv420p(buf, 77, 150, 29,
+                               (0 - 43), (0 - 85), 128,
+                               128, (0 - 107), (0 - 21), err_out);
+}
+
+#must_use
+fn yuv420p_to_rgba(buf, err_out) {
+    return _cv_yuv420p_to_rgba(buf, 359, 88, 183, 454, err_out);
+}
+
+#must_use
+fn rgba_to_yuv420p_bt709(buf, err_out) {
+    return _cv_rgba_to_yuv420p(buf, 54, 183, 19,
+                               (0 - 29), (0 - 99), 128,
+                               128, (0 - 116), (0 - 12), err_out);
+}
+
+#must_use
+fn yuv420p_to_rgba_bt709(buf, err_out) {
+    return _cv_yuv420p_to_rgba(buf, 403, 48, 120, 475, err_out);
+}
+
+#must_use
+fn rgba_to_yuv420p_bt2020(buf, err_out) {
+    return _cv_rgba_to_yuv420p(buf, 67, 174, 15,
+                               (0 - 18), (0 - 46), 64,
+                               64, (0 - 58), (0 - 6), err_out);
+}
+
+#must_use
+fn yuv420p_to_rgba_bt2020(buf, err_out) {
+    return _cv_yuv420p_to_rgba(buf, 377, 42, 146, 481, err_out);
+}
+
+# ── ARGB8 -> NV12 ────────
+# NV12 is a Y plane followed by ONE interleaved UV plane (u,v,u,v...), unlike
+# Yuv420p's two separate planes. Source is ARGB, so colour starts at byte 1.
+# BT.601 coefficients.
+#must_use
+fn argb_to_nv12(buf, err_out) {
+    var rc = _cv_expect_format(buf, PF_ARGB8);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    var out = pixel_buffer_zeroed(w, h, PF_NV12, err_out);
+    if (out == 0) { return 0; }
+    var sp = pixel_buffer_data(buf);
+    var dp = pixel_buffer_data(out);
+    var cw = _cv_div_ceil2(w);
+    var ch = _cv_div_ceil2(h);
+
+    var y = 0;
+    while (y < h) {
+        var x = 0;
+        while (x < w) {
+            var i = (y * w + x) * 4;
+            # ARGB: alpha at +0, colour at +1..+3.
+            var r = load8(sp + i + 1);
+            var g = load8(sp + i + 2);
+            var b = load8(sp + i + 3);
+            store8(dp + y * w + x, (77 * r + 150 * g + 29 * b) >> 8);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+
+    var uv_off = w * h;
+    var yy = 0;
+    while (yy < ch * 2) {
+        var xx = 0;
+        while (xx < cw * 2) {
+            var i2 = (yy * w + xx) * 4;
+            var r2 = load8(sp + i2 + 1);
+            var g2 = load8(sp + i2 + 2);
+            var b2 = load8(sp + i2 + 3);
+            # INTERLEAVED: the pair index steps by 2, u then v.
+            var ci = ((yy / 2) * cw + (xx / 2)) * 2;
+            store8(dp + uv_off + ci, _cv_clamp255(((0 - 43) * r2 - 85 * g2 + 128 * b2 + 128 * 256) >> 8));
+            store8(dp + uv_off + ci + 1, _cv_clamp255((128 * r2 - 107 * g2 - 21 * b2 + 128 * 256) >> 8));
+            xx = xx + 2;
+        }
+        yy = yy + 2;
+    }
+    store64(err_out, RG_ERR_NONE);
+    return out;
+}
+
+# ── NV12 -> RGBA8 ────────
+# Same inverse matrix as BT.601 Yuv420p; only the chroma addressing differs,
+# because U and V are interleaved in one plane.
+#must_use
+fn nv12_to_rgba(buf, err_out) {
+    var rc = _cv_expect_format(buf, PF_NV12);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    var out = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    if (out == 0) { return 0; }
+    var sp = pixel_buffer_data(buf);
+    var dp = pixel_buffer_data(out);
+    var cw = _cv_div_ceil2(w);
+    var ch = _cv_div_ceil2(h);
+    var uv_off = w * h;
+
+    var y = 0;
+    while (y < h) {
+        var cy = y / 2;
+        if (cy > ch - 1) { cy = ch - 1; }
+        var x = 0;
+        while (x < w) {
+            var cx = x / 2;
+            if (cx > cw - 1) { cx = cw - 1; }
+            var yi = load8(sp + y * w + x);
+            var ci = uv_off + (cy * cw + cx) * 2;
+            var u = load8(sp + ci) - 128;
+            var v = load8(sp + ci + 1) - 128;
+            var oi = (y * w + x) * 4;
+            store8(dp + oi, _cv_clamp255(yi + ((359 * v) >>> 8)));
+            store8(dp + oi + 1, _cv_clamp255(yi - ((88 * u + 183 * v) >>> 8)));
+            store8(dp + oi + 2, _cv_clamp255(yi + ((454 * u) >>> 8)));
+            store8(dp + oi + 3, 255);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    store64(err_out, RG_ERR_NONE);
+    return out;
+}
+
+# ── simple interleaved format conversions ────────
+# RGB8 -> RGBA8: alpha is filled OPAQUE, not zero. A zero fill would make every
+# converted image invisible.
+#must_use
+fn rgb8_to_rgba8(buf, err_out) {
+    var rc = _cv_expect_format(buf, PF_RGB8);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    var out = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    if (out == 0) { return 0; }
+    var sp = pixel_buffer_data(buf);
+    var dp = pixel_buffer_data(out);
+    var n = w * h;
+    var i = 0;
+    while (i < n) {
+        store8(dp + i * 4, load8(sp + i * 3));
+        store8(dp + i * 4 + 1, load8(sp + i * 3 + 1));
+        store8(dp + i * 4 + 2, load8(sp + i * 3 + 2));
+        store8(dp + i * 4 + 3, 255);
+        i = i + 1;
+    }
+    store64(err_out, RG_ERR_NONE);
+    return out;
+}
+
+# RGBA8 -> RGB8: alpha is DROPPED, not composited against anything.
+#must_use
+fn rgba8_to_rgb8(buf, err_out) {
+    var rc = _cv_expect_format(buf, PF_RGBA8);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    var out = pixel_buffer_zeroed(w, h, PF_RGB8, err_out);
+    if (out == 0) { return 0; }
+    var sp = pixel_buffer_data(buf);
+    var dp = pixel_buffer_data(out);
+    var n = w * h;
+    var i = 0;
+    while (i < n) {
+        store8(dp + i * 3, load8(sp + i * 4));
+        store8(dp + i * 3 + 1, load8(sp + i * 4 + 1));
+        store8(dp + i * 3 + 2, load8(sp + i * 4 + 2));
+        i = i + 1;
+    }
+    store64(err_out, RG_ERR_NONE);
+    return out;
+}
+
+# ARGB8 [A,R,G,B] -> RGBA8 [R,G,B,A]: a byte rotation, not a reversal.
+#must_use
+fn argb8_to_rgba8(buf, err_out) {
+    var rc = _cv_expect_format(buf, PF_ARGB8);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    var out = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    if (out == 0) { return 0; }
+    var sp = pixel_buffer_data(buf);
+    var dp = pixel_buffer_data(out);
+    var n = w * h;
+    var i = 0;
+    while (i < n) {
+        store8(dp + i * 4, load8(sp + i * 4 + 1));
+        store8(dp + i * 4 + 1, load8(sp + i * 4 + 2));
+        store8(dp + i * 4 + 2, load8(sp + i * 4 + 3));
+        store8(dp + i * 4 + 3, load8(sp + i * 4));
+        i = i + 1;
+    }
+    store64(err_out, RG_ERR_NONE);
+    return out;
+}
+
+# RGBA8 -> ARGB8: the inverse rotation.
+#must_use
+fn rgba8_to_argb8(buf, err_out) {
+    var rc = _cv_expect_format(buf, PF_RGBA8);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    var out = pixel_buffer_zeroed(w, h, PF_ARGB8, err_out);
+    if (out == 0) { return 0; }
+    var sp = pixel_buffer_data(buf);
+    var dp = pixel_buffer_data(out);
+    var n = w * h;
+    var i = 0;
+    while (i < n) {
+        store8(dp + i * 4, load8(sp + i * 4 + 3));
+        store8(dp + i * 4 + 1, load8(sp + i * 4));
+        store8(dp + i * 4 + 2, load8(sp + i * 4 + 1));
+        store8(dp + i * 4 + 3, load8(sp + i * 4 + 2));
+        i = i + 1;
+    }
+    store64(err_out, RG_ERR_NONE);
+    return out;
+}
+
+# ── RgbaF32 <-> RGBA8 ────────
+# The only float in this module. RgbaF32 is 4 f32 per pixel in native byte
+# order, values nominally 0..1.
+#must_use
+fn rgbaf32_to_rgba8(buf, err_out) {
+    var rc = _cv_expect_format(buf, PF_RGBAF32);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    var out = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    if (out == 0) { return 0; }
+    var sp = pixel_buffer_data(buf);
+    var dp = pixel_buffer_data(out);
+    var n = w * h;
+    var i = 0;
+    while (i < n) {
+        var c = 0;
+        while (c < 4) {
+            var v = f32_to(load32(sp + i * 16 + c * 4));
+            # `(v * 255.0 + 0.5).clamp(0.0, 255.0) as u8` — round-half-up, and
+            # a NaN saturates to 0 the way Rust's `as u8` does.
+            var b = 0;
+            if (f64_eq(v, v) == 1) {
+                var scaled = f64_add(f64_mul(v, 255.0), 0.5);
+                if (f64_lt(scaled, 0) == 1) { scaled = 0; }
+                if (f64_gt(scaled, 255.0) == 1) { scaled = 255.0; }
+                b = f64_to(scaled);
+            }
+            store8(dp + i * 4 + c, b);
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    store64(err_out, RG_ERR_NONE);
+    return out;
+}
+
+#must_use
+fn rgba8_to_rgbaf32(buf, err_out) {
+    var rc = _cv_expect_format(buf, PF_RGBA8);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    var out = pixel_buffer_zeroed(w, h, PF_RGBAF32, err_out);
+    if (out == 0) { return 0; }
+    var sp = pixel_buffer_data(buf);
+    var dp = pixel_buffer_data(out);
+    var n = w * h;
+    var i = 0;
+    while (i < n) {
+        var c = 0;
+        while (c < 4) {
+            var v = f64_div(f64_from(load8(sp + i * 4 + c)), 255.0);
+            store32(dp + i * 16 + c * 4, f32_from(v));
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    store64(err_out, RG_ERR_NONE);
+    return out;
+}

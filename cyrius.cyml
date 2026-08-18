@@ -37,6 +37,8 @@ modules = [
     "src/transform.cyr",
     "src/filter_point.cyr",
     "src/filter_kernel.cyr",
+    "src/blend.cyr",
+    "src/convert.cyr",
 ]
 
 # Kept deliberately minimal: add a module here only when a ported `src/*.cyr`

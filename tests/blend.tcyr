@@ -1,0 +1,286 @@
+# blend.tcyr — Porter-Duff compositing and the 12 blend modes
+# Ported from rust-old/src/blend.rs #[cfg(test)] and its doctests.
+# Per-mode expected bytes came from a Python oracle replicating the Rust f32
+# formulas; the Porter-Duff numbers from the integer div255 path.
+
+include "src/error.cyr"
+include "src/bytevec.cyr"
+include "src/pixel.cyr"
+include "src/blend.cyr"
+
+alloc_init();
+
+fn mkpx(r, g, b, a) {
+    var p = fl_alloc(4);
+    store8(p, r); store8(p + 1, g); store8(p + 2, b); store8(p + 3, a);
+    return p;
+}
+fn px4(p, r, g, b, a) {
+    if (load8(p) != r) { return 0; }
+    if (load8(p + 1) != g) { return 0; }
+    if (load8(p + 2) != b) { return 0; }
+    if (load8(p + 3) != a) { return 0; }
+    return 1;
+}
+# Blend a single channel value pair through a mode and return the byte.
+fn bc(s, d, m) {
+    return _bl_f32_to_u8(_bl_blend_channel(_bl_u8_to_f32(s), _bl_u8_to_f32(d), m));
+}
+
+var out = fl_alloc(4);
+
+# ================================================================
+# div255
+# ================================================================
+test_group("div255");
+
+# The rounding is the whole point: plain /255 truncates. 4*101 = 404;
+# 404/255 == 1 by truncation but div255 gives 2, and that one level is the
+# off-by-one 1.0.0 fixed across premultiply/apply_mask/composite.
+assert_eq(_bl_div255(404), 2, "div255(404) rounds to 2, where /255 truncates to 1");
+assert_eq(_bl_div255(0), 0, "div255(0) == 0");
+assert_eq(_bl_div255(255 * 255), 255, "div255(255*255) == 255 exactly");
+assert_eq(_bl_div255(255), 1, "div255(255) == 1");
+assert_eq(_bl_div255(128 * 255), 128, "div255 is exact on whole multiples");
+
+# The byte conversion's NaN behaviour, exercised directly. Rust's `as u8`
+# saturates a NaN to 0; ganita_f32_clamp would give 255, the opposite end.
+# No blend mode can currently produce a NaN — every input is a finite u8 — so
+# this is only reachable through the helper, which is why it is tested here
+# rather than through a mode.
+test_group("f32 to byte");
+assert_eq(_bl_f32_to_u8(f32_from(_RG_NAN)), 0, "NaN converts to 0, not 255");
+assert_eq(_bl_f32_to_u8(f32_from(F64_ONE)), 255, "1.0 converts to 255");
+assert_eq(_bl_f32_to_u8(f32_from(0)), 0, "0.0 converts to 0");
+assert_eq(_bl_f32_to_u8(f32_from(2.0)), 255, "above 1.0 clamps to 255");
+assert_eq(_bl_f32_to_u8(f32_from(f64_neg(F64_ONE))), 0, "below 0.0 clamps to 0");
+# Round-half-up: 0.5/255 lands exactly between bytes 0 and 1.
+assert_eq(_bl_f32_to_u8(f32_from(f64_div(0.5, 255.0))), 1, "round-half-up gives 1, truncation would give 0");
+
+# ================================================================
+# BlendMode
+# ================================================================
+test_group("blend mode");
+
+assert_streq(blend_mode_name(BM_NORMAL), "Normal", "Display for Normal");
+# The two-word names carry a SPACE — consumers show these in a UI.
+assert_streq(blend_mode_name(BM_COLOR_DODGE), "Color Dodge", "Display for Color Dodge has a space");
+assert_streq(blend_mode_name(BM_SOFT_LIGHT), "Soft Light", "Display for Soft Light has a space");
+assert_eq(blend_mode_is_valid(BM_EXCLUSION), 1, "Exclusion is the last valid mode");
+assert_eq(blend_mode_is_valid(12), 0, "12 is out of range");
+assert_eq(blend_mode_is_valid((0 - 1)), 0, "-1 is out of range");
+
+# ================================================================
+# The 12 modes, oracle-checked on src=200 dst=100
+# ================================================================
+test_group("blend modes");
+
+assert_eq(bc(200, 100, BM_NORMAL), 200, "Normal ignores the destination");
+assert_eq(bc(200, 100, BM_MULTIPLY), 78, "Multiply darkens");
+assert_eq(bc(200, 100, BM_SCREEN), 222, "Screen lightens");
+assert_eq(bc(200, 100, BM_OVERLAY), 157, "Overlay");
+assert_eq(bc(200, 100, BM_HARD_LIGHT), 188, "HardLight");
+assert_eq(bc(200, 100, BM_DARKEN), 100, "Darken takes the smaller");
+assert_eq(bc(200, 100, BM_LIGHTEN), 200, "Lighten takes the larger");
+assert_eq(bc(200, 100, BM_COLOR_DODGE), 255, "ColorDodge saturates here");
+assert_eq(bc(200, 100, BM_COLOR_BURN), 57, "ColorBurn");
+assert_eq(bc(200, 100, BM_SOFT_LIGHT), 134, "SoftLight");
+assert_eq(bc(200, 100, BM_DIFFERENCE), 100, "Difference is |s - d|");
+assert_eq(bc(200, 100, BM_EXCLUSION), 143, "Exclusion");
+
+# ⚠ Overlay tests the DESTINATION, HardLight tests the SOURCE — that single
+# swapped operand is the only difference between them. On a SYMMETRIC pair the
+# two agree, so the asymmetric pairs below are what actually pin it: swapping
+# the operand turns each into the other.
+assert_eq(bc(100, 200, BM_OVERLAY), 188, "Overlay(100,200) == HardLight(200,100)");
+assert_eq(bc(100, 200, BM_HARD_LIGHT), 157, "HardLight(100,200) == Overlay(200,100)");
+assert_eq(bc(60, 200, BM_OVERLAY), 171, "Overlay branches on d, not s");
+assert_eq(bc(60, 200, BM_HARD_LIGHT), 94, "HardLight branches on s, not d");
+assert_neq(bc(60, 200, BM_OVERLAY), bc(60, 200, BM_HARD_LIGHT), "the two modes really do differ");
+
+# Division guards. ColorDodge at s == 255 would divide by zero; ColorBurn at
+# s == 0 likewise. Both return a saturated constant instead of NaN/inf.
+#
+# (These guards are DEFENSIVE, not load-bearing, and no assertion can prove
+# otherwise: without them d/(1-s) is +inf for d > 0 and NaN for d == 0, and
+# ganita_f32_min ranks both above 1.0 — so min(.., 1.0) returns 1.0 either way,
+# exactly what the guard returns. Rust's f32::min behaves identically on NaN.
+# Kept because relying on inf/NaN propagation to land correctly is fragile.)
+assert_eq(bc(255, 128, BM_COLOR_DODGE), 255, "ColorDodge s==255 returns white, not inf");
+assert_eq(bc(0, 128, BM_COLOR_BURN), 0, "ColorBurn s==0 returns black, not inf");
+assert_eq(bc(0, 0, BM_COLOR_DODGE), 0, "ColorDodge of black on black stays black");
+assert_eq(bc(255, 255, BM_COLOR_BURN), 255, "ColorBurn of white on white stays white");
+
+# SoftLight's D(d) is piecewise at d == 0.25: a cubic below, sqrt above. Only
+# DARK destinations separate the two — at d >= 64 the cubic and sqrt agree to
+# the byte, so any test above that threshold passes with sqrt everywhere. An
+# ordering-only assertion missed this entirely.
+assert_eq(bc(200, 10, BM_SOFT_LIGHT), 25, "SoftLight cubic branch at d=10 (sqrt-everywhere gives 33)");
+assert_eq(bc(200, 30, BM_SOFT_LIGHT), 61, "SoftLight cubic branch at d=30 (sqrt-everywhere gives 63)");
+assert_eq(bc(200, 100, BM_SOFT_LIGHT), 134, "SoftLight sqrt branch at d=100");
+assert_eq(bc(200, 200, BM_SOFT_LIGHT), 215, "SoftLight sqrt branch at d=200");
+# The lower branch (s <= 0.5) is a different formula again.
+assert_eq(bc(60, 30, BM_SOFT_LIGHT), 16, "SoftLight lower branch (s <= 0.5) at d=30");
+assert_eq(bc(60, 200, BM_SOFT_LIGHT), 177, "SoftLight lower branch at d=200");
+
+# Identities that pin whole formulas.
+assert_eq(bc(255, 128, BM_MULTIPLY), 128, "Multiply by white is the identity");
+assert_eq(bc(0, 128, BM_MULTIPLY), 0, "Multiply by black is black");
+assert_eq(bc(0, 128, BM_SCREEN), 128, "Screen with black is the identity");
+assert_eq(bc(255, 128, BM_SCREEN), 255, "Screen with white is white");
+assert_eq(bc(128, 128, BM_DIFFERENCE), 0, "Difference of equal values is 0");
+assert_eq(bc(0, 128, BM_EXCLUSION), 128, "Exclusion with black is the identity");
+
+# ================================================================
+# blend_pixel
+# ================================================================
+test_group("blend pixel");
+
+var src = mkpx(200, 100, 50, 255);
+var dst = mkpx(10, 20, 30, 255);
+
+assert_eq(blend_pixel(src, dst, BM_MULTIPLY, 255, out), RG_ERR_NONE, "blend_pixel succeeds");
+assert_eq(px4(out, 8, 8, 6, 255), 1, "Multiply at full opacity, oracle-checked");
+
+# Normal at full opacity over an opaque destination is just the source.
+assert_eq(blend_pixel(src, dst, BM_NORMAL, 255, out), RG_ERR_NONE, "Normal blend succeeds");
+assert_eq(px4(out, 200, 100, 50, 255), 1, "Normal at full opacity replaces the destination");
+
+# Zero effective alpha short-circuits and leaves the destination untouched.
+var clear = mkpx(200, 100, 50, 0);
+assert_eq(blend_pixel(clear, dst, BM_NORMAL, 255, out), RG_ERR_NONE, "transparent source succeeds");
+assert_eq(px4(out, 10, 20, 30, 255), 1, "a transparent source leaves the destination alone");
+assert_eq(blend_pixel(src, dst, BM_NORMAL, 0, out), RG_ERR_NONE, "zero opacity succeeds");
+assert_eq(px4(out, 10, 20, 30, 255), 1, "zero opacity leaves the destination alone");
+
+# Half opacity: sa = div255(255*128) = 128, so r = div255(200*128) = 100.
+var black = mkpx(0, 0, 0, 0);
+assert_eq(blend_pixel(src, black, BM_NORMAL, 128, out), RG_ERR_NONE, "half opacity succeeds");
+assert_eq(load8(out), 100, "half opacity gives r = 100");
+assert_eq(load8(out + 3), 128, "half opacity gives a = 128");
+
+# out may alias dst.
+var alias = mkpx(10, 20, 30, 255);
+assert_eq(blend_pixel(src, alias, BM_NORMAL, 255, alias), RG_ERR_NONE, "in-place blend succeeds");
+assert_eq(px4(alias, 200, 100, 50, 255), 1, "blend_pixel works with out aliasing dst");
+fl_free(alias);
+
+# ================================================================
+# blend_pixel_argb
+# ================================================================
+test_group("blend pixel argb");
+
+# ARGB is [A, R, G, B]. The same blend as above, byte-rotated — so the RESULT
+# must be the same colours in ARGB order. Getting the rotation wrong swaps a
+# colour channel with coverage, which is why the two functions exist.
+var asrc = mkpx(255, 200, 100, 50);
+var adst = mkpx(255, 10, 20, 30);
+assert_eq(blend_pixel_argb(asrc, adst, BM_MULTIPLY, 255, out), RG_ERR_NONE, "argb blend succeeds");
+assert_eq(px4(out, 255, 8, 8, 6), 1, "ARGB Multiply matches the RGBA result, byte-rotated");
+
+assert_eq(blend_pixel_argb(asrc, adst, BM_NORMAL, 255, out), RG_ERR_NONE, "argb Normal succeeds");
+assert_eq(px4(out, 255, 200, 100, 50), 1, "ARGB Normal replaces the destination");
+
+# A transparent ARGB source has alpha in byte 0, not byte 3.
+var aclear = mkpx(0, 200, 100, 50);
+assert_eq(blend_pixel_argb(aclear, adst, BM_NORMAL, 255, out), RG_ERR_NONE, "transparent argb succeeds");
+assert_eq(px4(out, 255, 10, 20, 30), 1, "a transparent ARGB source reads alpha from byte 0");
+
+# ================================================================
+# blend_row_normal
+# ================================================================
+test_group("blend row normal");
+
+var rs = fl_alloc(16);
+var rd = fl_alloc(16);
+var i = 0;
+while (i < 4) {
+    store8(rs + i * 4, 200); store8(rs + i * 4 + 1, 100);
+    store8(rs + i * 4 + 2, 50); store8(rs + i * 4 + 3, 255);
+    store8(rd + i * 4, 0); store8(rd + i * 4 + 1, 0);
+    store8(rd + i * 4 + 2, 0); store8(rd + i * 4 + 3, 0);
+    i = i + 1;
+}
+assert_eq(blend_row_normal(rs, rd, 4, 255), RG_ERR_NONE, "blend_row_normal succeeds");
+assert_eq(px4(rd, 200, 100, 50, 255), 1, "row blend writes the first pixel");
+assert_eq(px4(rd + 12, 200, 100, 50, 255), 1, "row blend reaches the LAST pixel (loop bound)");
+
+# The row path and the single-pixel path must agree — they are separate code.
+var one_src = mkpx(200, 100, 50, 128);
+var one_dst = mkpx(40, 60, 80, 200);
+var row_src = fl_alloc(4);
+var row_dst = fl_alloc(4);
+memcpy(row_src, one_src, 4);
+memcpy(row_dst, one_dst, 4);
+blend_pixel(one_src, one_dst, BM_NORMAL, 255, out);
+blend_row_normal(row_src, row_dst, 1, 255);
+assert_eq(px4(row_dst, load8(out), load8(out + 1), load8(out + 2), load8(out + 3)), 1,
+          "blend_row_normal agrees with blend_pixel on the same input");
+
+# A zero-alpha source pixel is SKIPPED, leaving the destination byte-identical.
+store8(rs + 3, 0);
+store8(rd, 77); store8(rd + 1, 77); store8(rd + 2, 77); store8(rd + 3, 77);
+assert_eq(blend_row_normal(rs, rd, 1, 255), RG_ERR_NONE, "zero-alpha row succeeds");
+assert_eq(px4(rd, 77, 77, 77, 77), 1, "a zero-alpha source pixel is skipped entirely");
+
+# A negative count is a no-op rather than a wild loop.
+assert_eq(blend_row_normal(rs, rd, (0 - 1), 255), RG_ERR_NONE, "a negative count is a no-op");
+assert_eq(px4(rd, 77, 77, 77, 77), 1, "a negative count changes nothing");
+
+# ================================================================
+# blend_row_normal_argb — the fast path the RGBA variant lacks
+# ================================================================
+test_group("blend row normal argb");
+
+var as2 = fl_alloc(8);
+var ad2 = fl_alloc(8);
+store8(as2, 255); store8(as2 + 1, 200); store8(as2 + 2, 100); store8(as2 + 3, 50);
+store8(as2 + 4, 128); store8(as2 + 5, 200); store8(as2 + 6, 100); store8(as2 + 7, 50);
+store8(ad2, 0); store8(ad2 + 1, 0); store8(ad2 + 2, 0); store8(ad2 + 3, 0);
+store8(ad2 + 4, 0); store8(ad2 + 5, 0); store8(ad2 + 6, 0); store8(ad2 + 7, 0);
+assert_eq(blend_row_normal_argb(as2, ad2, 2, 255), RG_ERR_NONE, "argb row blend succeeds");
+# Pixel 0 is fully opaque, so the sa >= 255 fast path copies it wholesale.
+assert_eq(px4(ad2, 255, 200, 100, 50), 1, "the opaque fast path copies the source pixel exactly");
+# Pixel 1 is half-alpha and takes the arithmetic path — alpha is byte 0.
+assert_eq(load8(ad2 + 4), 128, "the half-alpha pixel composites alpha into byte 0");
+assert_lt(load8(ad2 + 5), 200, "the half-alpha pixel's red is composited, not copied");
+
+# ================================================================
+# blend_row (any mode)
+# ================================================================
+test_group("blend row");
+
+var brs = fl_alloc(8);
+var brd = fl_alloc(8);
+store8(brs, 200); store8(brs + 1, 100); store8(brs + 2, 50); store8(brs + 3, 255);
+store8(brs + 4, 200); store8(brs + 5, 100); store8(brs + 6, 50); store8(brs + 7, 255);
+store8(brd, 10); store8(brd + 1, 20); store8(brd + 2, 30); store8(brd + 3, 255);
+store8(brd + 4, 10); store8(brd + 5, 20); store8(brd + 6, 30); store8(brd + 7, 255);
+assert_eq(blend_row(brs, brd, 2, BM_MULTIPLY, 255), RG_ERR_NONE, "blend_row Multiply succeeds");
+assert_eq(px4(brd, 8, 8, 6, 255), 1, "blend_row Multiply matches blend_pixel");
+assert_eq(px4(brd + 4, 8, 8, 6, 255), 1, "blend_row applies to every pixel");
+
+# Normal routes through the row path but must give the same answer.
+store8(brd, 10); store8(brd + 1, 20); store8(brd + 2, 30); store8(brd + 3, 255);
+assert_eq(blend_row(brs, brd, 1, BM_NORMAL, 255), RG_ERR_NONE, "blend_row Normal succeeds");
+assert_eq(px4(brd, 200, 100, 50, 255), 1, "blend_row Normal agrees with the dedicated path");
+
+assert_eq(blend_row(brs, brd, 1, 99, 255), RG_ERR_INVALID_PARAMETER, "blend_row rejects an invalid mode");
+
+# (Three more guards here are provably unobservable and are documented rather
+# than asserted. blend_pixel's `sa == 0` early return is an optimisation: with
+# sa == 0 the composite weights the blended colour by 0 and the destination by
+# 255, reproducing the destination exactly. Its alpha `min(255)` cannot trigger
+# either — sa*255 + d*(255-sa) peaks at 65025, which div255 maps to exactly 255.
+# And routing Normal through blend_row_normal is a performance choice: the
+# per-pixel path gives identical bytes, which the assertion above proves.)
+
+fl_free(src); fl_free(dst); fl_free(clear); fl_free(black);
+fl_free(asrc); fl_free(adst); fl_free(aclear);
+fl_free(one_src); fl_free(one_dst); fl_free(row_src); fl_free(row_dst);
+fl_free(rs); fl_free(rd); fl_free(as2); fl_free(ad2); fl_free(brs); fl_free(brd);
+fl_free(out);
+
+var exit_code = assert_summary();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

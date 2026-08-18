@@ -1,0 +1,356 @@
+# convert.tcyr — pixel format and colour-space conversions
+# Ported from rust-old/src/convert.rs #[cfg(test)] and its doctests.
+# Coefficient results came from a Python oracle replicating the fixed-point maths.
+
+include "src/error.cyr"
+include "src/bytevec.cyr"
+include "src/pixel.cyr"
+include "src/convert.cyr"
+
+alloc_init();
+
+var err = fl_alloc(8);
+
+fn mk(w, h, f) { return pixel_buffer_zeroed(w, h, f, err); }
+fn put4(b, i, a, c, d, e) {
+    var p = pixel_buffer_data(b) + i * 4;
+    store8(p, a); store8(p + 1, c); store8(p + 2, d); store8(p + 3, e);
+    return 0;
+}
+fn at(b, off) { return load8(pixel_buffer_data(b) + off); }
+fn px4(b, i, r, g, bl, a) {
+    if (at(b, i * 4) != r) { return 0; }
+    if (at(b, i * 4 + 1) != g) { return 0; }
+    if (at(b, i * 4 + 2) != bl) { return 0; }
+    if (at(b, i * 4 + 3) != a) { return 0; }
+    return 1;
+}
+
+# ================================================================
+# luma kernels — each coefficient triple must sum to 256
+# ================================================================
+test_group("luma kernels");
+
+var yrow = fl_alloc(4);
+var src4 = fl_alloc(16);
+fn set1(p, r, g, b) { store8(p, r); store8(p + 1, g); store8(p + 2, b); store8(p + 3, 255); return 0; }
+
+set1(src4, 255, 255, 255);
+_cv_y_row(src4, yrow, 1, 77, 150, 29);
+# White must land on exactly 255 — that is what a coefficient sum of 256 buys.
+# A triple summing to 255 or 257 shifts the entire luma range.
+assert_eq(load8(yrow), 255, "BT.601 maps white to exactly 255 (coeffs sum to 256)");
+_cv_y_row(src4, yrow, 1, 54, 183, 19);
+assert_eq(load8(yrow), 255, "BT.709 maps white to exactly 255");
+_cv_y_row(src4, yrow, 1, 67, 174, 15);
+assert_eq(load8(yrow), 255, "BT.2020 maps white to exactly 255");
+
+# Each primary separates the three kernels — this is what pins WHICH standard
+# a given call uses. A single mixed-colour test could not tell them apart.
+set1(src4, 255, 0, 0);
+_cv_y_row(src4, yrow, 1, 77, 150, 29);
+assert_eq(load8(yrow), 76, "BT.601 red is 76");
+_cv_y_row(src4, yrow, 1, 54, 183, 19);
+assert_eq(load8(yrow), 53, "BT.709 red is 53 — lower than 601");
+_cv_y_row(src4, yrow, 1, 67, 174, 15);
+assert_eq(load8(yrow), 66, "BT.2020 red is 66");
+
+set1(src4, 0, 255, 0);
+_cv_y_row(src4, yrow, 1, 77, 150, 29);
+assert_eq(load8(yrow), 149, "BT.601 green is 149");
+_cv_y_row(src4, yrow, 1, 54, 183, 19);
+assert_eq(load8(yrow), 182, "BT.709 green is 182 — higher than 601");
+
+set1(src4, 0, 0, 255);
+_cv_y_row(src4, yrow, 1, 77, 150, 29);
+assert_eq(load8(yrow), 28, "BT.601 blue is 28");
+_cv_y_row(src4, yrow, 1, 67, 174, 15);
+assert_eq(load8(yrow), 14, "BT.2020 blue is 14 — lowest of the three");
+
+set1(src4, 128, 128, 128);
+_cv_y_row(src4, yrow, 1, 77, 150, 29);
+assert_eq(load8(yrow), 128, "a neutral grey maps to its own value");
+
+# The row loop must reach the LAST pixel.
+set1(src4, 255, 255, 255); set1(src4 + 4, 0, 0, 0);
+_cv_y_row(src4, yrow, 2, 77, 150, 29);
+assert_eq(load8(yrow), 255, "row pixel 0");
+assert_eq(load8(yrow + 1), 0, "row pixel 1 — the loop covers every pixel");
+
+# ================================================================
+# RGBA8 <-> YUV420p (BT.601)
+# ================================================================
+test_group("yuv420p bt601");
+
+var rgba = mk(2, 2, PF_RGBA8);
+var i = 0;
+while (i < 4) { put4(rgba, i, 128, 128, 128, 255); i = i + 1; }
+
+var yuv = rgba_to_yuv420p(rgba, err);
+assert_eq(load64(err), RG_ERR_NONE, "rgba_to_yuv420p succeeds");
+assert_eq(pixel_buffer_format(yuv), PF_YUV420P, "the output format is Yuv420p");
+# 2x2 -> 4 Y bytes + 1 U + 1 V.
+assert_eq(pixel_buffer_len(yuv), 4 + 2, "a 2x2 Yuv420p buffer is 4 Y + 1 U + 1 V");
+assert_eq(at(yuv, 0), 128, "grey luma is 128");
+# A neutral colour must give exactly neutral chroma, 128 — any bias in the
+# +128*256 term shows up here immediately.
+assert_eq(at(yuv, 4), 128, "grey U is exactly neutral (128)");
+assert_eq(at(yuv, 5), 128, "grey V is exactly neutral (128)");
+
+var back = yuv420p_to_rgba(yuv, err);
+assert_eq(load64(err), RG_ERR_NONE, "yuv420p_to_rgba succeeds");
+assert_eq(px4(back, 0, 128, 128, 128, 255), 1, "grey round-trips exactly through YUV");
+assert_eq(at(back, 3), 255, "the inverse sets alpha OPAQUE, not zero");
+pixel_buffer_free(back);
+pixel_buffer_free(yuv);
+
+# Pure red: chroma must move off neutral in the right directions.
+var redb = mk(2, 2, PF_RGBA8);
+var j = 0;
+while (j < 4) { put4(redb, j, 255, 0, 0, 255); j = j + 1; }
+var ryuv = rgba_to_yuv420p(redb, err);
+assert_eq(at(ryuv, 0), 76, "red luma is 76");
+assert_eq(at(ryuv, 4), 85, "red U drops below neutral");
+assert_eq(at(ryuv, 5), 255, "red V saturates high");
+var rback = yuv420p_to_rgba(ryuv, err);
+# Fixed-point round-trip is lossy but close — oracle says (254, 1, 0).
+assert_eq(at(rback, 0), 254, "red round-trips to 254 (fixed-point loss)");
+assert_eq(at(rback, 1), 0, "green comes back 0");
+# Blue is the assertion that catches a LOGICAL shift in the inverse: u is
+# negative here (85 - 128 = -43), so (454 * u) >>> 8 must sign-extend. With a
+# zero-filling `>>` the negative product becomes a huge positive and blue comes
+# back 255 — the exact opposite of correct.
+assert_eq(at(rback, 2), 0, "blue comes back 0 — pins the ARITHMETIC shift on negative chroma");
+pixel_buffer_free(rback); pixel_buffer_free(ryuv);
+
+# Pure BLUE is the other half of the shift test. Red gives V=255 (v positive),
+# so the `kr * v` term is non-negative there and a logical shift passes. Blue
+# gives V=107, i.e. v = -21 — the R term goes negative and only an arithmetic
+# shift keeps it there. Both colours are needed; either alone leaves a shift
+# bug in the other term.
+var blueb = mk(2, 2, PF_RGBA8);
+var jb = 0;
+while (jb < 4) { put4(blueb, jb, 0, 0, 255, 255); jb = jb + 1; }
+var byuv = rgba_to_yuv420p(blueb, err);
+assert_eq(at(byuv, 0), 28, "blue luma is 28");
+assert_eq(at(byuv, 4), 255, "blue U saturates high");
+assert_eq(at(byuv, 5), 107, "blue V drops BELOW neutral — v is negative");
+var bback = yuv420p_to_rgba(byuv, err);
+assert_eq(at(bback, 0), 0, "blue round-trip red is 0 — pins the arithmetic shift on the R term");
+assert_eq(at(bback, 2), 253, "blue round-trips to 253");
+pixel_buffer_free(bback); pixel_buffer_free(byuv); pixel_buffer_free(blueb);
+
+# ODD dimensions exercise the div_ceil chroma sizing. A 3x3 needs a 2x2 chroma
+# plane (4 samples each); flooring would give 1 and under-allocate. Every test
+# above uses 2x2, where ceil and floor agree.
+var odd = mk(3, 3, PF_RGBA8);
+var jo = 0;
+while (jo < 9) { put4(odd, jo, 128, 128, 128, 255); jo = jo + 1; }
+# Give each 2x2 block a DIFFERENT colour at its top-left corner. A uniform grey
+# image round-trips even with floor sizing, because every block collapses onto
+# chroma index 0 and reads back the one value that was written. Four distinct
+# blocks force all four chroma slots to be addressed.
+put4(odd, 0, 255, 0, 0, 255);      # corner (0,0) -> ci 0
+put4(odd, 2, 0, 255, 0, 255);      # corner (2,0) -> ci 1
+put4(odd, 6, 0, 0, 255, 255);      # corner (0,2) -> ci 2
+put4(odd, 8, 255, 255, 0, 255);    # corner (2,2) -> ci 3
+var oyuv = rgba_to_yuv420p(odd, err);
+assert_eq(load64(err), RG_ERR_NONE, "an odd-sized buffer converts");
+assert_eq(pixel_buffer_len(oyuv), 9 + 2 * 4, "3x3 Yuv420p is 9 Y + 2*(2x2) chroma — div_ceil, not floor");
+# Four distinct chroma pairs, one per block. With floor sizing cw would be 1 and
+# all four would overwrite index 0.
+assert_eq(at(oyuv, 9), 85, "block (0,0) U");
+assert_eq(at(oyuv, 10), 43, "block (2,0) U — a SECOND chroma column exists");
+assert_eq(at(oyuv, 11), 255, "block (0,2) U — a SECOND chroma row exists");
+assert_eq(at(oyuv, 12), 0, "block (2,2) U");
+assert_eq(at(oyuv, 13), 255, "block (0,0) V starts the V plane after 4 U samples");
+var oback = yuv420p_to_rgba(oyuv, err);
+assert_eq(at(oback, 0), 254, "the odd buffer's first block round-trips as red");
+pixel_buffer_free(oback); pixel_buffer_free(oyuv); pixel_buffer_free(odd);
+
+assert_eq(rgba_to_yuv420p(yuv420p_to_rgba(mk(2, 2, PF_YUV420P), err), err) != 0, 1, "chained conversion works");
+
+# Format guards, both directions.
+var argbb = mk(2, 2, PF_ARGB8);
+assert_eq(rgba_to_yuv420p(argbb, err), 0, "rgba_to_yuv420p rejects a non-Rgba8 input");
+assert_eq(load64(err), RG_ERR_INVALID_FORMAT, "wrong input format is INVALID_FORMAT");
+assert_eq(yuv420p_to_rgba(rgba, err), 0, "yuv420p_to_rgba rejects a non-Yuv420p input");
+
+# ================================================================
+# BT.709 and BT.2020 are DIFFERENT transforms
+# ================================================================
+test_group("yuv420p bt709 / bt2020");
+
+var y709 = rgba_to_yuv420p_bt709(redb, err);
+assert_eq(load64(err), RG_ERR_NONE, "bt709 forward succeeds");
+assert_eq(at(y709, 0), 53, "BT.709 red luma is 53, not 601's 76");
+var b709 = yuv420p_to_rgba_bt709(y709, err);
+assert_eq(load64(err), RG_ERR_NONE, "bt709 inverse succeeds");
+assert_eq(at(b709, 0), 252, "BT.709 red round-trips to 252");
+assert_eq(at(b709, 2), 0, "BT.709 blue stays 0");
+# b709 is NOT freed here — the BT.2020 comparison below still reads it.
+
+var y2020 = rgba_to_yuv420p_bt2020(redb, err);
+assert_eq(at(y2020, 0), 66, "BT.2020 red luma is 66");
+var b2020 = yuv420p_to_rgba_bt2020(y2020, err);
+# ⚠ BT.2020 is MUCH lossier than 601/709 for a saturated primary, and that is
+# faithful rather than a defect. Its fixed-point chroma coefficients are at half
+# the scale (64 rather than 128), so V for pure red reaches only 191 instead of
+# saturating at 255, and the inverse recovers 158. Asserting "near 255" here —
+# the obvious expectation, and what 601 and 709 both do — would have meant
+# "fixing" a correct port.
+assert_eq(at(b2020, 0), 158, "BT.2020 red round-trips to 158, not near 255 (half-scale chroma)");
+assert_eq(at(b2020, 1), 34, "BT.2020 green picks up 34 in the round-trip");
+assert_lt(at(b2020, 0), at(b709, 0), "BT.2020 loses more of a saturated red than BT.709 does");
+pixel_buffer_free(b2020); pixel_buffer_free(b709);
+
+# The three standards must produce DIFFERENT luma for the same pixel, or one
+# of them has been wired to the wrong coefficient set.
+assert_neq(at(y709, 0), at(y2020, 0), "BT.709 and BT.2020 luma differ");
+pixel_buffer_free(y709); pixel_buffer_free(y2020);
+
+# Grey is the fixed point of every standard — a useful cross-check that all
+# three inverse matrices are self-consistent.
+var greyb = mk(2, 2, PF_RGBA8);
+var g2 = 0;
+while (g2 < 4) { put4(greyb, g2, 128, 128, 128, 255); g2 = g2 + 1; }
+var gy709 = rgba_to_yuv420p_bt709(greyb, err);
+var gb709 = yuv420p_to_rgba_bt709(gy709, err);
+assert_eq(px4(gb709, 0, 128, 128, 128, 255), 1, "grey round-trips exactly under BT.709 too");
+pixel_buffer_free(gb709); pixel_buffer_free(gy709);
+
+# ================================================================
+# NV12 — interleaved chroma
+# ================================================================
+test_group("nv12");
+
+var argb2 = mk(2, 2, PF_ARGB8);
+var k = 0;
+while (k < 4) { put4(argb2, k, 255, 128, 128, 128); k = k + 1; }   # A,R,G,B
+var nv = argb_to_nv12(argb2, err);
+assert_eq(load64(err), RG_ERR_NONE, "argb_to_nv12 succeeds");
+assert_eq(pixel_buffer_format(nv), PF_NV12, "the output format is Nv12");
+assert_eq(at(nv, 0), 128, "NV12 luma from ARGB reads colour from bytes 1..3");
+# U and V are INTERLEAVED in one plane, not two separate planes.
+assert_eq(at(nv, 4), 128, "NV12 U is at plane offset 0");
+assert_eq(at(nv, 5), 128, "NV12 V is INTERLEAVED immediately after U");
+
+var nvback = nv12_to_rgba(nv, err);
+assert_eq(load64(err), RG_ERR_NONE, "nv12_to_rgba succeeds");
+assert_eq(px4(nvback, 0, 128, 128, 128, 255), 1, "grey round-trips through NV12");
+pixel_buffer_free(nvback);
+assert_eq(argb_to_nv12(rgba, err), 0, "argb_to_nv12 rejects a non-Argb8 input");
+assert_eq(nv12_to_rgba(rgba, err), 0, "nv12_to_rgba rejects a non-Nv12 input");
+pixel_buffer_free(nv);
+
+# NV12 with a NON-GREY colour. Grey gives U == V == 128, which cannot detect
+# either a swapped interleave or a wrong shift; red gives U=85, V=255.
+var argbR = mk(2, 2, PF_ARGB8);
+var kr2 = 0;
+while (kr2 < 4) { put4(argbR, kr2, 255, 255, 0, 0); kr2 = kr2 + 1; }   # A=255 R=255 G=0 B=0
+var nvR = argb_to_nv12(argbR, err);
+assert_eq(at(nvR, 0), 76, "NV12 red luma is 76");
+assert_eq(at(nvR, 4), 85, "NV12 U is 85 at the pair's first byte");
+assert_eq(at(nvR, 5), 255, "NV12 V is 255 at the pair's SECOND byte — pins the interleave order");
+var nvRback = nv12_to_rgba(nvR, err);
+assert_eq(at(nvRback, 0), 254, "NV12 red round-trips to 254");
+assert_eq(at(nvRback, 2), 0, "NV12 blue is 0 — pins the arithmetic shift in the NV12 inverse");
+pixel_buffer_free(nvRback); pixel_buffer_free(nvR); pixel_buffer_free(argbR);
+
+# A 2x2 has cw == 1, so the interleave STRIDE is invisible — both the correct
+# `ci * 2` and a plain `ci` give 0. A 4x2 has two chroma blocks, and only the
+# strided index puts the second block's U at byte 2 instead of clobbering the
+# first block's V at byte 1.
+var wide = mk(4, 2, PF_ARGB8);
+var wi = 0;
+while (wi < 8) { put4(wide, wi, 255, 0, 0, 255); wi = wi + 1; }        # blue everywhere
+put4(wide, 0, 255, 255, 0, 0);                                        # block 0 corner: red
+var wnv = argb_to_nv12(wide, err);
+assert_eq(load64(err), RG_ERR_NONE, "4x2 NV12 conversion succeeds");
+assert_eq(at(wnv, 8), 85, "block 0 U at uv byte 0");
+assert_eq(at(wnv, 9), 255, "block 0 V at uv byte 1");
+assert_eq(at(wnv, 10), 255, "block 1 U at uv byte 2 — the interleave STRIDE is 2, not 1");
+assert_eq(at(wnv, 11), 107, "block 1 V at uv byte 3");
+pixel_buffer_free(wnv); pixel_buffer_free(wide);
+
+# ================================================================
+# simple interleaved formats
+# ================================================================
+test_group("interleaved formats");
+
+var rgb = mk(2, 1, PF_RGB8);
+var rp = pixel_buffer_data(rgb);
+store8(rp, 10); store8(rp + 1, 20); store8(rp + 2, 30);
+store8(rp + 3, 40); store8(rp + 4, 50); store8(rp + 5, 60);
+var toRgba = rgb8_to_rgba8(rgb, err);
+assert_eq(load64(err), RG_ERR_NONE, "rgb8_to_rgba8 succeeds");
+assert_eq(px4(toRgba, 0, 10, 20, 30, 255), 1, "RGB8 -> RGBA8 fills alpha OPAQUE, not zero");
+assert_eq(px4(toRgba, 1, 40, 50, 60, 255), 1, "the second pixel converts too");
+
+var backRgb = rgba8_to_rgb8(toRgba, err);
+assert_eq(load64(err), RG_ERR_NONE, "rgba8_to_rgb8 succeeds");
+assert_eq(load8(pixel_buffer_data(backRgb)), 10, "RGBA8 -> RGB8 keeps red");
+assert_eq(load8(pixel_buffer_data(backRgb) + 3), 40, "RGB8 stride is 3 bytes, not 4");
+pixel_buffer_free(backRgb);
+
+# ARGB <-> RGBA is a ROTATION. A test with a symmetric pixel could not tell a
+# rotation from a reversal, so every channel here is distinct.
+var argb3 = mk(1, 1, PF_ARGB8);
+put4(argb3, 0, 1, 2, 3, 4);           # A=1 R=2 G=3 B=4
+var asRgba = argb8_to_rgba8(argb3, err);
+assert_eq(px4(asRgba, 0, 2, 3, 4, 1), 1, "ARGB [1,2,3,4] -> RGBA [2,3,4,1] (rotation, not reversal)");
+var asArgb = rgba8_to_argb8(asRgba, err);
+assert_eq(px4(asArgb, 0, 1, 2, 3, 4), 1, "the inverse rotation restores the original");
+pixel_buffer_free(asRgba); pixel_buffer_free(asArgb);
+assert_eq(argb8_to_rgba8(rgba, err), 0, "argb8_to_rgba8 rejects a non-Argb8 input");
+
+# ================================================================
+# RgbaF32
+# ================================================================
+test_group("rgba f32");
+
+var r8 = mk(2, 1, PF_RGBA8);
+put4(r8, 0, 0, 128, 255, 64);
+put4(r8, 1, 255, 255, 255, 255);
+var f32b = rgba8_to_rgbaf32(r8, err);
+assert_eq(load64(err), RG_ERR_NONE, "rgba8_to_rgbaf32 succeeds");
+assert_eq(pixel_buffer_len(f32b), 2 * 16, "RgbaF32 is 16 bytes per pixel");
+# 0 and 255 must land exactly on 0.0 and 1.0.
+assert_eq(f64_to(f32_to(load32(pixel_buffer_data(f32b)))), 0, "byte 0 becomes exactly 0.0");
+var one_bits = load32(pixel_buffer_data(f32b) + 8);
+assert_eq(f64_to(f64_mul(f32_to(one_bits), 1000.0)), 1000, "byte 255 becomes exactly 1.0");
+
+var back8 = rgbaf32_to_rgba8(f32b, err);
+assert_eq(load64(err), RG_ERR_NONE, "rgbaf32_to_rgba8 succeeds");
+# Every byte must round-trip exactly — the +0.5 rounding is what guarantees it.
+assert_eq(px4(back8, 0, 0, 128, 255, 64), 1, "every channel round-trips exactly through f32");
+assert_eq(px4(back8, 1, 255, 255, 255, 255), 1, "white round-trips exactly");
+pixel_buffer_free(back8);
+
+# Out-of-range and NaN inputs saturate rather than wrapping.
+var wild = mk(1, 1, PF_RGBAF32);
+var wp = pixel_buffer_data(wild);
+store32(wp, f32_from(2.0));
+store32(wp + 4, f32_from(f64_neg(F64_ONE)));
+store32(wp + 8, f32_from(_RG_NAN));
+store32(wp + 12, f32_from(f64_div(100.6, 255.0)));
+var clamped = rgbaf32_to_rgba8(wild, err);
+assert_eq(at(clamped, 0), 255, "an above-range float clamps to 255");
+assert_eq(at(clamped, 1), 0, "a below-range float clamps to 0");
+assert_eq(at(clamped, 2), 0, "a NaN saturates to 0, matching Rust's `as u8`");
+# A ROUND-TRIPPED byte cannot detect the +0.5: for all 256 values
+# f32(b/255)*255 already lands at or above b. An arbitrary float can —
+# 100.6/255 scales back to 100.6, which rounds to 101 and truncates to 100.
+assert_eq(at(clamped, 3), 101, "an arbitrary float rounds half up (101), it does not truncate (100)");
+pixel_buffer_free(clamped); pixel_buffer_free(wild);
+assert_eq(rgbaf32_to_rgba8(rgba, err), 0, "rgbaf32_to_rgba8 rejects a non-RgbaF32 input");
+
+pixel_buffer_free(f32b); pixel_buffer_free(r8); pixel_buffer_free(argb3);
+pixel_buffer_free(rgb); pixel_buffer_free(toRgba); pixel_buffer_free(argb2);
+pixel_buffer_free(greyb); pixel_buffer_free(redb); pixel_buffer_free(rgba);
+pixel_buffer_free(argbb);
+fl_free(yrow); fl_free(src4); fl_free(err);
+
+var exit_code = assert_summary();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

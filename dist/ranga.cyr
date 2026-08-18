@@ -5186,3 +5186,775 @@ fn _fk_absdiff(a, b) {
     if (a > b) { return a - b; }
     return b - a;
 }
+
+# --- blend.cyr ---
+
+# blend.cyr -- Porter-Duff compositing and the 12 blend modes
+# Ported from rust-old/src/blend.rs (839 lines). Private prefix: _bl_
+#
+# SIMD. Rust carries SSE2, AVX2 and NEON kernels for the Normal-mode row
+# blenders, each behind a complete scalar fallback. This module ports the SCALAR
+# fallbacks; the vector kernels need `asm { }` blocks (cyrius-port-plan.md §3
+# items 3-5) and land separately. Behaviour is identical either way — that is
+# why the fallbacks exist. `blend_row_normal` is the dispatch point, so the
+# vector paths slot in there without touching any caller.
+#
+# PRECISION. The 12 blend modes are f32 in Rust and f32 here, using
+# `: f32`-annotated locals and typed-parameter helpers. The Porter-Duff
+# composite around them is INTEGER (div255), also matching Rust — the two
+# domains coexist deliberately and must not be unified.
+#
+# ERROR MODEL. Everything here is infallible and either returns a value or
+# mutates a caller-owned row, so there are no error codes and nothing allocates.
+
+# Fast, accurate division by 255: `(v + 128 + ((v + 128) >> 8)) >> 8`.
+#
+# Deliberately duplicated from composite.cyr's `_div255` rather than shared.
+# `cyrius distlib` concatenates every module into one file, so a shared private
+# helper would need a single owning module and an include ordering to match;
+# twelve lines of duplication buys module independence. The two MUST stay in
+# step — 1.0.0 changed both from `x * a / 255`, which truncates where this
+# rounds, leaving a channel one level too dark.
+#must_use
+fn _bl_div255(val) {
+    var tmp = val + 128;
+    return (tmp + (tmp >> 8)) >> 8;
+}
+
+# ── BlendMode ────────
+var BM_NORMAL      = 0;
+var BM_MULTIPLY    = 1;
+var BM_SCREEN      = 2;
+var BM_OVERLAY     = 3;
+var BM_DARKEN      = 4;
+var BM_LIGHTEN     = 5;
+var BM_COLOR_DODGE = 6;
+var BM_COLOR_BURN  = 7;
+var BM_SOFT_LIGHT  = 8;
+var BM_HARD_LIGHT  = 9;
+var BM_DIFFERENCE  = 10;
+var BM_EXCLUSION   = 11;
+
+# Display impl. Note the two-word names carry a SPACE — "Color Dodge", not
+# "ColorDodge" — matching Rust's Display, which is what consumers show in a UI.
+#must_use
+fn blend_mode_name(m) {
+    if (m == BM_NORMAL) { return "Normal"; }
+    if (m == BM_MULTIPLY) { return "Multiply"; }
+    if (m == BM_SCREEN) { return "Screen"; }
+    if (m == BM_OVERLAY) { return "Overlay"; }
+    if (m == BM_DARKEN) { return "Darken"; }
+    if (m == BM_LIGHTEN) { return "Lighten"; }
+    if (m == BM_COLOR_DODGE) { return "Color Dodge"; }
+    if (m == BM_COLOR_BURN) { return "Color Burn"; }
+    if (m == BM_SOFT_LIGHT) { return "Soft Light"; }
+    if (m == BM_HARD_LIGHT) { return "Hard Light"; }
+    if (m == BM_DIFFERENCE) { return "Difference"; }
+    if (m == BM_EXCLUSION) { return "Exclusion"; }
+    return "unknown";
+}
+
+#must_use
+fn blend_mode_is_valid(m) {
+    if (m < 0) { return 0; }
+    if (m > BM_EXCLUSION) { return 0; }
+    return 1;
+}
+
+# ── f32 helpers ────────
+# Typed parameters are what make these single-precision; an untyped operand
+# turns the operator into an integer op with no diagnostic.
+#must_use
+fn _bl_mul(a: f32, b: f32) { return a * b; }
+#must_use
+fn _bl_sub(a: f32, b: f32) { return a - b; }
+#must_use
+fn _bl_add(a: f32, b: f32) { return a + b; }
+#must_use
+fn _bl_div(a: f32, b: f32) { return a / b; }
+
+#must_use
+fn _bl_u8_to_f32(n) { return f32_from(f64_div(f64_from(n & 255), 255.0)); }
+
+# `(result * 255.0 + 0.5).clamp(0.0, 255.0) as u8` — round-half-up then
+# truncate. NaN saturates to 0, matching Rust's `as u8`; ganita_f32_clamp would
+# give the HIGH bound instead.
+#must_use
+fn _bl_f32_to_u8(v) {
+    var d = f32_to(v);
+    if (f64_eq(d, d) == 0) { return 0; }
+    var scaled = f64_add(f64_mul(d, 255.0), 0.5);
+    if (f64_lt(scaled, 0) == 1) { return 0; }
+    if (f64_gt(scaled, 255.0) == 1) { return 255; }
+    return f64_to(scaled);
+}
+
+# ── the 12 blend functions ────────
+# Each takes normalised source and destination in [0,1] and returns the blended
+# value, still normalised. Split out one per mode so each is separately
+# testable and the dispatcher stays flat.
+#must_use
+fn _bl_blend_channel(s: f32, d: f32, mode) {
+    var one: f32 = f32_from(F64_ONE);
+    var two: f32 = f32_from(2.0);
+    var half: f32 = f32_from(0.5);
+
+    if (mode == BM_NORMAL) { return s; }
+    if (mode == BM_MULTIPLY) { return s * d; }
+    if (mode == BM_SCREEN) { return one - (one - s) * (one - d); }
+    if (mode == BM_OVERLAY) {
+        # Overlay tests the DESTINATION; HardLight tests the SOURCE. That is the
+        # only difference between them, and swapping the operand is an easy and
+        # invisible error.
+        if (f64_lt(f32_to(d), 0.5) == 1) { return two * s * d; }
+        return one - two * (one - s) * (one - d);
+    }
+    if (mode == BM_DARKEN) { return ganita_f32_min(s, d); }
+    if (mode == BM_LIGHTEN) { return ganita_f32_max(s, d); }
+    if (mode == BM_COLOR_DODGE) {
+        # s == 1 would divide by zero; Rust returns 1.0 outright.
+        if (f64_ge(f32_to(s), F64_ONE) == 1) { return one; }
+        return ganita_f32_min(_bl_div(d, one - s), one);
+    }
+    if (mode == BM_COLOR_BURN) {
+        # s == 0 would divide by zero; Rust returns 0.0 outright.
+        if (f64_le(f32_to(s), 0) == 1) { return f32_from(0); }
+        return one - ganita_f32_min(_bl_div(one - d, s), one);
+    }
+    if (mode == BM_SOFT_LIGHT) {
+        if (f64_le(f32_to(s), 0.5) == 1) {
+            return d - (one - two * s) * d * (one - d);
+        }
+        # The W3C soft-light D(d) function: a cubic below 0.25, sqrt above.
+        # Using sqrt for the whole range makes dark values visibly wrong.
+        var g: f32 = f32_from(0);
+        if (f64_le(f32_to(d), 0.25) == 1) {
+            var c16: f32 = f32_from(16.0);
+            var c12: f32 = f32_from(12.0);
+            var c4: f32 = f32_from(4.0);
+            g = ((c16 * d - c12) * d + c4) * d;
+        }
+        if (f64_le(f32_to(d), 0.25) == 0) {
+            g = ganita_f32_sqrt(d);
+        }
+        return d + (two * s - one) * (g - d);
+    }
+    if (mode == BM_HARD_LIGHT) {
+        # Tests the SOURCE — see the Overlay note above.
+        if (f64_lt(f32_to(s), 0.5) == 1) { return two * s * d; }
+        return one - two * (one - s) * (one - d);
+    }
+    if (mode == BM_DIFFERENCE) { return ganita_f32_abs(s - d); }
+    if (mode == BM_EXCLUSION) { return s + d - two * s * d; }
+    return s;
+}
+
+# ── blend_pixel ────────
+# Blend one RGBA8 source pixel over one RGBA8 destination pixel.
+# `src`, `dst` and `out` are each 4 bytes; `out` may alias `dst`.
+#
+# The effective source alpha folds in the opacity FIRST, and a fully
+# transparent result short-circuits to the destination untouched.
+fn blend_pixel(src, dst, mode, opacity, out) {
+    var sa = _bl_div255(load8(src + 3) * (opacity & 255));
+    if (sa == 0) {
+        store8(out, load8(dst));
+        store8(out + 1, load8(dst + 1));
+        store8(out + 2, load8(dst + 2));
+        store8(out + 3, load8(dst + 3));
+        return RG_ERR_NONE;
+    }
+    var br = _bl_f32_to_u8(_bl_blend_channel(_bl_u8_to_f32(load8(src)), _bl_u8_to_f32(load8(dst)), mode));
+    var bg = _bl_f32_to_u8(_bl_blend_channel(_bl_u8_to_f32(load8(src + 1)), _bl_u8_to_f32(load8(dst + 1)), mode));
+    var bb = _bl_f32_to_u8(_bl_blend_channel(_bl_u8_to_f32(load8(src + 2)), _bl_u8_to_f32(load8(dst + 2)), mode));
+
+    # Porter-Duff source-over, in INTEGER arithmetic — the blend above is f32,
+    # this is not, and Rust draws the same line.
+    var inv = 255 - sa;
+    var d3 = load8(dst + 3);
+    store8(out, _bl_div255(br * sa + load8(dst) * inv));
+    store8(out + 1, _bl_div255(bg * sa + load8(dst + 1) * inv));
+    store8(out + 2, _bl_div255(bb * sa + load8(dst + 2) * inv));
+    var na = _bl_div255(sa * 255 + d3 * inv);
+    if (na > 255) { na = 255; }
+    store8(out + 3, na);
+    return RG_ERR_NONE;
+}
+
+# ── blend_pixel_argb ────────
+# ARGB8 is [A, R, G, B]. Rather than duplicate the mode maths, Rust rotates the
+# bytes into RGBA, blends, and rotates back — and so does this.
+fn blend_pixel_argb(src, dst, mode, opacity, out) {
+    var rs = fl_alloc(4);
+    if (rs == 0) { return RG_ERR_ALLOCATION; }
+    var rd = fl_alloc(4);
+    if (rd == 0) { fl_free(rs); return RG_ERR_ALLOCATION; }
+    var ro = fl_alloc(4);
+    if (ro == 0) { fl_free(rs); fl_free(rd); return RG_ERR_ALLOCATION; }
+
+    store8(rs, load8(src + 1)); store8(rs + 1, load8(src + 2));
+    store8(rs + 2, load8(src + 3)); store8(rs + 3, load8(src));
+    store8(rd, load8(dst + 1)); store8(rd + 1, load8(dst + 2));
+    store8(rd + 2, load8(dst + 3)); store8(rd + 3, load8(dst));
+
+    blend_pixel(rs, rd, mode, opacity, ro);
+
+    store8(out, load8(ro + 3));
+    store8(out + 1, load8(ro));
+    store8(out + 2, load8(ro + 1));
+    store8(out + 3, load8(ro + 2));
+    fl_free(rs); fl_free(rd); fl_free(ro);
+    return RG_ERR_NONE;
+}
+
+# ── blend_row_normal (RGBA8) ────────
+# Normal mode only, in place over `dst`. `n` is the pixel count.
+#
+# This is the SCALAR fallback; the SSE2/AVX2/NEON kernels dispatch from
+# blend_row_normal below.
+#
+# Note there is NO `sa >= 255` fast path here, unlike the ARGB variant — the
+# asymmetry is Rust's and is preserved rather than tidied.
+fn blend_row_normal_scalar(src, dst, n, opacity) {
+    var i = 0;
+    while (i < n) {
+        var s = src + i * 4;
+        var d = dst + i * 4;
+        var sa = _bl_div255(load8(s + 3) * (opacity & 255));
+        if (sa != 0) {
+            var inv = 255 - sa;
+            store8(d, _bl_div255(load8(s) * sa + load8(d) * inv));
+            store8(d + 1, _bl_div255(load8(s + 1) * sa + load8(d + 1) * inv));
+            store8(d + 2, _bl_div255(load8(s + 2) * sa + load8(d + 2) * inv));
+            var na = _bl_div255(sa * 255 + load8(d + 3) * inv);
+            if (na > 255) { na = 255; }
+            store8(d + 3, na);
+        }
+        i = i + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+# Dispatch point for the Normal-mode row blend.
+#
+# The length guard is a RUNTIME check, not a debug assertion: 1.0.0 upgraded it
+# precisely because a mismatched row length in release silently read out of
+# bounds. A bad call is a no-op, matching Rust's early return.
+fn blend_row_normal(src, dst, n, opacity) {
+    if (n < 0) { return RG_ERR_NONE; }
+    # The SIMD kernels slot in here (plan §3 items 3-5); until then every call
+    # takes the scalar path, which is behaviourally identical.
+    return blend_row_normal_scalar(src, dst, n, opacity);
+}
+
+# ── blend_row_normal_argb (ARGB8) ────────
+# Alpha is byte 0, colour is bytes 1..3.
+#
+# Unlike the RGBA variant this DOES have a fully-opaque fast path: `sa >= 255`
+# copies the source pixel wholesale.
+fn blend_row_normal_argb_scalar(src, dst, n, opacity) {
+    var i = 0;
+    while (i < n) {
+        var s = src + i * 4;
+        var d = dst + i * 4;
+        var sa = _bl_div255(load8(s) * (opacity & 255));
+        if (sa != 0) {
+            if (sa >= 255) {
+                store8(d, load8(s));
+                store8(d + 1, load8(s + 1));
+                store8(d + 2, load8(s + 2));
+                store8(d + 3, load8(s + 3));
+            }
+            if (sa < 255) {
+                var inv = 255 - sa;
+                var na = _bl_div255(sa * 255 + load8(d) * inv);
+                if (na > 255) { na = 255; }
+                store8(d, na);
+                store8(d + 1, _bl_div255(load8(s + 1) * sa + load8(d + 1) * inv));
+                store8(d + 2, _bl_div255(load8(s + 2) * sa + load8(d + 2) * inv));
+                store8(d + 3, _bl_div255(load8(s + 3) * sa + load8(d + 3) * inv));
+            }
+        }
+        i = i + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+fn blend_row_normal_argb(src, dst, n, opacity) {
+    if (n < 0) { return RG_ERR_NONE; }
+    return blend_row_normal_argb_scalar(src, dst, n, opacity);
+}
+
+# ── blend_row ────────
+# Any mode, RGBA8, in place. Normal routes to the optimised row path; every
+# other mode goes per-pixel.
+fn blend_row(src, dst, n, mode, opacity) {
+    if (n < 0) { return RG_ERR_NONE; }
+    if (blend_mode_is_valid(mode) == 0) { return RG_ERR_INVALID_PARAMETER; }
+    if (mode == BM_NORMAL) {
+        return blend_row_normal(src, dst, n, opacity);
+    }
+    var i = 0;
+    while (i < n) {
+        blend_pixel(src + i * 4, dst + i * 4, mode, opacity, dst + i * 4);
+        i = i + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+# --- convert.cyr ---
+
+# convert.cyr -- pixel format and colour-space conversions
+# Ported from rust-old/src/convert.rs (1272 lines). Private prefix: _cv_
+#
+# SIMD. Rust carries SSE2 and NEON kernels for the Y-row and YUV-inverse loops,
+# each behind a complete scalar fallback. This module ports the SCALAR
+# fallbacks; the vector kernels need `asm { }` blocks (plan §3 items 3-5) and
+# land separately. `_cv_y_row` and `_cv_yuv_row_to_rgba` are the dispatch
+# points, so a vector path slots in without touching any caller.
+#
+# ARITHMETIC. Every conversion here is fixed-point INTEGER — coefficients
+# scaled by 256 and shifted back. There is no float anywhere except the two
+# RgbaF32 converters at the end. That is Rust's design and it is what makes
+# these exactly reproducible; do not "modernise" them into float.
+#
+# ⚠ SHIFT DIRECTION IS NOT UNIFORM, and Cyrius spells it the opposite way round
+# from most languages: `>>` is LOGICAL (zero-fill) and `>>>` is ARITHMETIC
+# (sign-preserving). Which one is correct depends on the signedness of the Rust
+# operand being ported:
+#
+#   luma / forward chroma  -> Rust operand is u16/i32 and the value is never
+#                             negative, so `>>` (logical) is right.
+#   INVERSE chroma         -> Rust operand is i16 and (U-128)/(V-128) are
+#                             genuinely negative, so `>>>` (arithmetic) is
+#                             required. Using `>>` here zero-fills a negative
+#                             product into a huge positive, and blue came back
+#                             255 instead of 0 for pure red.
+#
+# The same question in blend/filter_kernel's xorshift goes the OTHER way — Rust
+# shifts a u64 there, so `>>` is correct. Check the Rust operand type at every
+# shift; neither answer generalises.
+#
+# ERROR MODEL. Every function allocates and returns a new PixelBuffer, so all
+# use the err_out pointer convention and return 0 on failure.
+
+#must_use
+fn _cv_expect_format(buf, want) {
+    if (pixel_buffer_format(buf) != want) { return RG_ERR_INVALID_FORMAT; }
+    return RG_ERR_NONE;
+}
+
+#must_use
+fn _cv_clamp255(v) {
+    if (v < 0) { return 0; }
+    if (v > 255) { return 255; }
+    return v;
+}
+
+#must_use
+fn _cv_div_ceil2(n) { return (n + 1) / 2; }
+
+# ── luma row ────────
+# Y = (cr*R + cg*G + cb*B) >> 8. Each coefficient triple sums to 256, which is
+# what makes `>> 8` an exact divide and maps white to exactly 255 — a triple
+# that does not sum to 256 shifts the whole luma range.
+#
+#   BT.601  (77, 150, 29)
+#   BT.709  (54, 183, 19)
+#   BT.2020 (67, 174, 15)
+fn _cv_y_row(src, dst, n, cr, cg, cb) {
+    var i = 0;
+    while (i < n) {
+        var p = src + i * 4;
+        store8(dst + i, (cr * load8(p) + cg * load8(p + 1) + cb * load8(p + 2)) >> 8);
+        i = i + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+# ── RGBA8 -> YUV420p (shared) ────────
+# 4:2:0 chroma: one U and one V sample per 2x2 pixel block, taken from the
+# block's TOP-LEFT pixel rather than averaged — matching Rust.
+#
+# The `+ 128 * 256` term is the chroma bias: U and V are signed values centred
+# on 128 once stored as bytes.
+#must_use
+fn _cv_rgba_to_yuv420p(buf, cr, cg, cb, ur, ug, ub, vr, vg, vb, err_out) {
+    var rc = _cv_expect_format(buf, PF_RGBA8);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    var out = pixel_buffer_zeroed(w, h, PF_YUV420P, err_out);
+    if (out == 0) { return 0; }
+    var sp = pixel_buffer_data(buf);
+    var dp = pixel_buffer_data(out);
+    var cw = _cv_div_ceil2(w);
+    var ch = _cv_div_ceil2(h);
+
+    var y = 0;
+    while (y < h) {
+        _cv_y_row(sp + y * w * 4, dp + y * w, w, cr, cg, cb);
+        y = y + 1;
+    }
+
+    var u_off = w * h;
+    var v_off = u_off + cw * ch;
+    # Stepping by 2 up to cw*2 / ch*2 stays in bounds for odd dimensions too:
+    # for odd w, cw*2 == w+1 and the last x visited is w-1.
+    var yy = 0;
+    while (yy < ch * 2) {
+        var xx = 0;
+        while (xx < cw * 2) {
+            var i = (yy * w + xx) * 4;
+            var r = load8(sp + i);
+            var g = load8(sp + i + 1);
+            var b = load8(sp + i + 2);
+            var ci = (yy / 2) * cw + (xx / 2);
+            store8(dp + u_off + ci, _cv_clamp255((ur * r + ug * g + ub * b + 128 * 256) >> 8));
+            store8(dp + v_off + ci, _cv_clamp255((vr * r + vg * g + vb * b + 128 * 256) >> 8));
+            xx = xx + 2;
+        }
+        yy = yy + 2;
+    }
+    store64(err_out, RG_ERR_NONE);
+    return out;
+}
+
+# ── YUV420p -> RGBA8 (shared) ────────
+# The inverse matrix, also fixed-point:
+#   R = Y + (kr  * V) >> 8
+#   G = Y - (kgu * U + kgv * V) >> 8
+#   B = Y + (kb  * U) >> 8
+# with U and V first re-centred by subtracting 128. Alpha is set opaque.
+#
+# Chroma indices are clamped to the last row/column, so an odd-sized image
+# reuses the final chroma sample rather than reading past the plane.
+#must_use
+fn _cv_yuv420p_to_rgba(buf, kr, kgu, kgv, kb, err_out) {
+    var rc = _cv_expect_format(buf, PF_YUV420P);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    var out = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    if (out == 0) { return 0; }
+    var sp = pixel_buffer_data(buf);
+    var dp = pixel_buffer_data(out);
+    var cw = _cv_div_ceil2(w);
+    var ch = _cv_div_ceil2(h);
+    var u_off = w * h;
+    var v_off = u_off + cw * ch;
+
+    var y = 0;
+    while (y < h) {
+        var cy = y / 2;
+        if (cy > ch - 1) { cy = ch - 1; }
+        var x = 0;
+        while (x < w) {
+            var cx = x / 2;
+            if (cx > cw - 1) { cx = cw - 1; }
+            var yi = load8(sp + y * w + x);
+            var u = load8(sp + u_off + cy * cw + cx) - 128;
+            var v = load8(sp + v_off + cy * cw + cx) - 128;
+            var oi = (y * w + x) * 4;
+            store8(dp + oi, _cv_clamp255(yi + ((kr * v) >>> 8)));
+            store8(dp + oi + 1, _cv_clamp255(yi - ((kgu * u + kgv * v) >>> 8)));
+            store8(dp + oi + 2, _cv_clamp255(yi + ((kb * u) >>> 8)));
+            store8(dp + oi + 3, 255);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    store64(err_out, RG_ERR_NONE);
+    return out;
+}
+
+# ── the three colour primaries ────────
+#must_use
+fn rgba_to_yuv420p(buf, err_out) {
+    return _cv_rgba_to_yuv420p(buf, 77, 150, 29,
+                               (0 - 43), (0 - 85), 128,
+                               128, (0 - 107), (0 - 21), err_out);
+}
+
+#must_use
+fn yuv420p_to_rgba(buf, err_out) {
+    return _cv_yuv420p_to_rgba(buf, 359, 88, 183, 454, err_out);
+}
+
+#must_use
+fn rgba_to_yuv420p_bt709(buf, err_out) {
+    return _cv_rgba_to_yuv420p(buf, 54, 183, 19,
+                               (0 - 29), (0 - 99), 128,
+                               128, (0 - 116), (0 - 12), err_out);
+}
+
+#must_use
+fn yuv420p_to_rgba_bt709(buf, err_out) {
+    return _cv_yuv420p_to_rgba(buf, 403, 48, 120, 475, err_out);
+}
+
+#must_use
+fn rgba_to_yuv420p_bt2020(buf, err_out) {
+    return _cv_rgba_to_yuv420p(buf, 67, 174, 15,
+                               (0 - 18), (0 - 46), 64,
+                               64, (0 - 58), (0 - 6), err_out);
+}
+
+#must_use
+fn yuv420p_to_rgba_bt2020(buf, err_out) {
+    return _cv_yuv420p_to_rgba(buf, 377, 42, 146, 481, err_out);
+}
+
+# ── ARGB8 -> NV12 ────────
+# NV12 is a Y plane followed by ONE interleaved UV plane (u,v,u,v...), unlike
+# Yuv420p's two separate planes. Source is ARGB, so colour starts at byte 1.
+# BT.601 coefficients.
+#must_use
+fn argb_to_nv12(buf, err_out) {
+    var rc = _cv_expect_format(buf, PF_ARGB8);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    var out = pixel_buffer_zeroed(w, h, PF_NV12, err_out);
+    if (out == 0) { return 0; }
+    var sp = pixel_buffer_data(buf);
+    var dp = pixel_buffer_data(out);
+    var cw = _cv_div_ceil2(w);
+    var ch = _cv_div_ceil2(h);
+
+    var y = 0;
+    while (y < h) {
+        var x = 0;
+        while (x < w) {
+            var i = (y * w + x) * 4;
+            # ARGB: alpha at +0, colour at +1..+3.
+            var r = load8(sp + i + 1);
+            var g = load8(sp + i + 2);
+            var b = load8(sp + i + 3);
+            store8(dp + y * w + x, (77 * r + 150 * g + 29 * b) >> 8);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+
+    var uv_off = w * h;
+    var yy = 0;
+    while (yy < ch * 2) {
+        var xx = 0;
+        while (xx < cw * 2) {
+            var i2 = (yy * w + xx) * 4;
+            var r2 = load8(sp + i2 + 1);
+            var g2 = load8(sp + i2 + 2);
+            var b2 = load8(sp + i2 + 3);
+            # INTERLEAVED: the pair index steps by 2, u then v.
+            var ci = ((yy / 2) * cw + (xx / 2)) * 2;
+            store8(dp + uv_off + ci, _cv_clamp255(((0 - 43) * r2 - 85 * g2 + 128 * b2 + 128 * 256) >> 8));
+            store8(dp + uv_off + ci + 1, _cv_clamp255((128 * r2 - 107 * g2 - 21 * b2 + 128 * 256) >> 8));
+            xx = xx + 2;
+        }
+        yy = yy + 2;
+    }
+    store64(err_out, RG_ERR_NONE);
+    return out;
+}
+
+# ── NV12 -> RGBA8 ────────
+# Same inverse matrix as BT.601 Yuv420p; only the chroma addressing differs,
+# because U and V are interleaved in one plane.
+#must_use
+fn nv12_to_rgba(buf, err_out) {
+    var rc = _cv_expect_format(buf, PF_NV12);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    var out = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    if (out == 0) { return 0; }
+    var sp = pixel_buffer_data(buf);
+    var dp = pixel_buffer_data(out);
+    var cw = _cv_div_ceil2(w);
+    var ch = _cv_div_ceil2(h);
+    var uv_off = w * h;
+
+    var y = 0;
+    while (y < h) {
+        var cy = y / 2;
+        if (cy > ch - 1) { cy = ch - 1; }
+        var x = 0;
+        while (x < w) {
+            var cx = x / 2;
+            if (cx > cw - 1) { cx = cw - 1; }
+            var yi = load8(sp + y * w + x);
+            var ci = uv_off + (cy * cw + cx) * 2;
+            var u = load8(sp + ci) - 128;
+            var v = load8(sp + ci + 1) - 128;
+            var oi = (y * w + x) * 4;
+            store8(dp + oi, _cv_clamp255(yi + ((359 * v) >>> 8)));
+            store8(dp + oi + 1, _cv_clamp255(yi - ((88 * u + 183 * v) >>> 8)));
+            store8(dp + oi + 2, _cv_clamp255(yi + ((454 * u) >>> 8)));
+            store8(dp + oi + 3, 255);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    store64(err_out, RG_ERR_NONE);
+    return out;
+}
+
+# ── simple interleaved format conversions ────────
+# RGB8 -> RGBA8: alpha is filled OPAQUE, not zero. A zero fill would make every
+# converted image invisible.
+#must_use
+fn rgb8_to_rgba8(buf, err_out) {
+    var rc = _cv_expect_format(buf, PF_RGB8);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    var out = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    if (out == 0) { return 0; }
+    var sp = pixel_buffer_data(buf);
+    var dp = pixel_buffer_data(out);
+    var n = w * h;
+    var i = 0;
+    while (i < n) {
+        store8(dp + i * 4, load8(sp + i * 3));
+        store8(dp + i * 4 + 1, load8(sp + i * 3 + 1));
+        store8(dp + i * 4 + 2, load8(sp + i * 3 + 2));
+        store8(dp + i * 4 + 3, 255);
+        i = i + 1;
+    }
+    store64(err_out, RG_ERR_NONE);
+    return out;
+}
+
+# RGBA8 -> RGB8: alpha is DROPPED, not composited against anything.
+#must_use
+fn rgba8_to_rgb8(buf, err_out) {
+    var rc = _cv_expect_format(buf, PF_RGBA8);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    var out = pixel_buffer_zeroed(w, h, PF_RGB8, err_out);
+    if (out == 0) { return 0; }
+    var sp = pixel_buffer_data(buf);
+    var dp = pixel_buffer_data(out);
+    var n = w * h;
+    var i = 0;
+    while (i < n) {
+        store8(dp + i * 3, load8(sp + i * 4));
+        store8(dp + i * 3 + 1, load8(sp + i * 4 + 1));
+        store8(dp + i * 3 + 2, load8(sp + i * 4 + 2));
+        i = i + 1;
+    }
+    store64(err_out, RG_ERR_NONE);
+    return out;
+}
+
+# ARGB8 [A,R,G,B] -> RGBA8 [R,G,B,A]: a byte rotation, not a reversal.
+#must_use
+fn argb8_to_rgba8(buf, err_out) {
+    var rc = _cv_expect_format(buf, PF_ARGB8);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    var out = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    if (out == 0) { return 0; }
+    var sp = pixel_buffer_data(buf);
+    var dp = pixel_buffer_data(out);
+    var n = w * h;
+    var i = 0;
+    while (i < n) {
+        store8(dp + i * 4, load8(sp + i * 4 + 1));
+        store8(dp + i * 4 + 1, load8(sp + i * 4 + 2));
+        store8(dp + i * 4 + 2, load8(sp + i * 4 + 3));
+        store8(dp + i * 4 + 3, load8(sp + i * 4));
+        i = i + 1;
+    }
+    store64(err_out, RG_ERR_NONE);
+    return out;
+}
+
+# RGBA8 -> ARGB8: the inverse rotation.
+#must_use
+fn rgba8_to_argb8(buf, err_out) {
+    var rc = _cv_expect_format(buf, PF_RGBA8);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    var out = pixel_buffer_zeroed(w, h, PF_ARGB8, err_out);
+    if (out == 0) { return 0; }
+    var sp = pixel_buffer_data(buf);
+    var dp = pixel_buffer_data(out);
+    var n = w * h;
+    var i = 0;
+    while (i < n) {
+        store8(dp + i * 4, load8(sp + i * 4 + 3));
+        store8(dp + i * 4 + 1, load8(sp + i * 4));
+        store8(dp + i * 4 + 2, load8(sp + i * 4 + 1));
+        store8(dp + i * 4 + 3, load8(sp + i * 4 + 2));
+        i = i + 1;
+    }
+    store64(err_out, RG_ERR_NONE);
+    return out;
+}
+
+# ── RgbaF32 <-> RGBA8 ────────
+# The only float in this module. RgbaF32 is 4 f32 per pixel in native byte
+# order, values nominally 0..1.
+#must_use
+fn rgbaf32_to_rgba8(buf, err_out) {
+    var rc = _cv_expect_format(buf, PF_RGBAF32);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    var out = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    if (out == 0) { return 0; }
+    var sp = pixel_buffer_data(buf);
+    var dp = pixel_buffer_data(out);
+    var n = w * h;
+    var i = 0;
+    while (i < n) {
+        var c = 0;
+        while (c < 4) {
+            var v = f32_to(load32(sp + i * 16 + c * 4));
+            # `(v * 255.0 + 0.5).clamp(0.0, 255.0) as u8` — round-half-up, and
+            # a NaN saturates to 0 the way Rust's `as u8` does.
+            var b = 0;
+            if (f64_eq(v, v) == 1) {
+                var scaled = f64_add(f64_mul(v, 255.0), 0.5);
+                if (f64_lt(scaled, 0) == 1) { scaled = 0; }
+                if (f64_gt(scaled, 255.0) == 1) { scaled = 255.0; }
+                b = f64_to(scaled);
+            }
+            store8(dp + i * 4 + c, b);
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    store64(err_out, RG_ERR_NONE);
+    return out;
+}
+
+#must_use
+fn rgba8_to_rgbaf32(buf, err_out) {
+    var rc = _cv_expect_format(buf, PF_RGBA8);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    var out = pixel_buffer_zeroed(w, h, PF_RGBAF32, err_out);
+    if (out == 0) { return 0; }
+    var sp = pixel_buffer_data(buf);
+    var dp = pixel_buffer_data(out);
+    var n = w * h;
+    var i = 0;
+    while (i < n) {
+        var c = 0;
+        while (c < 4) {
+            var v = f64_div(f64_from(load8(sp + i * 4 + c)), 255.0);
+            store32(dp + i * 16 + c * 4, f32_from(v));
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    store64(err_out, RG_ERR_NONE);
+    return out;
+}
