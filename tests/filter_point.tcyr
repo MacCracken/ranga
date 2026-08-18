@@ -1,0 +1,387 @@
+# filter_point.tcyr — per-pixel tone and colour filters
+# Ported from rust-old/src/filter.rs #[cfg(test)] and doctests, point half.
+# Expected values came from a Python oracle replicating the Rust f32 formulas.
+
+include "src/error.cyr"
+include "src/bytevec.cyr"
+include "src/pixel.cyr"
+include "src/color.cyr"
+include "src/filter_point.cyr"
+
+alloc_init();
+
+var err = fl_alloc(8);
+
+fn f32c(x) { return f32_from(x); }
+
+fn mkbuf(w, h) { return pixel_buffer_zeroed(w, h, PF_RGBA8, err); }
+
+fn put(b, i, r, g, bl, a) {
+    var p = pixel_buffer_data(b) + i * 4;
+    store8(p, r); store8(p + 1, g); store8(p + 2, bl); store8(p + 3, a);
+    return 0;
+}
+fn chan(b, i, c) { return load8(pixel_buffer_data(b) + i * 4 + c); }
+
+fn px3(b, i, r, g, bl) {
+    if (chan(b, i, 0) != r) { return 0; }
+    if (chan(b, i, 1) != g) { return 0; }
+    if (chan(b, i, 2) != bl) { return 0; }
+    return 1;
+}
+
+var argb = pixel_buffer_zeroed(2, 2, PF_ARGB8, err);
+
+# ================================================================
+# The two luminance kernels are DIFFERENT and both are used
+# ================================================================
+test_group("luminance kernels");
+
+# grayscale/threshold use integer 77/150/29 >> 8; saturation/vibrance/
+# color_balance use float 0.299/0.587/0.114. Pure blue is where they disagree:
+# 29*255>>8 == 28, but 0.114*255 == 29.07 -> 29. Unifying the two would be an
+# easy "simplification" and this is what catches it.
+assert_eq(_fp_luma_u8(0, 0, 255), 28, "integer kernel: pure blue is 28");
+assert_eq(f64_to(f32_to(_fp_luma_f32(f32c(0.0), f32c(0.0), f32c(255.0)))), 29, "float kernel: pure blue is 29");
+assert_eq(_fp_luma_u8(255, 0, 0), 76, "integer kernel: pure red is 76");
+assert_eq(_fp_luma_u8(0, 255, 0), 149, "integer kernel: pure green is 149");
+assert_eq(_fp_luma_u8(128, 128, 128), 128, "integer kernel is exact on grey (coeffs sum to 256)");
+
+# The NaN clamp: Rust's f32::clamp passes NaN through and `as u8` saturates it
+# to 0. ganita_f32_clamp would return the HIGH bound instead — the opposite.
+test_group("nan clamp");
+assert_eq(_fp_f32_to_u8(f32_from(_RG_NAN)), 0, "NaN as u8 is 0, not 255");
+assert_eq(_fp_f32_to_u8(f32c(300.0)), 255, "above-range clamps to 255");
+assert_eq(_fp_f32_to_u8(f32c(f64_neg(10.0))), 0, "below-range clamps to 0");
+assert_eq(_fp_f32_to_u8(f32c(128.9)), 128, "in-range TRUNCATES, it does not round");
+
+# ================================================================
+# brightness — integer shift
+# ================================================================
+test_group("brightness");
+
+var b1 = mkbuf(2, 1);
+put(b1, 0, 100, 150, 200, 40);
+put(b1, 1, 10, 20, 30, 255);
+assert_eq(brightness(b1, f32c(0.1)), RG_ERR_NONE, "brightness succeeds");
+# 0.1 * 255 = 25.5, and `as i16` TRUNCATES to 25 — not 26. A rounding term here
+# would shift every pixel by one.
+assert_eq(px3(b1, 0, 125, 175, 225), 1, "brightness shift truncates 25.5 to 25");
+assert_eq(chan(b1, 0, 3), 40, "brightness leaves a non-255 alpha alone");
+
+# Saturating at both ends.
+put(b1, 0, 250, 5, 128, 255);
+assert_eq(brightness(b1, f32c(0.1)), RG_ERR_NONE, "brightness up succeeds");
+assert_eq(px3(b1, 0, 255, 30, 153), 1, "brightness clamps at 255, not wrapping");
+put(b1, 0, 10, 200, 30, 255);
+assert_eq(brightness(b1, f32c(f64_neg(0.1))), RG_ERR_NONE, "negative brightness succeeds");
+assert_eq(px3(b1, 0, 0, 175, 5), 1, "negative brightness clamps at 0, not wrapping");
+assert_eq(brightness(argb, f32c(0.1)), RG_ERR_INVALID_FORMAT, "brightness rejects non-Rgba8");
+
+# ================================================================
+# contrast — pivots on 128
+# ================================================================
+test_group("contrast");
+
+var b2 = mkbuf(5, 1);
+put(b2, 0, 0, 0, 0, 255);
+put(b2, 1, 64, 64, 64, 255);
+put(b2, 2, 128, 128, 128, 255);
+put(b2, 3, 192, 192, 192, 255);
+put(b2, 4, 255, 255, 255, 255);
+assert_eq(contrast(b2, f32c(2.0)), RG_ERR_NONE, "contrast succeeds");
+assert_eq(chan(b2, 0, 0), 0, "contrast 2x: 0 -> 0");
+assert_eq(chan(b2, 1, 0), 0, "contrast 2x: 64 -> 0");
+# 128 is the PIVOT and must be exactly fixed — this is the identity that pins
+# the pivot value. A pivot of 127 or 129 moves it.
+assert_eq(chan(b2, 2, 0), 128, "contrast 2x leaves the 128 pivot exactly fixed");
+assert_eq(chan(b2, 3, 0), 255, "contrast 2x: 192 -> 255");
+assert_eq(chan(b2, 4, 0), 255, "contrast 2x: 255 -> 255");
+
+# factor 1.0 is the identity everywhere.
+put(b2, 1, 64, 100, 200, 255);
+assert_eq(contrast(b2, f32c(1.0)), RG_ERR_NONE, "contrast 1.0 succeeds");
+assert_eq(px3(b2, 1, 64, 100, 200), 1, "contrast factor 1.0 is the identity");
+
+# ================================================================
+# saturation — float luma
+# ================================================================
+test_group("saturation");
+
+var b3 = mkbuf(1, 1);
+put(b3, 0, 200, 100, 50, 128);
+assert_eq(saturation(b3, f32c(0.0)), RG_ERR_NONE, "saturation 0 succeeds");
+# factor 0 collapses to the FLOAT luma, 124.199... -> 124.
+assert_eq(px3(b3, 0, 124, 124, 124), 1, "saturation 0 collapses to the float luma (124)");
+assert_eq(chan(b3, 0, 3), 128, "saturation leaves alpha alone");
+
+put(b3, 0, 200, 100, 50, 255);
+assert_eq(saturation(b3, f32c(1.0)), RG_ERR_NONE, "saturation 1 succeeds");
+assert_eq(px3(b3, 0, 200, 100, 50), 1, "saturation factor 1.0 is the identity");
+
+# (200,100,50) does NOT discriminate the red coefficient: 0.299 and 0.300 both
+# give 124. Oracle-picked (7,21,84) does — 23 vs 24 — so a mistyped 0.299 is
+# caught here rather than shipping.
+put(b3, 0, 7, 21, 84, 255);
+assert_eq(saturation(b3, f32c(0.0)), RG_ERR_NONE, "saturation 0 on the discriminating pixel");
+assert_eq(px3(b3, 0, 23, 23, 23), 1, "float luma of (7,21,84) is 23 — pins the 0.299 coefficient");
+
+# ================================================================
+# levels
+# ================================================================
+test_group("levels");
+
+var b4 = mkbuf(3, 1);
+put(b4, 0, 0, 0, 0, 255);
+put(b4, 1, 128, 128, 128, 255);
+put(b4, 2, 255, 255, 255, 255);
+# Doctest: black=0, white=1, gamma=1 is the identity.
+assert_eq(levels(b4, f32c(0.0), f32c(1.0), f32c(1.0)), RG_ERR_NONE, "identity levels succeeds");
+assert_eq(chan(b4, 0, 0), 0, "identity levels: 0 stays 0 (doctest)");
+assert_eq(chan(b4, 1, 0), 128, "identity levels: 128 stays 128");
+assert_eq(chan(b4, 2, 0), 255, "identity levels: 255 stays 255");
+
+# The gamma guard is `<= 0`, not `== 0`. A NEGATIVE gamma must be rejected too —
+# an equality check would let it through into powf(1/negative).
+assert_eq(levels(b4, f32c(0.0), f32c(1.0), f32c(0.0)), RG_ERR_INVALID_PARAMETER, "gamma 0 is rejected");
+assert_eq(levels(b4, f32c(0.0), f32c(1.0), f32c(f64_neg(1.0))), RG_ERR_INVALID_PARAMETER, "NEGATIVE gamma is rejected too");
+assert_eq(levels(b4, f32c(0.0), f32c(1.0), f32_from(_RG_NAN)), RG_ERR_INVALID_PARAMETER, "NaN gamma is rejected");
+
+# A zero-width window must not divide by zero — the range is floored at 1e-6.
+put(b4, 1, 128, 128, 128, 255);
+assert_eq(levels(b4, f32c(0.5), f32c(0.5), f32c(1.0)), RG_ERR_NONE, "a zero-width window does not divide by zero");
+# A non-identity curve, where the LUT entries do NOT land on exact integers.
+# The identity case above cannot see the +0.5 round-half-up term because every
+# entry is already integral; oracle says input 26 -> 17 with the term and 16
+# without.
+var b4b = mkbuf(2, 1);
+put(b4b, 0, 26, 33, 37, 255);
+put(b4b, 1, 38, 40, 26, 255);
+assert_eq(levels(b4b, f32c(0.1), f32c(0.9), f32c(2.2)), RG_ERR_NONE, "non-identity levels succeeds");
+assert_eq(px3(b4b, 0, 17, 57, 69), 1, "levels rounds half up (26->17, not 16)");
+assert_eq(px3(b4b, 1, 72, 77, 17), 1, "levels rounding holds across the curve");
+pixel_buffer_free(b4b);
+
+assert_eq(levels(argb, f32c(0.0), f32c(1.0), f32c(1.0)), RG_ERR_INVALID_FORMAT, "levels rejects non-Rgba8");
+
+# ================================================================
+# curves
+# ================================================================
+test_group("curves");
+
+var lut = fl_alloc(256);
+var li = 0;
+while (li < 256) { store8(lut + li, 255 - li); li = li + 1; }   # inverting LUT
+var b5 = mkbuf(1, 1);
+put(b5, 0, 10, 128, 245, 77);
+assert_eq(curves(b5, lut), RG_ERR_NONE, "curves succeeds");
+assert_eq(px3(b5, 0, 245, 127, 10), 1, "curves applies the LUT per channel");
+assert_eq(chan(b5, 0, 3), 77, "curves leaves alpha alone");
+assert_eq(curves(b5, 0), RG_ERR_INVALID_PARAMETER, "curves rejects a null LUT");
+assert_eq(curves(argb, lut), RG_ERR_INVALID_FORMAT, "curves rejects non-Rgba8");
+
+# ================================================================
+# grayscale / invert / threshold
+# ================================================================
+test_group("grayscale");
+
+var b6 = mkbuf(3, 1);
+put(b6, 0, 255, 0, 0, 255);
+put(b6, 1, 0, 255, 0, 255);
+put(b6, 2, 0, 0, 255, 200);
+assert_eq(grayscale(b6), RG_ERR_NONE, "grayscale succeeds");
+assert_eq(px3(b6, 0, 76, 76, 76), 1, "grayscale red -> 76 (integer kernel)");
+assert_eq(px3(b6, 1, 149, 149, 149), 1, "grayscale green -> 149");
+# 28, not 29 — this is the integer kernel, not the float one.
+assert_eq(px3(b6, 2, 28, 28, 28), 1, "grayscale blue -> 28, the INTEGER kernel result");
+assert_eq(chan(b6, 2, 3), 200, "grayscale leaves alpha alone");
+assert_eq(grayscale(argb), RG_ERR_INVALID_FORMAT, "grayscale rejects non-Rgba8");
+
+test_group("invert");
+var b7 = mkbuf(1, 1);
+put(b7, 0, 0, 128, 255, 40);
+assert_eq(invert(b7), RG_ERR_NONE, "invert succeeds");
+assert_eq(px3(b7, 0, 255, 127, 0), 1, "invert is 255 - c per channel");
+assert_eq(chan(b7, 0, 3), 40, "invert leaves alpha alone");
+assert_eq(invert(b7), RG_ERR_NONE, "invert twice succeeds");
+assert_eq(px3(b7, 0, 0, 128, 255), 1, "invert twice is the identity");
+
+test_group("threshold");
+var b8 = mkbuf(2, 1);
+put(b8, 0, 0, 0, 255, 255);     # integer luma 28
+put(b8, 1, 0, 255, 0, 255);     # integer luma 149
+assert_eq(threshold(b8, 100), RG_ERR_NONE, "threshold succeeds");
+assert_eq(px3(b8, 0, 0, 0, 0), 1, "luma 28 below level 100 -> black");
+assert_eq(px3(b8, 1, 255, 255, 255), 1, "luma 149 above level 100 -> white");
+
+# The comparison is INCLUSIVE: lum == level is white. A strict `>` would make
+# this black, and no other assertion here distinguishes the two.
+put(b8, 0, 0, 0, 255, 255);
+assert_eq(threshold(b8, 28), RG_ERR_NONE, "threshold at exactly the luma succeeds");
+assert_eq(px3(b8, 0, 255, 255, 255), 1, "lum == level is WHITE (>=, not >)");
+put(b8, 0, 0, 0, 255, 255);
+assert_eq(threshold(b8, 29), RG_ERR_NONE, "threshold one above the luma succeeds");
+assert_eq(px3(b8, 0, 0, 0, 0), 1, "lum one below level is black");
+
+# ================================================================
+# hue_shift
+# ================================================================
+test_group("hue shift");
+
+var b9 = mkbuf(1, 1);
+put(b9, 0, 255, 0, 0, 128);
+# Red is hue 0; +120 degrees is green.
+assert_eq(hue_shift(b9, f32c(120.0)), RG_ERR_NONE, "hue_shift succeeds");
+assert_eq(px3(b9, 0, 0, 255, 0), 1, "red shifted +120deg is green");
+assert_eq(hue_shift(b9, f32c(120.0)), RG_ERR_NONE, "second shift succeeds");
+assert_eq(px3(b9, 0, 0, 0, 255), 1, "green shifted +120deg is blue");
+assert_eq(hue_shift(b9, f32c(120.0)), RG_ERR_NONE, "third shift succeeds");
+assert_eq(px3(b9, 0, 255, 0, 0), 1, "three +120deg shifts return to red");
+
+# A NEGATIVE shift must wrap into [0, 360) — rem_euclid, not `%`. With `%` the
+# hue would go negative and hsl_to_srgba would produce the wrong colour.
+put(b9, 0, 255, 0, 0, 255);
+assert_eq(hue_shift(b9, f32c(f64_neg(120.0))), RG_ERR_NONE, "negative hue_shift succeeds");
+assert_eq(px3(b9, 0, 0, 0, 255), 1, "red shifted -120deg wraps to blue (rem_euclid, not %)");
+
+# A single -120 does NOT prove rem_euclid: _hue_to_rgb already applies one
+# +1/-1 wrap of its own, so a raw -120 still lands on blue. Beyond a full turn
+# that single wrap is not enough — -480 must also give blue, and +840 green.
+put(b9, 0, 255, 0, 0, 255);
+assert_eq(hue_shift(b9, f32c(f64_neg(480.0))), RG_ERR_NONE, "hue_shift -480deg succeeds");
+assert_eq(px3(b9, 0, 0, 0, 255), 1, "red shifted -480deg is blue (needs a real rem_euclid)");
+put(b9, 0, 255, 0, 0, 255);
+assert_eq(hue_shift(b9, f32c(840.0)), RG_ERR_NONE, "hue_shift +840deg succeeds");
+assert_eq(px3(b9, 0, 0, 255, 0), 1, "red shifted +840deg is green (two full turns plus 120)");
+
+# Grey has no hue, so any shift leaves it alone.
+put(b9, 0, 128, 128, 128, 255);
+assert_eq(hue_shift(b9, f32c(90.0)), RG_ERR_NONE, "hue_shift on grey succeeds");
+assert_eq(px3(b9, 0, 128, 128, 128), 1, "grey is achromatic — hue_shift is a no-op");
+assert_eq(hue_shift(argb, f32c(90.0)), RG_ERR_INVALID_FORMAT, "hue_shift rejects non-Rgba8");
+
+# ================================================================
+# color_balance
+# ================================================================
+test_group("color balance");
+
+var zeros = fl_calloc(12);
+var ba = mkbuf(3, 1);
+put(ba, 0, 10, 10, 10, 255);
+put(ba, 1, 128, 128, 128, 255);
+put(ba, 2, 245, 245, 245, 255);
+# All-zero adjustments are the identity — this is what pins that the three
+# weights sum to 1 rather than to something else.
+assert_eq(color_balance(ba, zeros, zeros, zeros), RG_ERR_NONE, "neutral color_balance succeeds");
+assert_eq(px3(ba, 0, 10, 10, 10), 1, "neutral color_balance is the identity (shadow)");
+assert_eq(px3(ba, 1, 128, 128, 128), 1, "neutral color_balance is the identity (midtone)");
+assert_eq(px3(ba, 2, 245, 245, 245), 1, "neutral color_balance is the identity (highlight)");
+
+# A shadows-only red lift must move the dark pixel much more than the bright one.
+var shad = fl_calloc(12);
+store32(shad, f32c(0.2));
+assert_eq(color_balance(ba, shad, zeros, zeros), RG_ERR_NONE, "shadow lift succeeds");
+var dark_r = chan(ba, 0, 0);
+var light_r = chan(ba, 2, 0);
+assert_gt(dark_r, 10, "the shadow pixel's red was lifted");
+assert_eq(light_r, 245, "the highlight pixel was NOT touched by a shadows-only lift");
+assert_eq(chan(ba, 0, 1), 10, "a red-only lift leaves green alone");
+assert_eq(color_balance(argb, zeros, zeros, zeros), RG_ERR_INVALID_FORMAT, "color_balance rejects non-Rgba8");
+
+# ================================================================
+# vibrance
+# ================================================================
+test_group("vibrance");
+
+var bb = mkbuf(2, 1);
+put(bb, 0, 150, 120, 90, 255);   # partly saturated
+put(bb, 1, 255, 0, 0, 255);      # fully saturated primary
+assert_eq(vibrance(bb, f32c(1.0)), RG_ERR_NONE, "vibrance succeeds");
+# Oracle: sat 0.4 -> factor 1.6 -> (164, 116, 68).
+assert_eq(px3(bb, 0, 164, 116, 68), 1, "the partly-saturated pixel is boosted");
+# The whole point of vibrance: an already-saturated pixel has sat == 1, so
+# factor == 1 and it is left EXACTLY alone. Plain saturation would push it.
+assert_eq(px3(bb, 1, 255, 0, 0), 1, "a fully-saturated primary is untouched (sat == 1 -> factor 1)");
+
+# Black has max == 0, where saturation is undefined; Rust pins sat to 0 rather
+# than dividing, so the pixel stays black instead of becoming NaN.
+put(bb, 0, 0, 0, 0, 255);
+assert_eq(vibrance(bb, f32c(1.0)), RG_ERR_NONE, "vibrance on black succeeds");
+assert_eq(px3(bb, 0, 0, 0, 0), 1, "black stays black (the max == 0 guard)");
+# (No assertion can distinguish this guard from its absence, and saying so is
+# more honest than faking one. Without it, sat = 0/0 = NaN, factor = NaN, and
+# each channel becomes NaN * (0 - 0) = NaN, which `as u8` saturates to 0 — the
+# same black. Rust has the identical structure and the identical outcome. The
+# guard is defensive: it keeps a NaN out of the arithmetic rather than relying
+# on the clamp to absorb it.)
+assert_eq(vibrance(argb, f32c(1.0)), RG_ERR_INVALID_FORMAT, "vibrance rejects non-Rgba8");
+
+# ================================================================
+# channel_mixer
+# ================================================================
+test_group("channel mixer");
+
+var mid = fl_calloc(36);
+store32(mid, f32c(1.0)); store32(mid + 16, f32c(1.0)); store32(mid + 32, f32c(1.0));
+var bc = mkbuf(1, 1);
+put(bc, 0, 200, 100, 50, 90);
+assert_eq(channel_mixer(bc, mid), RG_ERR_NONE, "identity mixer succeeds");
+assert_eq(px3(bc, 0, 200, 100, 50), 1, "an identity matrix is the identity");
+assert_eq(chan(bc, 0, 3), 90, "channel_mixer leaves alpha alone");
+
+# A channel SWAP (r<->b) proves the rows are read from the ORIGINAL pixel. If
+# the writes fed each other, blue would come back 200 twice.
+var mswap = fl_calloc(36);
+store32(mswap + 8, f32c(1.0));    # out_r = b
+store32(mswap + 16, f32c(1.0));   # out_g = g
+store32(mswap + 24, f32c(1.0));   # out_b = r
+put(bc, 0, 200, 100, 50, 255);
+assert_eq(channel_mixer(bc, mswap), RG_ERR_NONE, "swap mixer succeeds");
+assert_eq(px3(bc, 0, 50, 100, 200), 1, "r and b swap — rows read the ORIGINAL channels");
+assert_eq(channel_mixer(bc, 0), RG_ERR_INVALID_PARAMETER, "channel_mixer rejects a null matrix");
+
+# ================================================================
+# auto_white_balance
+# ================================================================
+test_group("auto white balance");
+
+var bd = mkbuf(2, 1);
+put(bd, 0, 200, 100, 50, 255);
+put(bd, 1, 200, 100, 50, 255);
+assert_eq(auto_white_balance(bd), RG_ERR_NONE, "auto_white_balance succeeds");
+# Grey-world: a uniformly tinted image is pulled to neutral grey. Oracle gives
+# scales 0.5833 / 1.1667 / 2.3333 and all three channels land on 116.
+assert_eq(px3(bd, 0, 116, 116, 116), 1, "a uniform tint is corrected to neutral grey");
+assert_eq(chan(bd, 0, 3), 255, "auto_white_balance leaves alpha alone");
+
+# A near-black channel (mean <= 5) is left alone rather than divided into.
+# Without the guard the scale would be enormous.
+var be = mkbuf(1, 1);
+put(be, 0, 200, 200, 2, 255);
+assert_eq(auto_white_balance(be), RG_ERR_NONE, "awb with a near-black channel succeeds");
+assert_eq(chan(be, 0, 2), 2, "a channel whose mean is <= 5 is left untouched");
+
+# The scale clamp: a strongly tinted image cannot be pushed beyond 3x.
+var bf = mkbuf(1, 1);
+put(bf, 0, 255, 20, 20, 255);
+assert_eq(auto_white_balance(bf), RG_ERR_NONE, "awb on a strong tint succeeds");
+# 20 * 3.0 == 60 exactly at the clamp; an unclamped scale would give ~98.
+assert_eq(chan(bf, 0, 1), 60, "the scale is clamped at 3.0 (20 * 3 == 60)");
+
+# An empty buffer is not an error.
+var bg = pixel_buffer_zeroed(0, 0, PF_RGBA8, err);
+assert_eq(auto_white_balance(bg), RG_ERR_NONE, "an empty buffer is not an error");
+pixel_buffer_free(bg);
+assert_eq(auto_white_balance(argb), RG_ERR_INVALID_FORMAT, "awb rejects non-Rgba8");
+
+pixel_buffer_free(b1); pixel_buffer_free(b2); pixel_buffer_free(b3);
+pixel_buffer_free(b4); pixel_buffer_free(b5); pixel_buffer_free(b6);
+pixel_buffer_free(b7); pixel_buffer_free(b8); pixel_buffer_free(b9);
+pixel_buffer_free(ba); pixel_buffer_free(bb); pixel_buffer_free(bc);
+pixel_buffer_free(bd); pixel_buffer_free(be); pixel_buffer_free(bf);
+pixel_buffer_free(argb);
+fl_free(lut); fl_free(zeros); fl_free(shad); fl_free(mid); fl_free(mswap); fl_free(err);
+
+var exit_code = assert_summary();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

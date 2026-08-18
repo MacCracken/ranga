@@ -3752,3 +3752,519 @@ fn perspective_transform(buf, p, out_w, out_h, filter, err_out) {
     store64(err_out, RG_ERR_NONE);
     return out;
 }
+
+# --- filter_point.cyr ---
+
+# filter_point.cyr -- per-pixel tone and colour filters
+# Ported from the POINT half of rust-old/src/filter.rs. Private prefix: _fp_
+#
+# filter.rs is 2007 lines and 23 public functions; it is split here into
+# filter_point.cyr (13 per-pixel ops) and filter_kernel.cyr (10 neighbourhood
+# and generative ops), because Cyrius src/ is flat — the same reason prakash
+# split ray/mod.rs into ray_core / ray_fresnel / etc.
+#
+# SIMD. Rust has SSE2/AVX2/NEON paths for brightness and grayscale behind
+# `#[cfg(feature = "simd")]`, each with a complete scalar fallback. This module
+# ports the SCALAR fallbacks only; the vector kernels are M3, where they need
+# `asm { }` blocks. Behaviour is identical either way — that is the point of the
+# fallbacks existing.
+#
+# PRECISION. Rust computes these in f32 and truncates to u8. This module does the
+# same, using `: f32`-annotated locals and bare operators, rather than widening
+# to f64. That is not pedantry: bicubic in transform.cyr showed a f64-vs-f32
+# difference of 4e-14 landing on opposite sides of a truncation boundary.
+#
+# ERROR MODEL. Every function here mutates in place and returns an RG_ERR_* code
+# directly — there is no value to return, so no err_out pointer is needed.
+# Nothing here allocates, so there is nothing to free.
+
+#must_use
+fn _fp_validate_rgba8(buf) {
+    if (pixel_buffer_format(buf) != PF_RGBA8) { return RG_ERR_INVALID_FORMAT; }
+    return RG_ERR_NONE;
+}
+
+# Rust's `.clamp(0.0, 255.0) as u8`, NaN semantics included.
+#
+# ⚠ NOT ganita_f32_clamp. Rust's f32::clamp passes a NaN straight through
+# (because `NaN < min` and `NaN > max` are both false) and the following
+# `as u8` then SATURATES it to 0. ganita's monotone-key clamp instead ranks NaN
+# above every finite value and would return 255 — the opposite end. A NaN
+# reaches here whenever a caller passes a NaN factor, so this is a real input,
+# not a theoretical one.
+#
+# The comparisons are done in f64: the bounds are exact small integers so no
+# precision is lost, and the f64 comparison helpers are the well-trodden path.
+#must_use
+fn _fp_f32_to_u8(v) {
+    var d = f32_to(v);
+    # NaN is the one value not equal to itself.
+    if (f64_eq(d, d) == 0) { return 0; }
+    if (f64_lt(d, 0) == 1) { return 0; }
+    if (f64_gt(d, 255.0) == 1) { return 255; }
+    return f64_to(d);
+}
+
+# u8 -> f32 bits.
+#must_use
+fn _fp_u8_to_f32(n) { return f32_from(f64_from(n)); }
+
+# BT.601 luminance in FLOAT form: 0.299 / 0.587 / 0.114. Distinct from the
+# integer 77/150/29 kernel used by grayscale and threshold — the two coexist in
+# the Rust and must not be unified, because the integer form divides by 256 and
+# the float form does not.
+#must_use
+fn _fp_luma_f32(r: f32, g: f32, b: f32) {
+    # The coefficients must be bound to `: f32` locals before use. Written
+    # inline as `f32_from(0.299) * r` the LEFT operand is a call result, which
+    # is untyped, and `*` silently becomes an integer multiply — this exact
+    # spelling returned 0 for every pixel until the bindings were added.
+    var kr: f32 = f32_from(0.299);
+    var kg: f32 = f32_from(0.587);
+    var kb: f32 = f32_from(0.114);
+    return kr * r + kg * g + kb * b;
+}
+
+# One row of a 3x3 matrix in single precision. The `: f32` annotations on the
+# parameters are load-bearing — see port-mechanics.md; an untyped operand makes
+# `*` an integer multiply, silently.
+#must_use
+fn _fp_f32_dot3(m0: f32, m1: f32, m2: f32, x: f32, y: f32, z: f32) {
+    return m0 * x + m1 * y + m2 * z;
+}
+
+# Integer BT.601 luminance, exactly as grayscale_scalar and threshold write it.
+# 77 + 150 + 29 == 256, so `>> 8` is an exact divide by the coefficient sum.
+#must_use
+fn _fp_luma_u8(r, g, b) {
+    return (77 * r + 150 * g + 29 * b) >> 8;
+}
+
+# ── brightness ────────
+# INTEGER arithmetic, deliberately: Rust converts the f32 offset to an i16 shift
+# once and then does integer add-and-clamp per channel. Doing this in float
+# would round differently at the clamp boundaries.
+fn brightness(buf, offset) {
+    var rc = _fp_validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { return rc; }
+    # `(offset * 255.0) as i16` — truncation toward zero, not rounding.
+    var shift = f64_to(f64_mul(f32_to(offset), 255.0));
+    var p = pixel_buffer_data(buf);
+    var n = pixel_buffer_pixel_count(buf);
+    var i = 0;
+    while (i < n) {
+        var q = p + i * 4;
+        var c = 0;
+        while (c < 3) {
+            var v = load8(q + c) + shift;
+            if (v < 0) { v = 0; }
+            if (v > 255) { v = 255; }
+            store8(q + c, v);
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+# ── contrast ────────
+# Pivots around 128, not around the image mean.
+fn contrast(buf, factor) {
+    var rc = _fp_validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { return rc; }
+    var f: f32 = factor;
+    var mid: f32 = f32_from(128.0);
+    var p = pixel_buffer_data(buf);
+    var n = pixel_buffer_pixel_count(buf);
+    var i = 0;
+    while (i < n) {
+        var q = p + i * 4;
+        var c = 0;
+        while (c < 3) {
+            var v: f32 = _fp_u8_to_f32(load8(q + c));
+            store8(q + c, _fp_f32_to_u8((v - mid) * f + mid));
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+# ── saturation ────────
+# Interpolates each channel away from its luminance. factor 0 gives greyscale,
+# 1 is the identity, above 1 oversaturates.
+fn saturation(buf, factor) {
+    var rc = _fp_validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { return rc; }
+    var f: f32 = factor;
+    var p = pixel_buffer_data(buf);
+    var n = pixel_buffer_pixel_count(buf);
+    var i = 0;
+    while (i < n) {
+        var q = p + i * 4;
+        var r: f32 = _fp_u8_to_f32(load8(q));
+        var g: f32 = _fp_u8_to_f32(load8(q + 1));
+        var b: f32 = _fp_u8_to_f32(load8(q + 2));
+        var gray: f32 = _fp_luma_f32(r, g, b);
+        store8(q, _fp_f32_to_u8(gray + f * (r - gray)));
+        store8(q + 1, _fp_f32_to_u8(gray + f * (g - gray)));
+        store8(q + 2, _fp_f32_to_u8(gray + f * (b - gray)));
+        i = i + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+# ── levels ────────
+# Black/white point remap plus gamma, via a 256-entry LUT.
+#
+# The gamma guard is `<= 0`, NOT `== 0`: a negative gamma would give
+# powf(1/negative), which is a legal but meaningless curve. 1.0.0 added this
+# guard, where gamma == 0 previously computed powf(infinity).
+fn levels(buf, black, white, gamma) {
+    var rc = _fp_validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { return rc; }
+    var gd = f32_to(gamma);
+    if (f64_eq(gd, gd) == 0) { return RG_ERR_INVALID_PARAMETER; }
+    if (f64_le(gd, 0) == 1) { return RG_ERR_INVALID_PARAMETER; }
+
+    var bl: f32 = black;
+    # `(white - black).max(1e-6)` — the floor stops a zero-width window from
+    # dividing by zero, and it is applied to the RANGE, not to white.
+    var wh: f32 = white;
+    var rng: f32 = wh - bl;
+    var floor6: f32 = f32_from(0.000001);
+    if (f64_lt(f32_to(rng), 0.000001) == 1) { rng = floor6; }
+    var invg: f64 = f64_div(F64_ONE, gd);
+
+    var lut = fl_alloc(256);
+    if (lut == 0) { return RG_ERR_ALLOCATION; }
+    var i = 0;
+    while (i < 256) {
+        var v: f32 = f32_from(f64_div(f64_from(i), 255.0));
+        var mapped: f32 = (v - bl) / rng;
+        var md = f32_to(mapped);
+        if (f64_lt(md, 0) == 1) { md = 0; }
+        if (f64_gt(md, F64_ONE) == 1) { md = F64_ONE; }
+        # powf is done in f64 through the Rust-semantics shim: a fully black
+        # channel is mapped == 0.0, and the bare ganita_f64_pow returns NaN for
+        # a zero base where Rust returns 0.0.
+        var corrected: f64 = _rg_pow(md, invg);
+        # `* 255.0 + 0.5` then clamp then truncate — round-half-up, unlike the
+        # bare truncation used by contrast/saturation. Rust differs between
+        # these two sites and the port keeps the difference.
+        var scaled: f64 = f64_add(f64_mul(corrected, 255.0), 0.5);
+        if (f64_lt(scaled, 0) == 1) { scaled = 0; }
+        if (f64_gt(scaled, 255.0) == 1) { scaled = 255.0; }
+        store8(lut + i, f64_to(scaled));
+        i = i + 1;
+    }
+
+    var p = pixel_buffer_data(buf);
+    var n = pixel_buffer_pixel_count(buf);
+    var j = 0;
+    while (j < n) {
+        var q = p + j * 4;
+        store8(q, load8(lut + load8(q)));
+        store8(q + 1, load8(lut + load8(q + 1)));
+        store8(q + 2, load8(lut + load8(q + 2)));
+        j = j + 1;
+    }
+    fl_free(lut);
+    return RG_ERR_NONE;
+}
+
+# ── curves ────────
+# Applies a caller-supplied 256-byte LUT. Alpha is untouched.
+fn curves(buf, lut) {
+    var rc = _fp_validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { return rc; }
+    if (lut == 0) { return RG_ERR_INVALID_PARAMETER; }
+    var p = pixel_buffer_data(buf);
+    var n = pixel_buffer_pixel_count(buf);
+    var i = 0;
+    while (i < n) {
+        var q = p + i * 4;
+        store8(q, load8(lut + load8(q)));
+        store8(q + 1, load8(lut + load8(q + 1)));
+        store8(q + 2, load8(lut + load8(q + 2)));
+        i = i + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+# ── grayscale ────────
+# The INTEGER 77/150/29 kernel with `>> 8`, matching grayscale_scalar. Not the
+# float 0.299/0.587/0.114 form — they give different bytes.
+fn grayscale(buf) {
+    var rc = _fp_validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { return rc; }
+    var p = pixel_buffer_data(buf);
+    var n = pixel_buffer_pixel_count(buf);
+    var i = 0;
+    while (i < n) {
+        var q = p + i * 4;
+        var gray = _fp_luma_u8(load8(q), load8(q + 1), load8(q + 2));
+        store8(q, gray);
+        store8(q + 1, gray);
+        store8(q + 2, gray);
+        i = i + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+# ── invert ────────
+fn invert(buf) {
+    var rc = _fp_validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { return rc; }
+    var p = pixel_buffer_data(buf);
+    var n = pixel_buffer_pixel_count(buf);
+    var i = 0;
+    while (i < n) {
+        var q = p + i * 4;
+        store8(q, 255 - load8(q));
+        store8(q + 1, 255 - load8(q + 1));
+        store8(q + 2, 255 - load8(q + 2));
+        i = i + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+# ── hue_shift ────────
+# Round-trips through HSL, rotating the hue. Uses colour.cyr's conversions so
+# the two modules cannot drift apart.
+#
+# The wrap is rem_euclid, not `%`: a negative shift must land in [0, 360), and
+# `%` in both Rust and Cyrius keeps the sign of the dividend.
+fn hue_shift(buf, degrees) {
+    var rc = _fp_validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { return rc; }
+    var deg: f64 = f32_to(degrees);
+    var p = pixel_buffer_data(buf);
+    var n = pixel_buffer_pixel_count(buf);
+    var tmp = srgba_new(0, 0, 0, 255);
+    if (tmp == 0) { return RG_ERR_ALLOCATION; }
+    var i = 0;
+    while (i < n) {
+        var q = p + i * 4;
+        srgba_set(tmp, load8(q), load8(q + 1), load8(q + 2), load8(q + 3));
+        var hsl = srgba_to_hsl(tmp);
+        if (hsl == 0) { srgba_free(tmp); return RG_ERR_ALLOCATION; }
+        var h: f64 = f32_to(hsl_h(hsl));
+        store32(hsl, f32_from(_rg_rem_euclid(f64_add(h, deg), 360.0)));
+        var back = hsl_to_srgba(hsl);
+        hsl_free(hsl);
+        if (back == 0) { srgba_free(tmp); return RG_ERR_ALLOCATION; }
+        # Alpha is deliberately NOT written back: hsl_to_srgba returns opaque,
+        # and Rust only copies r/g/b here.
+        store8(q, srgba_r(back));
+        store8(q + 1, srgba_g(back));
+        store8(q + 2, srgba_b(back));
+        srgba_free(back);
+        i = i + 1;
+    }
+    srgba_free(tmp);
+    return RG_ERR_NONE;
+}
+
+# ── color_balance ────────
+# Three-way tonal adjustment. `shadows`, `midtones` and `highlights` are each
+# 3 f32 bit patterns (r, g, b) in a 12-byte array.
+#
+# The weights are a smooth partition: shadows peak at luminance 0, highlights at
+# 1, and midtones take whatever is left — so the three always sum to 1 and a
+# neutral adjustment is exactly the identity.
+fn color_balance(buf, shadows, midtones, highlights) {
+    var rc = _fp_validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { return rc; }
+    var p = pixel_buffer_data(buf);
+    var n = pixel_buffer_pixel_count(buf);
+    var one: f32 = f32_from(F64_ONE);
+    var two: f32 = f32_from(2.0);
+    var half: f32 = f32_from(0.5);
+    var i = 0;
+    while (i < n) {
+        var q = p + i * 4;
+        var r: f32 = _fp_u8_to_f32(load8(q));
+        var g: f32 = _fp_u8_to_f32(load8(q + 1));
+        var b: f32 = _fp_u8_to_f32(load8(q + 2));
+        var lumsum: f32 = _fp_luma_f32(r, g, b);
+        var f255: f32 = f32_from(255.0);
+        var lum: f32 = lumsum / f255;
+
+        var swv: f32 = one - lum * two;
+        var swd = f32_to(swv);
+        if (f64_lt(swd, 0) == 1) { swd = 0; }
+        if (f64_gt(swd, F64_ONE) == 1) { swd = F64_ONE; }
+        var hwv: f32 = (lum - half) * two;
+        var hwd = f32_to(hwv);
+        if (f64_lt(hwd, 0) == 1) { hwd = 0; }
+        if (f64_gt(hwd, F64_ONE) == 1) { hwd = F64_ONE; }
+        var sw: f32 = f32_from(swd);
+        var hw: f32 = f32_from(hwd);
+        var mw: f32 = one - sw - hw;
+
+        var c = 0;
+        while (c < 3) {
+            var sc: f32 = load32(shadows + c * 4);
+            var mc: f32 = load32(midtones + c * 4);
+            var hc: f32 = load32(highlights + c * 4);
+            var adj: f32 = sc * sw + mc * mw + hc * hw;
+            var cur: f32 = _fp_u8_to_f32(load8(q + c));
+            store8(q + c, _fp_f32_to_u8(cur + adj * f255));
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+# ── vibrance ────────
+# Saturation that spares already-saturated pixels: the boost is scaled by
+# (1 - sat), so skin tones move and a pure primary barely does.
+fn vibrance(buf, amount) {
+    var rc = _fp_validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { return rc; }
+    var amt: f32 = amount;
+    var one: f32 = f32_from(F64_ONE);
+    var p = pixel_buffer_data(buf);
+    var n = pixel_buffer_pixel_count(buf);
+    var i = 0;
+    while (i < n) {
+        var q = p + i * 4;
+        var r: f32 = _fp_u8_to_f32(load8(q));
+        var g: f32 = _fp_u8_to_f32(load8(q + 1));
+        var b: f32 = _fp_u8_to_f32(load8(q + 2));
+        var mx: f32 = ganita_f32_max(ganita_f32_max(r, g), b);
+        var mn: f32 = ganita_f32_min(ganita_f32_min(r, g), b);
+        # max == 0 means a black pixel: saturation is undefined, and Rust pins
+        # it to 0 rather than dividing.
+        var sat: f32 = f32_from(0);
+        if (f64_gt(f32_to(mx), 0) == 1) { sat = (mx - mn) / mx; }
+        var factor: f32 = one + amt * (one - sat);
+        var gray: f32 = _fp_luma_f32(r, g, b);
+        store8(q, _fp_f32_to_u8(gray + factor * (r - gray)));
+        store8(q + 1, _fp_f32_to_u8(gray + factor * (g - gray)));
+        store8(q + 2, _fp_f32_to_u8(gray + factor * (b - gray)));
+        i = i + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+# ── channel_mixer ────────
+# `matrix` is 9 f32 bit patterns, row-major: out_r = m[0] . (r,g,b), etc.
+fn channel_mixer(buf, matrix) {
+    var rc = _fp_validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { return rc; }
+    if (matrix == 0) { return RG_ERR_INVALID_PARAMETER; }
+    var p = pixel_buffer_data(buf);
+    var n = pixel_buffer_pixel_count(buf);
+    var i = 0;
+    while (i < n) {
+        var q = p + i * 4;
+        var r: f32 = _fp_u8_to_f32(load8(q));
+        var g: f32 = _fp_u8_to_f32(load8(q + 1));
+        var b: f32 = _fp_u8_to_f32(load8(q + 2));
+        # All three rows are read from the ORIGINAL r/g/b, so the writes cannot
+        # feed each other — mixing in place without the temporaries would make
+        # the green row see an already-mixed red.
+        var nr = _fp_f32_to_u8(_fp_f32_dot3(load32(matrix), load32(matrix + 4), load32(matrix + 8), r, g, b));
+        var ng = _fp_f32_to_u8(_fp_f32_dot3(load32(matrix + 12), load32(matrix + 16), load32(matrix + 20), r, g, b));
+        var nb = _fp_f32_to_u8(_fp_f32_dot3(load32(matrix + 24), load32(matrix + 28), load32(matrix + 32), r, g, b));
+        store8(q, nr);
+        store8(q + 1, ng);
+        store8(q + 2, nb);
+        i = i + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+# ── threshold ────────
+# Integer luminance against `level`, inclusive: `lum >= level` is white.
+fn threshold(buf, level) {
+    var rc = _fp_validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { return rc; }
+    var p = pixel_buffer_data(buf);
+    var n = pixel_buffer_pixel_count(buf);
+    var i = 0;
+    while (i < n) {
+        var q = p + i * 4;
+        var lum = _fp_luma_u8(load8(q), load8(q + 1), load8(q + 2));
+        var v = 0;
+        if (lum >= level) { v = 255; }
+        store8(q, v);
+        store8(q + 1, v);
+        store8(q + 2, v);
+        i = i + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+# ── auto_white_balance ────────
+# Grey-world assumption: scale each channel so its mean matches the overall mean.
+#
+# Two guards that both matter. A channel mean at or below 5 is left alone
+# (scale 1.0) rather than divided into — otherwise a nearly-black channel gets
+# an enormous multiplier. And each scale is clamped to [0.5, 3.0], so even a
+# strongly tinted image cannot be pushed to a wild correction.
+fn auto_white_balance(buf) {
+    var rc = _fp_validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { return rc; }
+    var n = pixel_buffer_pixel_count(buf);
+    if (n == 0) { return RG_ERR_NONE; }
+    var p = pixel_buffer_data(buf);
+
+    # Sums are integer: at 255 per channel a buffer would need 2^55 pixels to
+    # overflow an i64, so no widening is needed.
+    var sr = 0;
+    var sg = 0;
+    var sb = 0;
+    var i = 0;
+    while (i < n) {
+        var q = p + i * 4;
+        sr = sr + load8(q);
+        sg = sg + load8(q + 1);
+        sb = sb + load8(q + 2);
+        i = i + 1;
+    }
+    var cnt: f32 = f32_from(f64_from(n));
+    # Bind each sum to a typed f32 BEFORE dividing. `f32_from(f64_from(sr)) / cnt`
+    # has a call result on the LEFT, which is untyped, so `/` becomes an integer
+    # divide — the channel means all came out as 1 and every scale collapsed to
+    # 1.0, i.e. auto_white_balance silently did nothing.
+    var fr: f32 = f32_from(f64_from(sr));
+    var fg: f32 = f32_from(f64_from(sg));
+    var fb: f32 = f32_from(f64_from(sb));
+    var ar: f32 = fr / cnt;
+    var ag: f32 = fg / cnt;
+    var ab: f32 = fb / cnt;
+    var three: f32 = f32_from(3.0);
+    var agray: f32 = (ar + ag + ab) / three;
+
+    var kr: f32 = _fp_awb_scale(agray, ar);
+    var kg: f32 = _fp_awb_scale(agray, ag);
+    var kb: f32 = _fp_awb_scale(agray, ab);
+
+    var j = 0;
+    while (j < n) {
+        var q2 = p + j * 4;
+        var r: f32 = _fp_u8_to_f32(load8(q2));
+        var g: f32 = _fp_u8_to_f32(load8(q2 + 1));
+        var b: f32 = _fp_u8_to_f32(load8(q2 + 2));
+        store8(q2, _fp_f32_to_u8(r * kr));
+        store8(q2 + 1, _fp_f32_to_u8(g * kg));
+        store8(q2 + 2, _fp_f32_to_u8(b * kb));
+        j = j + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+# The per-channel scale, with the >5 floor and the [0.5, 3.0] clamp.
+#must_use
+fn _fp_awb_scale(agray: f32, avg: f32) {
+    if (f64_gt(f32_to(avg), 5.0) == 0) { return f32_from(F64_ONE); }
+    var s: f32 = agray / avg;
+    var d = f32_to(s);
+    if (f64_lt(d, 0.5) == 1) { return f32_from(0.5); }
+    if (f64_gt(d, 3.0) == 1) { return f32_from(3.0); }
+    return s;
+}

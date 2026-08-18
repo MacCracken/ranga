@@ -35,6 +35,7 @@ modules = [
     "src/composite.cyr",
     "src/histogram.cyr",
     "src/transform.cyr",
+    "src/filter_point.cyr",
 ]
 
 # Kept deliberately minimal: add a module here only when a ported `src/*.cyr`
