@@ -87,6 +87,16 @@ fn _fp_luma_u8(r, g, b) {
 # INTEGER arithmetic, deliberately: Rust converts the f32 offset to an i16 shift
 # once and then does integer add-and-clamp per channel. Doing this in float
 # would round differently at the clamp boundaries.
+#
+# VECTORISED via simd_u8.cyr. Saturating add/sub IS the clamp — paddusb pins at
+# 255 and psubusb at 0 — so the whole per-channel guard collapses into one
+# instruction. The catch is that it also hits the alpha lane, which must be
+# left alone, so the result is masked back against the original (exactly what
+# Rust's brightness_sse2 does with its two _mm_set_epi8 masks).
+#
+# Four pixels per iteration; the tail runs the scalar path. The two must agree,
+# which tests/filter_point.tcyr checks with a deliberately non-multiple-of-4
+# buffer.
 fn brightness(buf, offset) {
     var rc = _fp_validate_rgba8(buf);
     if (rc != RG_ERR_NONE) { return rc; }
@@ -94,15 +104,49 @@ fn brightness(buf, offset) {
     var shift = f64_to(f64_mul(f32_to(offset), 255.0));
     var p = pixel_buffer_data(buf);
     var n = pixel_buffer_pixel_count(buf);
-    var i = 0;
+
+    var groups = n / 4;
+    if (groups > 0) {
+        var amask = fl_alloc(16);
+        var rmask = fl_alloc(16);
+        var val = fl_alloc(16);
+        var tmp = fl_alloc(16);
+        if (amask == 0) { return RG_ERR_ALLOCATION; }
+        if (rmask == 0) { fl_free(amask); return RG_ERR_ALLOCATION; }
+        if (val == 0) { fl_free(amask); fl_free(rmask); return RG_ERR_ALLOCATION; }
+        if (tmp == 0) { fl_free(amask); fl_free(rmask); fl_free(val); return RG_ERR_ALLOCATION; }
+        _sx_alpha_mask16(amask);
+        _sx_rgb_mask16(rmask);
+
+        # Rust clamps the broadcast magnitude to 255 before splatting; a larger
+        # shift cannot do more than saturate every lane anyway.
+        var mag = shift;
+        if (mag < 0) { mag = 0 - mag; }
+        if (mag > 255) { mag = 255; }
+        _sx_splat16(val, mag);
+
+        var g = 0;
+        while (g < groups) {
+            var q = p + g * 16;
+            if (shift >= 0) { _sx_addus16(q, val, tmp); }
+            if (shift < 0) { _sx_subus16(q, val, tmp); }
+            # Colour lanes from the shifted vector, alpha lane from the original.
+            _sx_select16(q, tmp, amask, rmask, q);
+            g = g + 1;
+        }
+        fl_free(amask); fl_free(rmask); fl_free(val); fl_free(tmp);
+    }
+
+    # Scalar tail for the pixels past the last whole group.
+    var i = groups * 4;
     while (i < n) {
-        var q = p + i * 4;
+        var q2 = p + i * 4;
         var c = 0;
         while (c < 3) {
-            var v = load8(q + c) + shift;
+            var v = load8(q2 + c) + shift;
             if (v < 0) { v = 0; }
             if (v > 255) { v = 255; }
-            store8(q + c, v);
+            store8(q2 + c, v);
             c = c + 1;
         }
         i = i + 1;

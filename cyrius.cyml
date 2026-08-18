@@ -30,6 +30,7 @@ output = "build/ranga"
 modules = [
     "src/error.cyr",
     "src/bytevec.cyr",
+    "src/simd_u8.cyr",
     "src/pixel.cyr",
     "src/color.cyr",
     "src/composite.cyr",

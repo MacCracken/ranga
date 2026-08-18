@@ -108,10 +108,25 @@ three consecutive API 529 failures made the agent path unreliable.
 - [x] `src/convert.cyr` — all 14 fns: BT.601/709/2020 in both directions,
       NV12 both ways, and the six interleaved/f32 format converters.
       96 assertions; 17/17 mutants caught.
-- [ ] `asm { }` vector kernels — the SSE2/AVX2/NEON paths behind
-      `blend_row_normal`, `_cv_y_row` and `_cv_yuv_row_to_rgba`. Both modules
-      dispatch through those three points, so the kernels slot in without
-      touching a caller. Ports plan §3 items 3-5.
+- [x] `src/simd_u8.cyr` — plan §3 items **3 and 5**: hand-encoded saturating u8
+      add/sub (`paddusb`/`psubusb`), packed unsigned min/max (`pminub`/`pmaxub`),
+      and a masked lane select. Every encoding produced by `llvm-mc`, every
+      primitive differentially tested against its own scalar fallback over an
+      exhaustive input sweep. 34 assertions.
+- [x] `brightness` vectorised end-to-end — 4 pixels per iteration with an alpha
+      mask-and-restore (paddusb cannot skip a lane), plus a scalar tail. Proven
+      to agree with the scalar path on a deliberately non-multiple-of-4 buffer.
+- [ ] Remaining kernels — `_cv_y_row` (pmaddwd), `_cv_yuv_row_to_rgba`,
+      `blend_row_normal`, `grayscale`. All four dispatch points are in place and
+      the primitives + verified ABI are now proven, so these are additive.
+      Plan §3 item 4 (256-bit AVX2) sits behind them.
+
+⚠ **A correct SIMD path is invisible to output testing.** Mutating the group
+count so fewer pixels take the vector path leaves every assertion passing,
+because the scalar fallback agrees by construction. These tests prove the paths
+AGREE; proving which one *ran* needs a benchmark or instrumentation. Budget for
+that when the remaining kernels land — otherwise a silently-disabled SIMD path
+looks exactly like a working one.
 
 Not fanned out to agents, per `port-mechanics.md` — and the shift-direction bug
 below is exactly why.

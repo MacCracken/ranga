@@ -6,6 +6,7 @@ include "src/error.cyr"
 include "src/bytevec.cyr"
 include "src/pixel.cyr"
 include "src/color.cyr"
+include "src/simd_u8.cyr"
 include "src/filter_point.cyr"
 
 alloc_init();
@@ -76,6 +77,51 @@ assert_eq(px3(b1, 0, 255, 30, 153), 1, "brightness clamps at 255, not wrapping")
 put(b1, 0, 10, 200, 30, 255);
 assert_eq(brightness(b1, f32c(f64_neg(0.1))), RG_ERR_NONE, "negative brightness succeeds");
 assert_eq(px3(b1, 0, 0, 175, 5), 1, "negative brightness clamps at 0, not wrapping");
+# ── SIMD path vs scalar tail ──
+#
+# ⚠ A correct SIMD path is INVISIBLE to output testing by construction. Mutating
+# `groups = n / 4` to `n / 4 - 1` simply sends more pixels down the scalar tail,
+# and because the two paths agree — which is the whole point — every assertion
+# still passes. These tests prove the paths AGREE; they cannot prove which one
+# ran. Confirming the vector path actually executes needs a benchmark or
+# instrumentation, not an assertion. The same is true of every dispatch point in
+# blend.cyr and convert.cyr.
+# Every case above uses a 2-pixel buffer, so groups == 0 and only the scalar
+# tail ran — the vector path was completely untested. Six pixels gives one full
+# 4-pixel SIMD group plus a 2-pixel tail, and the two must agree exactly.
+var b6 = mkbuf(6, 1);
+var bi = 0;
+while (bi < 6) { put(b6, bi, 100, 200, 250, 40); bi = bi + 1; }
+assert_eq(brightness(b6, f32c(0.1)), RG_ERR_NONE, "6-pixel brightness succeeds");
+# shift = 25. 100->125, 200->225, 250 SATURATES to 255, alpha 40 untouched.
+assert_eq(px3(b6, 0, 125, 225, 255), 1, "SIMD group pixel 0: saturating add");
+assert_eq(chan(b6, 0, 3), 40, "SIMD group pixel 0: alpha survives paddusb");
+assert_eq(px3(b6, 3, 125, 225, 255), 1, "SIMD group pixel 3 (last of the group)");
+assert_eq(chan(b6, 3, 3), 40, "SIMD group pixel 3: alpha survives");
+assert_eq(px3(b6, 4, 125, 225, 255), 1, "scalar tail pixel 4 agrees with the SIMD group");
+assert_eq(px3(b6, 5, 125, 225, 255), 1, "scalar tail pixel 5 agrees");
+assert_eq(chan(b6, 5, 3), 40, "scalar tail preserves alpha too");
+pixel_buffer_free(b6);
+
+# The negative branch takes psubusb, and must saturate at 0 rather than wrap.
+var b6n = mkbuf(6, 1);
+var bn = 0;
+while (bn < 6) { put(b6n, bn, 10, 200, 30, 77); bn = bn + 1; }
+assert_eq(brightness(b6n, f32c(f64_neg(0.1))), RG_ERR_NONE, "negative 6-pixel brightness succeeds");
+assert_eq(px3(b6n, 0, 0, 175, 5), 1, "SIMD group: psubusb saturates at 0");
+assert_eq(chan(b6n, 0, 3), 77, "SIMD group: alpha survives psubusb");
+assert_eq(px3(b6n, 5, 0, 175, 5), 1, "scalar tail agrees on the negative branch");
+pixel_buffer_free(b6n);
+
+# An exact multiple of 4 means NO tail — the whole buffer goes through SIMD.
+var b8 = mkbuf(8, 1);
+var b8i = 0;
+while (b8i < 8) { put(b8, b8i, 60, 60, 60, 200); b8i = b8i + 1; }
+assert_eq(brightness(b8, f32c(0.2)), RG_ERR_NONE, "8-pixel brightness succeeds");
+assert_eq(px3(b8, 7, 111, 111, 111), 1, "an exact multiple of 4 covers the LAST pixel");
+assert_eq(chan(b8, 7, 3), 200, "and preserves its alpha");
+pixel_buffer_free(b8);
+
 assert_eq(brightness(argb, f32c(0.1)), RG_ERR_INVALID_FORMAT, "brightness rejects non-Rgba8");
 
 # ================================================================

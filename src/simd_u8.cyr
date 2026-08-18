@@ -1,0 +1,204 @@
+# simd_u8.cyr -- hand-encoded u8 vector primitives
+# Private prefix: _sx_
+#
+# These are cyrius-port-plan.md §3 items 3 and 5 — the packed operations the
+# Cyrius stdlib does not expose. `lib/simd.cyr` gives integer vectors with
+# make/splat/lane/add/sub/mul, but no SATURATING add/sub and no packed min/max,
+# and ranga's u8 pixel kernels are built on exactly those.
+#
+# WHY RAW BYTES. There is no intrinsic surface for these — the packed integer
+# builtins that lex are exactly iv_add / iv_sub / iv_mul / iv_dp8. So each
+# primitive is an `asm { }` block of hand-encoded instruction bytes, gated on
+# `#ifdef CYRIUS_ARCH_X86` with a scalar fallback that is the definition of
+# correct. The in-tree precedent is `_fhm_probe16` (lib/hashmap_fast.cyr:66).
+#
+# EVERY encoding here was produced by llvm-mc, not from memory, and every
+# primitive is differentially tested against its own scalar fallback over the
+# full interesting input range in tests/simd_u8.tcyr. That is the only reason
+# hand-encoded assembly is acceptable: the fallback is the oracle and the test
+# proves the two agree.
+#
+# STACK LAYOUT. Verified empirically on 6.5.27: parameters occupy [rbp-8],
+# [rbp-16], [rbp-24], ... in declaration order, and the first local follows.
+# Every asm block below indexes its parameters on that basis, so ADDING OR
+# REORDERING A PARAMETER SILENTLY BREAKS THE ASSEMBLY. If you touch a signature
+# here, re-run the differential tests.
+#
+# All operate on 16 bytes at a time. Pointers need no alignment — every load and
+# store is movdqu.
+
+# ── saturating unsigned 8-bit add ────────
+# out[i] = min(255, a[i] + b[i]) for 16 lanes. Rust's _mm_adds_epu8.
+fn _sx_addus16(a, b, out) {
+    #ifdef CYRIUS_ARCH_X86
+    asm {
+        0x48; 0x8B; 0x45; 0xF8;   # mov rax, [rbp-8]     ; a
+        0xF3; 0x0F; 0x6F; 0x00;   # movdqu xmm0, [rax]
+        0x48; 0x8B; 0x45; 0xF0;   # mov rax, [rbp-16]    ; b
+        0xF3; 0x0F; 0x6F; 0x08;   # movdqu xmm1, [rax]
+        0x66; 0x0F; 0xDC; 0xC1;   # paddusb xmm0, xmm1
+        0x48; 0x8B; 0x45; 0xE8;   # mov rax, [rbp-24]    ; out
+        0xF3; 0x0F; 0x7F; 0x00;   # movdqu [rax], xmm0
+    }
+    #endif
+    #ifndef CYRIUS_ARCH_X86
+    var i = 0;
+    while (i < 16) {
+        var v = load8(a + i) + load8(b + i);
+        if (v > 255) { v = 255; }
+        store8(out + i, v);
+        i = i + 1;
+    }
+    #endif
+    return RG_ERR_NONE;
+}
+
+# ── saturating unsigned 8-bit subtract ────────
+# out[i] = max(0, a[i] - b[i]) for 16 lanes. Rust's _mm_subs_epu8.
+fn _sx_subus16(a, b, out) {
+    #ifdef CYRIUS_ARCH_X86
+    asm {
+        0x48; 0x8B; 0x45; 0xF8;   # mov rax, [rbp-8]
+        0xF3; 0x0F; 0x6F; 0x00;   # movdqu xmm0, [rax]
+        0x48; 0x8B; 0x45; 0xF0;   # mov rax, [rbp-16]
+        0xF3; 0x0F; 0x6F; 0x08;   # movdqu xmm1, [rax]
+        0x66; 0x0F; 0xD8; 0xC1;   # psubusb xmm0, xmm1
+        0x48; 0x8B; 0x45; 0xE8;   # mov rax, [rbp-24]
+        0xF3; 0x0F; 0x7F; 0x00;   # movdqu [rax], xmm0
+    }
+    #endif
+    #ifndef CYRIUS_ARCH_X86
+    var i = 0;
+    while (i < 16) {
+        var v = load8(a + i) - load8(b + i);
+        if (v < 0) { v = 0; }
+        store8(out + i, v);
+        i = i + 1;
+    }
+    #endif
+    return RG_ERR_NONE;
+}
+
+# ── packed unsigned 8-bit min / max ────────
+# §3 item 5. These are the operations the plan originally proposed implementing
+# as a bare unsigned compare on raw patterns — which is correct for u8 (unlike
+# the f32 case, where sign-magnitude ordering makes that a trap), but there is
+# no packed integer min/max builtin either way.
+fn _sx_minu16(a, b, out) {
+    #ifdef CYRIUS_ARCH_X86
+    asm {
+        0x48; 0x8B; 0x45; 0xF8;   # mov rax, [rbp-8]
+        0xF3; 0x0F; 0x6F; 0x00;   # movdqu xmm0, [rax]
+        0x48; 0x8B; 0x45; 0xF0;   # mov rax, [rbp-16]
+        0xF3; 0x0F; 0x6F; 0x08;   # movdqu xmm1, [rax]
+        0x66; 0x0F; 0xDA; 0xC1;   # pminub xmm0, xmm1
+        0x48; 0x8B; 0x45; 0xE8;   # mov rax, [rbp-24]
+        0xF3; 0x0F; 0x7F; 0x00;   # movdqu [rax], xmm0
+    }
+    #endif
+    #ifndef CYRIUS_ARCH_X86
+    var i = 0;
+    while (i < 16) {
+        var x = load8(a + i);
+        var y = load8(b + i);
+        if (y < x) { x = y; }
+        store8(out + i, x);
+        i = i + 1;
+    }
+    #endif
+    return RG_ERR_NONE;
+}
+
+fn _sx_maxu16(a, b, out) {
+    #ifdef CYRIUS_ARCH_X86
+    asm {
+        0x48; 0x8B; 0x45; 0xF8;   # mov rax, [rbp-8]
+        0xF3; 0x0F; 0x6F; 0x00;   # movdqu xmm0, [rax]
+        0x48; 0x8B; 0x45; 0xF0;   # mov rax, [rbp-16]
+        0xF3; 0x0F; 0x6F; 0x08;   # movdqu xmm1, [rax]
+        0x66; 0x0F; 0xDE; 0xC1;   # pmaxub xmm0, xmm1
+        0x48; 0x8B; 0x45; 0xE8;   # mov rax, [rbp-24]
+        0xF3; 0x0F; 0x7F; 0x00;   # movdqu [rax], xmm0
+    }
+    #endif
+    #ifndef CYRIUS_ARCH_X86
+    var i = 0;
+    while (i < 16) {
+        var x = load8(a + i);
+        var y = load8(b + i);
+        if (y > x) { x = y; }
+        store8(out + i, x);
+        i = i + 1;
+    }
+    #endif
+    return RG_ERR_NONE;
+}
+
+# ── masked select ────────
+# out = (x & mask) | (y & ~mask), lane-wise. Used to restore a channel the
+# vector op should not have touched — brightness needs exactly this to keep
+# alpha, because paddusb has no way to skip a lane.
+#
+# `nmask` is the caller-supplied complement rather than computed here: both
+# masks are loop-invariant, so building them once outside is strictly better
+# than recomputing a pandn every iteration.
+fn _sx_select16(x, y, mask, nmask, out) {
+    #ifdef CYRIUS_ARCH_X86
+    asm {
+        0x48; 0x8B; 0x45; 0xF8;   # mov rax, [rbp-8]     ; x
+        0xF3; 0x0F; 0x6F; 0x00;   # movdqu xmm0, [rax]
+        0x48; 0x8B; 0x45; 0xE8;   # mov rax, [rbp-24]    ; mask
+        0xF3; 0x0F; 0x6F; 0x08;   # movdqu xmm1, [rax]
+        0x66; 0x0F; 0xDB; 0xC1;   # pand xmm0, xmm1      ; x & mask
+        0x48; 0x8B; 0x45; 0xF0;   # mov rax, [rbp-16]    ; y
+        0xF3; 0x0F; 0x6F; 0x10;   # movdqu xmm2, [rax]
+        0x48; 0x8B; 0x45; 0xE0;   # mov rax, [rbp-32]    ; nmask
+        0xF3; 0x0F; 0x6F; 0x18;   # movdqu xmm3, [rax]
+        0x66; 0x0F; 0xDB; 0xD3;   # pand xmm2, xmm3      ; y & nmask
+        0x66; 0x0F; 0xEB; 0xC2;   # por xmm0, xmm2
+        0x48; 0x8B; 0x45; 0xD8;   # mov rax, [rbp-40]    ; out
+        0xF3; 0x0F; 0x7F; 0x00;   # movdqu [rax], xmm0
+    }
+    #endif
+    #ifndef CYRIUS_ARCH_X86
+    var i = 0;
+    while (i < 16) {
+        var m = load8(mask + i);
+        store8(out + i, (load8(x + i) & m) | (load8(y + i) & load8(nmask + i)));
+        i = i + 1;
+    }
+    #endif
+    return RG_ERR_NONE;
+}
+
+# ── helpers ────────
+# Fill 16 bytes with one value — the broadcast the vector ops need as an operand.
+fn _sx_splat16(out, v) {
+    var i = 0;
+    while (i < 16) { store8(out + i, v & 255); i = i + 1; }
+    return RG_ERR_NONE;
+}
+
+# The RGBA alpha-lane mask: 0xFF on every 4th byte (indices 3, 7, 11, 15),
+# 0 elsewhere. Its complement selects the colour lanes.
+fn _sx_alpha_mask16(out) {
+    var i = 0;
+    while (i < 16) {
+        var v = 0;
+        if (i % 4 == 3) { v = 255; }
+        store8(out + i, v);
+        i = i + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+fn _sx_rgb_mask16(out) {
+    var i = 0;
+    while (i < 16) {
+        var v = 255;
+        if (i % 4 == 3) { v = 0; }
+        store8(out + i, v);
+        i = i + 1;
+    }
+    return RG_ERR_NONE;
+}

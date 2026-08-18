@@ -1,0 +1,216 @@
+# simd_u8.tcyr — hand-encoded u8 vector primitives
+#
+# These are DIFFERENTIAL tests: each asm primitive is checked against an
+# independent scalar reference written inline here, over the full interesting
+# input range. Hand-encoded assembly is only defensible with this kind of
+# proof — the reference is the definition of correct and the asm has to agree
+# byte for byte.
+
+include "src/error.cyr"
+include "src/simd_u8.cyr"
+
+alloc_init();
+
+var a = fl_alloc(16);
+var b = fl_alloc(16);
+var o = fl_alloc(16);
+var m = fl_alloc(16);
+var nm = fl_alloc(16);
+
+fn setb(p, i, v) { store8(p + i, v & 255); return 0; }
+
+# ================================================================
+# saturating add — differential over the whole boundary region
+# ================================================================
+test_group("saturating add");
+
+# Spot checks first, so a failure is readable rather than just "some lane".
+_sx_splat16(a, 100); _sx_splat16(b, 50);
+_sx_addus16(a, b, o);
+assert_eq(load8(o), 150, "100 + 50 == 150");
+assert_eq(load8(o + 15), 150, "the LAST lane is computed too, not just lane 0");
+
+_sx_splat16(a, 200); _sx_splat16(b, 100);
+_sx_addus16(a, b, o);
+assert_eq(load8(o), 255, "200 + 100 SATURATES at 255 rather than wrapping to 44");
+
+_sx_splat16(a, 255); _sx_splat16(b, 255);
+_sx_addus16(a, b, o);
+assert_eq(load8(o), 255, "255 + 255 saturates");
+
+_sx_splat16(a, 0); _sx_splat16(b, 0);
+_sx_addus16(a, b, o);
+assert_eq(load8(o), 0, "0 + 0 == 0");
+
+# Per-lane independence: sixteen DIFFERENT values in one vector. A kernel that
+# broadcasts lane 0 across the register would pass every splat test above.
+var i = 0;
+while (i < 16) { setb(a, i, i * 17); setb(b, i, 255 - i * 17); i = i + 1; }
+_sx_addus16(a, b, o);
+var lanes_ok = 1;
+i = 0;
+while (i < 16) {
+    if (load8(o + i) != 255) { lanes_ok = 0; }
+    i = i + 1;
+}
+assert_eq(lanes_ok, 1, "each lane adds its OWN operands (16 distinct pairs)");
+
+setb(a, 0, 1); setb(b, 0, 2);
+setb(a, 7, 200); setb(b, 7, 100);
+setb(a, 15, 0); setb(b, 15, 0);
+_sx_addus16(a, b, o);
+assert_eq(load8(o), 3, "lane 0 independent");
+assert_eq(load8(o + 7), 255, "lane 7 saturates independently");
+assert_eq(load8(o + 15), 0, "lane 15 independent");
+
+# Exhaustive differential sweep against the scalar reference. Every (x, y) pair
+# on a stride that covers both sides of the saturation boundary.
+var x = 0;
+var mismatches = 0;
+while (x < 256) {
+    var y = 0;
+    while (y < 256) {
+        _sx_splat16(a, x);
+        _sx_splat16(b, y);
+        _sx_addus16(a, b, o);
+        var want = x + y;
+        if (want > 255) { want = 255; }
+        if (load8(o) != want) { mismatches = mismatches + 1; }
+        if (load8(o + 9) != want) { mismatches = mismatches + 1; }
+        y = y + 17;
+    }
+    x = x + 17;
+}
+assert_eq(mismatches, 0, "saturating add matches the scalar reference across the input sweep");
+
+# ================================================================
+# saturating subtract
+# ================================================================
+test_group("saturating sub");
+
+_sx_splat16(a, 100); _sx_splat16(b, 30);
+_sx_subus16(a, b, o);
+assert_eq(load8(o), 70, "100 - 30 == 70");
+
+_sx_splat16(a, 30); _sx_splat16(b, 100);
+_sx_subus16(a, b, o);
+assert_eq(load8(o), 0, "30 - 100 SATURATES at 0 rather than wrapping to 186");
+
+_sx_splat16(a, 0); _sx_splat16(b, 255);
+_sx_subus16(a, b, o);
+assert_eq(load8(o), 0, "0 - 255 saturates at 0");
+assert_eq(load8(o + 15), 0, "the last lane saturates too");
+
+x = 0;
+mismatches = 0;
+while (x < 256) {
+    var y2 = 0;
+    while (y2 < 256) {
+        _sx_splat16(a, x);
+        _sx_splat16(b, y2);
+        _sx_subus16(a, b, o);
+        var want2 = x - y2;
+        if (want2 < 0) { want2 = 0; }
+        if (load8(o) != want2) { mismatches = mismatches + 1; }
+        if (load8(o + 4) != want2) { mismatches = mismatches + 1; }
+        y2 = y2 + 17;
+    }
+    x = x + 17;
+}
+assert_eq(mismatches, 0, "saturating sub matches the scalar reference across the input sweep");
+
+# ================================================================
+# packed min / max
+# ================================================================
+test_group("packed min max");
+
+i = 0;
+while (i < 16) { setb(a, i, i * 16); setb(b, i, 255 - i * 16); i = i + 1; }
+_sx_minu16(a, b, o);
+var minok = 1;
+i = 0;
+while (i < 16) {
+    var want3 = i * 16;
+    if (255 - i * 16 < want3) { want3 = 255 - i * 16; }
+    if (load8(o + i) != want3) { minok = 0; }
+    i = i + 1;
+}
+assert_eq(minok, 1, "packed min matches the scalar reference per lane");
+
+_sx_maxu16(a, b, o);
+var maxok = 1;
+i = 0;
+while (i < 16) {
+    var want4 = i * 16;
+    if (255 - i * 16 > want4) { want4 = 255 - i * 16; }
+    if (load8(o + i) != want4) { maxok = 0; }
+    i = i + 1;
+}
+assert_eq(maxok, 1, "packed max matches the scalar reference per lane");
+
+# UNSIGNED comparison, not signed. Bytes above 127 have the sign bit set, and a
+# signed compare would rank them BELOW small values — the same sign-magnitude
+# class of bug as the f32 min/max trap, here in integer form.
+_sx_splat16(a, 200); _sx_splat16(b, 100);
+_sx_minu16(a, b, o);
+assert_eq(load8(o), 100, "min(200, 100) == 100 — an UNSIGNED compare, not signed");
+_sx_maxu16(a, b, o);
+assert_eq(load8(o), 200, "max(200, 100) == 200");
+_sx_splat16(a, 255); _sx_splat16(b, 1);
+_sx_minu16(a, b, o);
+assert_eq(load8(o), 1, "min(255, 1) == 1 — 255 is NOT treated as -1");
+
+# ================================================================
+# masked select
+# ================================================================
+test_group("masked select");
+
+_sx_alpha_mask16(m);
+_sx_rgb_mask16(nm);
+assert_eq(load8(m), 0, "alpha mask is 0 on colour lane 0");
+assert_eq(load8(m + 3), 255, "alpha mask is 0xFF on lane 3");
+assert_eq(load8(m + 15), 255, "alpha mask is 0xFF on lane 15");
+assert_eq(load8(nm), 255, "rgb mask is the exact complement on lane 0");
+assert_eq(load8(nm + 3), 0, "rgb mask is 0 on lane 3");
+
+_sx_splat16(a, 111);
+_sx_splat16(b, 222);
+_sx_select16(a, b, m, nm, o);
+# mask selects `a` where 0xFF, `b` elsewhere — so alpha lanes take a, colour b.
+assert_eq(load8(o), 222, "colour lane takes the second operand");
+assert_eq(load8(o + 3), 111, "alpha lane takes the first operand");
+assert_eq(load8(o + 7), 111, "the pattern repeats every 4 bytes");
+assert_eq(load8(o + 14), 222, "lane 14 is a colour lane");
+
+# ================================================================
+# end-to-end: the brightness kernel shape
+# ================================================================
+test_group("brightness kernel shape");
+
+# This is exactly what filter_point's brightness does per 4 pixels: saturating
+# add on every lane, then restore alpha from the original. The point is that
+# alpha must come back BYTE-IDENTICAL even though paddusb touched it.
+var px = fl_alloc(16);
+var shifted = fl_alloc(16);
+var val = fl_alloc(16);
+i = 0;
+while (i < 4) {
+    setb(px, i * 4, 100); setb(px, i * 4 + 1, 200);
+    setb(px, i * 4 + 2, 250); setb(px, i * 4 + 3, 40);
+    i = i + 1;
+}
+_sx_splat16(val, 30);
+_sx_addus16(px, val, shifted);
+_sx_select16(px, shifted, m, nm, o);
+assert_eq(load8(o), 130, "red gets the shift");
+assert_eq(load8(o + 1), 230, "green gets the shift");
+assert_eq(load8(o + 2), 255, "blue SATURATES rather than wrapping");
+assert_eq(load8(o + 3), 40, "alpha is restored byte-identical, NOT shifted to 70");
+assert_eq(load8(o + 15), 40, "the last pixel's alpha is preserved too");
+
+fl_free(a); fl_free(b); fl_free(o); fl_free(m); fl_free(nm);
+fl_free(px); fl_free(shifted); fl_free(val);
+
+var exit_code = assert_summary();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

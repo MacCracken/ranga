@@ -274,6 +274,27 @@ hand gets the rounding wrong; a short Python/numpy search finds them reliably.
   meant to test. The oracle found `[[1,0,0],[0,1,0],[0.4,0,-0.4]]`, which is
   invertible and whose *inverse* is singular exactly at a sampled coordinate.
 
+### Hand-encoded `asm { }` is defensible only with a differential oracle
+
+The mechanics, all verified on 6.5.27 and none of them documented:
+
+- Raw bytes, semicolon-separated, inside `asm { ... }`, gated with
+  `#ifdef CYRIUS_ARCH_X86` / `#ifndef` and a scalar fallback.
+- **Parameters live at `[rbp-8]`, `[rbp-16]`, `[rbp-24]`, … in declaration
+  order, and the first local follows.** Verified with a probe function before
+  writing anything real. Adding or reordering a parameter silently breaks every
+  asm block in that function, so signatures there are load-bearing.
+- Produce every encoding with `llvm-mc -arch=x86-64 -show-encoding`. Never from
+  memory: `paddusb` and `paddb` differ in one byte (`0xDC` vs `0xFC`) and the
+  wrong one wraps instead of saturating.
+- In-tree precedents: `_fhm_probe16` (lib/hashmap_fast.cyr:66) for the SSE2
+  shape, `_sha_ni_compress_one` (lib/sigil.cyr:4871) for VEX-encoded AVX2.
+
+The scalar fallback is the *oracle*, not a consolation prize: write it first,
+then differentially test the asm against it across an exhaustive sweep. That is
+what makes hand-assembled bytes reviewable — a reader checks the fallback and
+trusts the test, rather than checking the hex.
+
 ### Mutation-test each module the moment its suite goes green
 
 Twenty sed-level defects take about two minutes and are a far better use of time
