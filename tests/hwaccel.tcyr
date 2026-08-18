@@ -1,0 +1,194 @@
+# hwaccel.tcyr — hardware accelerator detection over ai-hwaccel 2.3.17
+# Ported from rust-old/src/hwaccel.rs #[cfg(test)].
+#
+# ⚠ THESE TESTS MUST NOT DEPEND ON REAL HARDWARE. The Rust suite could only
+# manage `let _ = report.has_gpu;` — it ran the probe and asserted nothing,
+# because a CI box has no GPU and the assertions would have been unwritable.
+# That leaves the actual decision logic — five branches deciding whether to
+# offload — completely untested.
+#
+# The port fixes that by splitting the policy out of the probe:
+# `hw_should_use_gpu_report` takes a report instead of reading hardware, so
+# every branch is reachable from a synthetic one. The probe itself still gets a
+# smoke test, and keeps the Rust suite's property that it must not crash on a
+# machine with nothing to find.
+
+include "src/error.cyr"
+include "src/hwaccel.cyr"
+
+alloc_init();
+
+# A GPU report with sane defaults; each test overrides the one field it is
+# about. util and temp of -1 mean "not reported", matching PROFILE_NONE.
+fn gpu_report(free_mb, util) {
+    return hw_report_new(1, 1, 0, 8192, free_mb, util, 0 - 1, 8192);
+}
+
+# ================================================================
+test_group("report accessors");
+
+var r = hw_report_new(1, 1, 0, 8192, 4096, 42, 65, 16384);
+assert_eq(hw_report_has_gpu(r), 1, "has_gpu round-trips");
+assert_eq(hw_report_has_vulkan(r), 1, "has_vulkan round-trips");
+assert_eq(hw_report_gpu_memory_mb(r), 8192, "gpu_memory_mb round-trips");
+assert_eq(hw_report_gpu_free_memory_mb(r), 4096, "gpu_free_memory_mb round-trips");
+assert_eq(hw_report_gpu_utilization_percent(r), 42, "utilization round-trips");
+assert_eq(hw_report_temperature_c(r), 65, "temperature round-trips");
+assert_eq(hw_report_total_accel_memory_mb(r), 16384, "total_accel_memory_mb round-trips");
+hw_report_free(r);
+
+# The Option<u32> distinction. Rust could not confuse None with Some(0); neither
+# can this, because -1 is the sentinel and 0 is a real reading. A GPU idling at
+# 0% and a GPU whose driver reports no counter are different facts, and the
+# offload policy branches on which one it has.
+var known = hw_report_new(1, 1, 0, 0, 0, 0, 0, 0);
+assert_eq(hw_report_has_utilization(known), 1, "a utilization of 0 is a REPORTED zero");
+assert_eq(hw_report_has_temperature(known), 1, "a temperature of 0 is a REPORTED zero");
+hw_report_free(known);
+
+var unknown = hw_report_new(1, 1, 0, 0, 0, 0 - 1, 0 - 1, 0);
+assert_eq(hw_report_has_utilization(unknown), 0, "-1 means utilization is unknown");
+assert_eq(hw_report_has_temperature(unknown), 0, "-1 means temperature is unknown");
+assert_eq(hw_report_gpu_utilization_percent(unknown), 0 - 1, "and the sentinel is carried, not flattened to 0");
+hw_report_free(unknown);
+
+hw_report_free(0);
+assert_eq(1, 1, "freeing a null report is a no-op");
+
+# ================================================================
+test_group("bytes to mb");
+
+assert_eq(_hw_bytes_to_mb(0), 0, "zero bytes is zero MB");
+assert_eq(_hw_bytes_to_mb(1048576), 1, "1 MiB is 1 MB");
+assert_eq(_hw_bytes_to_mb(8589934592), 8192, "8 GiB is 8192 MB");
+# Integer division truncates, as Rust's `/ (1024 * 1024)` did.
+assert_eq(_hw_bytes_to_mb(1048575), 0, "just under 1 MiB truncates to 0");
+assert_eq(_hw_bytes_to_mb(1572864), 1, "1.5 MiB truncates to 1");
+# PROFILE_NONE. Rust applied `.unwrap_or(0)` BEFORE dividing, so an unreported
+# free-memory field becomes 0 MB — not -1 MB, which would then read as
+# "known, and negative" and sail through the `free_mb > 0` guard backwards.
+assert_eq(_hw_bytes_to_mb(0 - 1), 0, "PROFILE_NONE becomes 0 MB, never negative");
+# -1 alone does not pin the guard: integer division truncates toward zero, so
+# -1 / 1048576 is 0 with or without it. Only a negative larger than a megabyte
+# separates the two. PROFILE_NONE is the only negative ai-hwaccel actually
+# produces today, so this pins the helper's stated contract — any negative is
+# "not reported" — rather than the one value that currently reaches it.
+assert_eq(_hw_bytes_to_mb(0 - 2097152), 0, "a large negative is still 0 MB, not -2");
+assert_eq(_hw_bytes_to_mb(0 - 1048576), 0, "and exactly -1 MiB is 0 MB, not -1");
+
+# ================================================================
+test_group("offload policy");
+
+# No GPU is an immediate no, whatever the image size.
+var nogpu = hw_report_new(0, 0, 0, 0, 0, 0 - 1, 0 - 1, 0);
+assert_eq(hw_should_use_gpu_report(nogpu, 1920, 1080), 0, "no GPU means no offload");
+assert_eq(hw_should_use_gpu_report(nogpu, 8192, 8192), 0, "not even for a huge image");
+hw_report_free(nogpu);
+assert_eq(hw_should_use_gpu_report(0, 1920, 1080), 0, "a null report means no offload");
+
+# The size crossover sits at 65536 pixels — 256x256 exactly. The Rust comment
+# names that number, and the comparison is `<`, so 256x256 is ON the GPU and one
+# pixel fewer is not.
+var g = gpu_report(4096, 0 - 1);
+assert_eq(hw_should_use_gpu_report(g, 256, 256), 1, "256x256 is exactly at the crossover and offloads");
+assert_eq(hw_should_use_gpu_report(g, 255, 255), 0, "255x255 is below it and stays on the CPU");
+assert_eq(hw_should_use_gpu_report(g, 64, 64), 0, "tiny images stay on the CPU");
+assert_eq(hw_should_use_gpu_report(g, 1920, 1080), 1, "1080p offloads");
+hw_report_free(g);
+
+# VRAM. A 1920x1080 RGBA8 buffer needs 3x for ping-pong plus staging:
+# 2073600 * 4 * 3 / 1048576 = 23 MB after integer division.
+var tight = gpu_report(23, 0 - 1);
+assert_eq(hw_should_use_gpu_report(tight, 1920, 1080), 1, "exactly enough free VRAM still offloads");
+hw_report_free(tight);
+var short = gpu_report(22, 0 - 1);
+assert_eq(hw_should_use_gpu_report(short, 1920, 1080), 0, "one MB short and it stays on the CPU");
+hw_report_free(short);
+# 4096x4096 needs 192 MB — the same rule at a scale where the multiply matters.
+var big = gpu_report(191, 0 - 1);
+assert_eq(hw_should_use_gpu_report(big, 4096, 4096), 0, "a 4K square does not fit 191 MB");
+hw_report_free(big);
+var bigok = gpu_report(192, 0 - 1);
+assert_eq(hw_should_use_gpu_report(bigok, 4096, 4096), 1, "and does fit 192 MB");
+hw_report_free(bigok);
+
+# ⚠ The multiply must happen BEFORE the divide. Reordering to
+# (pixels / (1024*1024)) * 4 * 3 makes every sub-256MB buffer measure 0 MB and
+# pass a check it should fail. This is that case: 0 free MB reported as KNOWN.
+# Rust's `report.gpu_free_memory_mb > 0` guard means 0 is treated as UNKNOWN and
+# the check is skipped entirely, so this offloads — and the assertion documents
+# that a driver reporting 0 free does not veto the GPU.
+var zerofree = gpu_report(0, 0 - 1);
+assert_eq(hw_should_use_gpu_report(zerofree, 1920, 1080), 1,
+          "0 free MB reads as UNKNOWN, so the VRAM check is skipped");
+hw_report_free(zerofree);
+
+# Utilization. Rust's `if let Some(util) = ... && util > 90` — strictly greater,
+# and skipped entirely when the value is absent.
+var busy = gpu_report(4096, 91);
+assert_eq(hw_should_use_gpu_report(busy, 1920, 1080), 0, "a GPU above 90% utilization is skipped");
+hw_report_free(busy);
+var atlimit = gpu_report(4096, 90);
+assert_eq(hw_should_use_gpu_report(atlimit, 1920, 1080), 1, "exactly 90% still offloads");
+hw_report_free(atlimit);
+var idle = gpu_report(4096, 0);
+assert_eq(hw_should_use_gpu_report(idle, 1920, 1080), 1, "an idle GPU offloads");
+hw_report_free(idle);
+var maxed = gpu_report(4096, 100);
+assert_eq(hw_should_use_gpu_report(maxed, 1920, 1080), 0, "a fully loaded GPU is skipped");
+hw_report_free(maxed);
+# Unknown utilization must NOT be read as loaded — that would disable the GPU on
+# every driver without a load counter.
+var noutil = gpu_report(4096, 0 - 1);
+assert_eq(hw_should_use_gpu_report(noutil, 1920, 1080), 1,
+          "unknown utilization does not veto the GPU");
+hw_report_free(noutil);
+
+# The checks are independent: passing utilization does not excuse failing VRAM.
+var mixed = hw_report_new(1, 1, 0, 8192, 5, 0, 0 - 1, 8192);
+assert_eq(hw_should_use_gpu_report(mixed, 1920, 1080), 0,
+          "an idle GPU with too little VRAM still stays on the CPU");
+hw_report_free(mixed);
+
+# ================================================================
+test_group("probe");
+
+# The no-exec probe. This is the path that must work in a sandbox: it spawns no
+# processes, so it is safe here and gives a real report on any machine. The Rust
+# suite had no equivalent — it always ran the full probe.
+var p = hw_probe_with(0);
+assert_eq(p != 0, 1, "the no-exec probe returns a report");
+
+# Whatever the hardware, these invariants hold. On a GPU-less box every field is
+# 0 and the assertions still pass; on a box with a GPU they constrain the values.
+var hg = hw_report_has_gpu(p);
+assert_eq(hg == 0 || hg == 1, 1, "has_gpu is a boolean");
+var hv = hw_report_has_vulkan(p);
+assert_eq(hv == 0 || hv == 1, 1, "has_vulkan is a boolean");
+assert_eq(hw_report_gpu_memory_mb(p) >= 0, 1, "gpu_memory_mb is never negative");
+assert_eq(hw_report_gpu_free_memory_mb(p) >= 0, 1, "gpu_free_memory_mb is never negative");
+assert_eq(hw_report_total_accel_memory_mb(p) >= 0, 1, "total_accel_memory_mb is never negative");
+
+# Utilization and temperature are the only fields allowed to be negative, and
+# only as the -1 sentinel — never any other negative value.
+var u = hw_report_gpu_utilization_percent(p);
+assert_eq(u >= 0 || u == 0 - 1, 1, "utilization is a percentage or the -1 sentinel");
+var t = hw_report_temperature_c(p);
+assert_eq(t >= 0 || t == 0 - 1, 1, "temperature is a reading or the -1 sentinel");
+
+# With no GPU, the GPU-specific fields must be zeroed rather than carrying
+# whatever the best CPU profile happened to hold — the `is_gpu` guard in
+# hw_probe_with is what enforces this, mirroring Rust's `Some(p) if p.is_gpu()`.
+if (hw_report_has_gpu(p) == 0) {
+    assert_eq(hw_report_gpu_memory_mb(p), 0, "no GPU means no reported GPU memory");
+    assert_eq(hw_report_gpu_free_memory_mb(p), 0, "and no reported free memory");
+}
+
+# The Rust suite's own assertion, preserved: a tiny image never offloads,
+# whatever the machine turns out to have.
+assert_eq(hw_should_use_gpu_report(p, 4, 4), 0, "a 4x4 image never offloads, on any hardware");
+hw_report_free(p);
+
+var exit_code = assert_summary();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

@@ -240,6 +240,54 @@ fn _fl_arena_alloc(bsize): i64 {
     return ptr;
 }
 
+# ── v6.5.28: POISON MODE (fuzz/test only) ──
+#
+# ⛔ WHY. `cyrius fuzz` could not see an out-of-bounds READ — the bug class fuzzing is best at.
+# A fresh mmap is kernel-zeroed and a recycled block holds old heap contents, so an overread
+# returns *plausible* bytes and the harness sails past it. sit's `.git` packfile delta
+# interpreter leaked heap memory for three minor versions with a fuzz suite running over it
+# (2026-08-18-fuzz-cannot-see-oob-reads-from-sit). No cyrius defect — a tooling blind spot
+# that applies to every consumer in the ecosystem.
+#
+# The filing asks for redzones + a fill pattern and explicitly says full ASAN-grade shadow
+# memory is NOT required: "even redzone poisoning plus a fill pattern would have caught the
+# sit defect: the leaked bytes would have been the pattern rather than heap contents, and a
+# harness asserting 'output contains no poison bytes' turns an invisible overread into a loud
+# one." That is exactly what this implements.
+#
+# ⚠ SCOPE, STATED HONESTLY: this is the ALLOC-SIDE FILL only. Quarantine-on-free
+# (use-after-free) and redzone bounds-checking are NOT here — a free-side poison needs the
+# block's original size, and the size-class path stores only its class, so doing it properly
+# means a layout change this release should not carry. The fill alone closes the filed defect.
+#
+# ⚠ NOT env-gated. `lib/freelist.cyr` deliberately depends on `mmap` + `atomic` only, and
+# reading an env var would drag in a syscall+parse dependency an allocator should not have.
+# A harness or driver calls `fl_poison_enable()` explicitly instead.
+var _fl_poison = 0;
+
+# Turn on poison fill. Call once from a fuzz harness before exercising the code under test.
+fn fl_poison_enable(): i64 { _fl_poison = 1; return 0; }
+# Turn it back off (so one harness cannot leak the mode into an unrelated benchmark).
+fn fl_poison_disable(): i64 { _fl_poison = 0; return 0; }
+# 1 when poison fill is active.
+fn fl_poison_active(): i64 { return _fl_poison; }
+# The fill byte. Exposed so a harness can assert "the output contains no poison bytes"
+# without hardcoding the constant. 0xA5 is deliberately not 0x00 and not 0xFF: both of those
+# occur naturally in real data, so either would produce false negatives.
+fn fl_poison_byte(): i64 { return 165; }
+
+# Fill `n` bytes at `p` with the poison pattern. 8-byte stores with a byte tail, same shape as
+# fl_calloc's zero loop — a byte loop here would reintroduce the 369x cost this release just
+# removed, in the mode that is already the slow one.
+fn _fl_poison_fill(p, n): i64 {
+    var w = 11936128518282651045;      # 0xA5A5A5A5A5A5A5A5
+    var n8 = (n / 8) * 8;
+    var i = 0;
+    while (i < n8) { store64(p + i, w); i = i + 8; }
+    while (i < n) { store8(p + i, 165); i = i + 1; }
+    return 0;
+}
+
 # Allocate size bytes. Returns pointer to usable memory. Thread-safe (v6.5.19).
 #
 # ⚠ THE `if (_threads_active != 0)` AROUND EACH LOCK CALL IS DELIBERATE and is not
@@ -272,6 +320,7 @@ fn fl_alloc(size): i64 {
         var blk = _fl_mmap(total);
         store64(blk, 0);
         store64(blk + 8, total);
+        if (_fl_poison == 1) { _fl_poison_fill(blk + 16, size); }
         return blk + 16;
     }
     if (_threads_active != 0) { _fl_lock_acquire(); }
@@ -283,6 +332,9 @@ fn fl_alloc(size): i64 {
         store64(&_fl_heads + cls * 8, load64(head));
         store64(head, 0);
         if (_threads_active != 0) { _fl_lock_release(); }
+        # Poison AFTER the lock is dropped — the block is exclusively ours by now, and
+        # filling inside the critical section would lengthen it for a fuzz-only mode.
+        if (_fl_poison == 1) { _fl_poison_fill(head + 16, size); }
         return head + 16;
     }
     # No free block — allocate from arena (R4 + R5, both inside the lock).
@@ -298,6 +350,7 @@ fn fl_alloc(size): i64 {
     # header is written outside the lock — shorter critical section, same result.
     store64(blk, 0);
     store64(blk + 8, cls);
+    if (_fl_poison == 1) { _fl_poison_fill(blk + 16, size); }
     return blk + 16;
 }
 
@@ -344,7 +397,11 @@ fn fl_calloc(size): i64 {
     var cls = _fl_class(size);
     var ptr = fl_alloc(size);
     if (ptr == 0) { return 0; }
-    if (cls < 0) { return ptr; }          # fresh mmap: already zero, nothing owed
+    # ⚠ v6.5.28 — the `cls < 0` skip is valid ONLY because a fresh mapping is kernel-zeroed.
+    # POISON MODE INVALIDATES THAT PRECONDITION: fl_alloc has just filled the block with 0xA5,
+    # so skipping here would hand back poison as if it were zeroed memory — turning a
+    # debugging aid into a correctness bug in the exact mode meant to FIND correctness bugs.
+    if (cls < 0 && _fl_poison == 0) { return ptr; }   # fresh mmap: already zero, nothing owed
     var n8 = (size / 8) * 8;
     var i = 0;
     while (i < n8) {

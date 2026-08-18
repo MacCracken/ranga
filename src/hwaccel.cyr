@@ -1,0 +1,211 @@
+# hwaccel.cyr -- hardware accelerator detection over ai-hwaccel 2.3.17
+# Ported from rust-old/src/hwaccel.rs. Private prefix: _hw_
+#
+# OPTIONAL. Not in the core `[lib]` bundle. This was a non-default cargo feature
+# in the Rust line (`hwaccel = ["dep:ai-hwaccel"]`) and stays optional here,
+# built via the `[lib.hwaccel]` profile.
+#
+# WHAT "OPTION" BECOMES. Rust's HwReport carried `Option<u32>` for GPU
+# utilisation and temperature, because a backend that cannot report a value must
+# be distinguishable from one reporting zero — a GPU at 0% load and a GPU whose
+# driver exposes no load counter are different facts, and `should_use_gpu`
+# branches on the difference. ai-hwaccel encodes this as the sentinel
+# `PROFILE_NONE` (-1), which this module carries through unchanged rather than
+# flattening to 0. `hw_report_has_utilization` / `hw_report_has_temperature`
+# are the `is_some()` equivalents.
+#
+# STRING OWNERSHIP. `gpu_name` is a BORROWED cstr pointing into the profile that
+# ai-hwaccel allocated. Rust cloned a String here; that is unnecessary and would
+# leak, because ai-hwaccel allocates profiles with the bump allocator and never
+# frees them — the pointer stays valid for the life of the process. Do not free
+# it, and do not assume it outlives a hypothetical future arena reset.
+#
+#   HwReport 64 bytes
+#     +0  has_gpu        +8  has_vulkan     +16 gpu_name (borrowed cstr, or 0)
+#     +24 gpu_memory_mb  +32 gpu_free_mb    +40 gpu_util (-1 = unknown)
+#     +48 temp_c (-1 = unknown)             +56 total_accel_memory_mb
+
+# The dep bundle. Stripped by `cyrius distlib`, as in spectral.cyr.
+include "lib/ai-hwaccel.cyr"
+
+var _HW_REPORT_SIZE = 64;
+
+# GPU dispatch overhead makes the GPU slower below roughly 256x256.
+var HW_GPU_MIN_PIXELS = 65536;
+# Above this utilisation the GPU is treated as too busy to be worth the offload.
+var HW_GPU_MAX_UTILIZATION = 90;
+
+#must_use
+fn hw_report_has_gpu(r) { return load64(r); }
+#must_use
+fn hw_report_has_vulkan(r) { return load64(r + 8); }
+#must_use
+fn hw_report_gpu_name(r) { return load64(r + 16); }
+#must_use
+fn hw_report_gpu_memory_mb(r) { return load64(r + 24); }
+#must_use
+fn hw_report_gpu_free_memory_mb(r) { return load64(r + 32); }
+#must_use
+fn hw_report_gpu_utilization_percent(r) { return load64(r + 40); }
+#must_use
+fn hw_report_temperature_c(r) { return load64(r + 48); }
+#must_use
+fn hw_report_total_accel_memory_mb(r) { return load64(r + 56); }
+
+# The `Option::is_some` equivalents for the two sentinel-encoded fields.
+#must_use
+fn hw_report_has_utilization(r) { if (load64(r + 40) < 0) { return 0; } return 1; }
+#must_use
+fn hw_report_has_temperature(r) { if (load64(r + 48) < 0) { return 0; } return 1; }
+
+fn hw_report_free(r) {
+    if (r == 0) { return RG_ERR_NONE; }
+    fl_free(r);
+    return RG_ERR_NONE;
+}
+
+# Build a report directly. Exists so the offload policy can be tested against
+# synthetic hardware — `hw_should_use_gpu` probes real hardware, which makes it
+# untestable on a CI box with no GPU, and the policy is the part with the
+# branches worth testing.
+#must_use
+fn hw_report_new(has_gpu, has_vulkan, name, mem_mb, free_mb, util, temp_c, total_mb) {
+    var r = fl_alloc(_HW_REPORT_SIZE);
+    if (r == 0) { return 0; }
+    store64(r, has_gpu);
+    store64(r + 8, has_vulkan);
+    store64(r + 16, name);
+    store64(r + 24, mem_mb);
+    store64(r + 32, free_mb);
+    store64(r + 40, util);
+    store64(r + 48, temp_c);
+    store64(r + 56, total_mb);
+    return r;
+}
+
+# Bytes to whole megabytes, matching Rust's integer `/ (1024 * 1024)`.
+# PROFILE_NONE (-1) means "not reported" and is carried through as 0, because
+# Rust applied `.unwrap_or(0)` to memory_free_bytes BEFORE dividing.
+#must_use
+fn _hw_bytes_to_mb(b) {
+    if (b < 0) { return 0; }
+    return b / (1024 * 1024);
+}
+
+# Probe the system for hardware accelerators. Rust's `probe`.
+#
+# `allow_exec` selects the detection depth: 1 runs ai-hwaccel's full probe,
+# which may SPAWN PROCESSES (nvidia-smi, ibstat) to fill in utilisation and
+# temperature; 0 uses the no-exec path, which is what a sandboxed or no-spawn
+# caller wants and what the test suite uses. Rust had no such distinction — it
+# always ran the full probe — so `hw_probe()` keeps the Rust behaviour and this
+# is the widened entry point.
+#must_use
+fn hw_probe_with(allow_exec) {
+    var reg = 0;
+    if (allow_exec == 1) { reg = registry_detect(); }
+    if (allow_exec != 1) { reg = registry_detect_no_exec(); }
+    if (reg == 0) { return 0; }
+
+    # Rust computed has_gpu from `available().any(is_gpu)` and has_vulkan from
+    # `by_family(Gpu).any(available)`. Both routes are preserved rather than
+    # collapsed, even though ai-hwaccel's `accel_family` returns FAMILY_GPU
+    # exactly when `accel_is_gpu` is true, so the two cannot disagree. Keeping
+    # them separate means a future divergence upstream shows up as a behaviour
+    # change here rather than being silently pre-decided.
+    var profs = reg_profiles(reg);
+    var n = vec_len(profs);
+    var has_gpu = 0;
+    var i = 0;
+    while (i < n) {
+        var p = vec_get(profs, i);
+        if (profile_available(p) == 1) {
+            if (accel_is_gpu(profile_accel_type(p)) == 1) { has_gpu = 1; }
+        }
+        i = i + 1;
+    }
+    var has_vulkan = 0;
+    if (reg_count_by_family(reg, FAMILY_GPU) > 0) { has_vulkan = 1; }
+
+    var name = 0;
+    var mem_mb = 0;
+    var free_mb = 0;
+    var util = PROFILE_NONE;
+    var temp = PROFILE_NONE;
+
+    var best = reg_best_available(reg);
+    if (best != 0) {
+        if (accel_is_gpu(profile_accel_type(best)) == 1) {
+            # Rust: `driver_version.clone().unwrap_or_else(|| format!("{:?}", accelerator))`.
+            name = profile_driver_version(best);
+            if (name == 0) { name = accel_name(profile_accel_type(best)); }
+            mem_mb = _hw_bytes_to_mb(profile_memory_bytes(best));
+            free_mb = _hw_bytes_to_mb(profile_mem_free(best));
+            util = profile_gpu_util(best);
+            temp = profile_temp_c(best);
+        }
+    }
+
+    return hw_report_new(has_gpu, has_vulkan, name, mem_mb, free_mb, util, temp,
+                         _hw_bytes_to_mb(reg_total_accel_memory(reg)));
+}
+
+# Rust's `probe()` — the full probe, processes and all.
+#must_use
+fn hw_probe() { return hw_probe_with(1); }
+
+# The offload decision, factored out of `hw_should_use_gpu` so it can be tested
+# without hardware. Rust's `should_use_gpu` body, minus the probe.
+#
+# Returns 1 if the GPU is worth using for a `width` x `height` RGBA8 image.
+#must_use
+fn hw_should_use_gpu_report(report, width, height) {
+    if (report == 0) { return 0; }
+    if (hw_report_has_gpu(report) != 1) { return 0; }
+
+    var pixels = width * height;
+    if (pixels < HW_GPU_MIN_PIXELS) { return 0; }
+
+    # Free VRAM check. Only applied when free memory is actually known — a
+    # report of 0 means "unknown" here, matching Rust's `> 0` guard, so an
+    # unreporting driver does not veto the GPU outright.
+    #
+    # 3x the buffer: GpuChain needs ping-pong plus staging. The multiply happens
+    # BEFORE the divide, as in Rust, so a buffer under 1 MB does not round to 0
+    # and pass a check it should have failed.
+    var free_mb = hw_report_gpu_free_memory_mb(report);
+    if (free_mb > 0) {
+        var buffer_mb = pixels * 4 * 3 / (1024 * 1024);
+        if (buffer_mb > free_mb) { return 0; }
+    }
+
+    # A heavily loaded GPU is worse than the CPU. Unknown utilisation is NOT
+    # treated as loaded — Rust's `if let Some(util) = ... && util > 90` skips
+    # the check entirely when the value is absent.
+    #
+    # The `has_utilization` guard is REDUNDANT while PROFILE_NONE is negative:
+    # -1 > 90 is false, so dropping the guard changes nothing and the mutant for
+    # it survives. It is kept because it states the intent Rust spelled with
+    # `if let Some`, and because it is the one line that would still be correct
+    # if the sentinel ever moved to a large positive value.
+    if (hw_report_has_utilization(report) == 1) {
+        if (hw_report_gpu_utilization_percent(report) > HW_GPU_MAX_UTILIZATION) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+# Whether GPU compute is viable for an image of this size. Rust's
+# `should_use_gpu` — probes, then applies the policy.
+#
+# ⚠ This probes on EVERY call, as the Rust original did. That is a full hardware
+# scan per query; a caller deciding per-frame should probe once and use
+# `hw_should_use_gpu_report`.
+#must_use
+fn hw_should_use_gpu(width, height) {
+    var r = hw_probe();
+    var ok = hw_should_use_gpu_report(r, width, height);
+    hw_report_free(r);
+    return ok;
+}

@@ -23,9 +23,12 @@ output = "build/ranga"
 #   error/constants → pixel → colour → convert/blend → composite/histogram
 #   → transform/filter → icc → spectral/hwaccel → gpu_*
 #
-# The `gpu_*` modules will land as a separate `[lib.gpu]` bundle rather than in
-# the core list — they pull mabda, and CPU-only consumers should not compile it.
-# That mirrors how prakash keeps `ai.cyr` out of its core bundle.
+# `spectral` and `hwaccel` are NOT in the core list. They were optional,
+# non-default cargo features in the Rust line (`default = ["simd"]`), and the
+# port keeps that shape: each is its own bundle profile below, built by
+# `cyrius distlib --all`. The `gpu_*` modules will land the same way — they pull
+# mabda, and CPU-only consumers should not compile it. This mirrors how prakash
+# keeps `ai.cyr` out of its core bundle.
 [lib]
 modules = [
     "src/error.cyr",
@@ -43,6 +46,65 @@ modules = [
     "src/icc.cyr",
 ]
 
+# Bundle profiles for the optional features. Each is the core list plus the one
+# module that needs an external library, so a consumer picks exactly one bundle
+# and pays for exactly what it uses.
+#
+# ⚠ Their generated `.deps` sidecars are EMPTY at cycc 6.5.27 and must not be
+# trusted. Profile sidecars use an include-scan of the bundled sources, and
+# ranga's sources carry no stdlib include lines — that is the toolchain's own
+# documented convention ("source files only need project includes"), so the scan
+# finds nothing and writes zero leaves for a 7,700-line bundle. Both profiles
+# here are strict SUPERSETS of the core list, so `dist/ranga.deps` is the
+# authoritative leaf list for all three bundles. Filed upstream at
+# cyrius/docs/development/issues/2026-08-18-distlib-profile-sidecar-empty-under-auto-prepend.md
+[lib.spectral]
+modules = [
+    "src/error.cyr",
+    "src/bytevec.cyr",
+    "src/simd_u8.cyr",
+    "src/pixel.cyr",
+    "src/color.cyr",
+    "src/composite.cyr",
+    "src/histogram.cyr",
+    "src/transform.cyr",
+    "src/filter_point.cyr",
+    "src/filter_kernel.cyr",
+    "src/blend.cyr",
+    "src/convert.cyr",
+    "src/icc.cyr",
+    "src/spectral.cyr",
+]
+
+[lib.hwaccel]
+modules = [
+    "src/error.cyr",
+    "src/bytevec.cyr",
+    "src/simd_u8.cyr",
+    "src/pixel.cyr",
+    "src/color.cyr",
+    "src/composite.cyr",
+    "src/histogram.cyr",
+    "src/transform.cyr",
+    "src/filter_point.cyr",
+    "src/filter_kernel.cyr",
+    "src/blend.cyr",
+    "src/convert.cyr",
+    "src/icc.cyr",
+    "src/hwaccel.cyr",
+]
+
+# Mirrors the Rust line's cargo features. `default` is empty because ranga's
+# SIMD is built in — `src/simd_u8.cyr` is unconditional, where Rust gated it
+# behind a `simd` feature that was on by default. The two optional features name
+# their libraries; marking a library optional keeps it inert for consumers,
+# which is the whole point. Transitive feature tables are not parsed, so a
+# downstream project that does not ask for spectral never clones prakash.
+[features]
+default = []
+spectral = ["prakash"]
+hwaccel = ["ai-hwaccel"]
+
 # Kept deliberately minimal: add a module here only when a ported `src/*.cyr`
 # actually calls into it, so the dependency surface stays legible and DCE has
 # less to prune.
@@ -56,8 +118,18 @@ modules = [
 #   tagged  — Option/sum-type shapes
 #
 # Not yet listed, added when their modules land: simd (blend/convert kernels),
-# bench (tests/ranga.bcyr), bayan (serde replacement), sakshi (tracing
-# replacement), mabda (gpu_* bundle).
+# mabda (gpu_* bundle).
+#
+# The last ten entries are NOT used by any core module. They are the leaves the
+# two optional libraries need — result/simd/fnptr/callback/bayan/sakshi for
+# prakash, fs/process/thread/hashmap for ai-hwaccel — and they are listed here
+# because that is where the resolver looks; a leaf that is only named in a
+# library's own sidecar gets VENDORED into lib/ but not auto-included, which
+# surfaces as undefined-function errors at link time rather than as a missing
+# file. Dead code for a core-only build, and pruned by DCE.
+#
+# The libraries' own bundles are not listed here — they are named deps, and the
+# optional modules include them directly.
 [deps]
 stdlib = [
     "syscalls",
@@ -75,4 +147,30 @@ stdlib = [
     "freelist",
     "tagged",
     "bench",
+    "result",
+    "simd",
+    "fnptr",
+    "callback",
+    "bayan",
+    "sakshi",
+    "fs",
+    "process",
+    "thread",
+    "hashmap",
 ]
+
+# Both libraries are pinned by tag and marked optional, so `cyrius deps`
+# ignores them until the matching feature is enabled. No `path =` override on
+# purpose: a path override resolves locally and bypasses the commit-pin
+# verification recorded in cyrius.lock, leaving no trace that it did so.
+[deps.prakash]
+git = "https://github.com/MacCracken/prakash.git"
+tag = "2.2.3"
+modules = ["dist/prakash.cyr"]
+optional = true
+
+[deps.ai-hwaccel]
+git = "https://github.com/MacCracken/ai-hwaccel.git"
+tag = "2.3.17"
+modules = ["dist/ai-hwaccel.cyr"]
+optional = true

@@ -195,9 +195,68 @@ same bound either way). The four documented survivors are recorded in the module
 header; all are clamps whose wrong value is multiplied by zero — real
 protections against a heap over-read, invisible to any output assertion.
 
-### M5 — External deps
+### M5 — External deps ✅
 
-`spectral` (prakash, verified 18/18 covered), `hwaccel` (ai-hwaccel v2.3.16).
+`src/spectral.cyr` (58 assertions) over **prakash 2.2.3**, `src/hwaccel.cyr`
+(48 assertions) over **ai-hwaccel 2.3.17**.
+
+**Both are OPTIONAL, matching the Rust line.** `spectral` and `hwaccel` were
+non-default cargo features (`default = ["simd"]`), so the port gates them the
+same way: `[features]` + `optional = true` deps, each with its own `[lib.X]`
+bundle profile. Consumers of the core bundle never clone prakash or ai-hwaccel —
+transitive feature tables are not parsed, so an optional dep stays inert
+downstream.
+
+**The re-exports needed no code.** `rust-old/src/spectral.rs` is mostly a
+`pub use` block naming 18 prakash items. Cyrius has a flat namespace and links
+the bundle whole, so all 18 are already callable; re-declaring them would be a
+collision, not a re-export. What survived porting is the six convenience
+functions and the two `From` conversions — the only part that was ever real
+code.
+
+**Two allocators meet at the spectral seam.** prakash allocates with the bump
+allocator and never frees; ranga's `CieXyz` uses `fl_alloc`/`fl_free`. Every
+conversion copies rather than aliasing, even though the layouts are identical
+(both 24 bytes, x@0 y@8 z@16) — an alias would work right up until the first
+free. The tests assert the layout agreement *and* the pointer distinctness, so
+the claim in the comment is checked rather than trusted.
+
+**`Option<u32>` became a sentinel.** ai-hwaccel encodes "not reported" as
+`PROFILE_NONE` (-1). That distinction is load-bearing: a GPU idling at 0% and a
+GPU whose driver exposes no counter are different facts, and the offload policy
+branches on which one it has. The port carries the sentinel through rather than
+flattening it, with `hw_report_has_utilization` / `_has_temperature` as the
+`is_some()` equivalents.
+
+**The Rust hwaccel tests asserted nothing** — `let _ = report.has_gpu;` three
+times over, because a CI box has no GPU and the assertions were unwritable. That
+left the five-branch offload decision completely untested. The port splits the
+policy out of the probe (`hw_should_use_gpu_report` takes a report instead of
+reading hardware), so every branch is now reachable from a synthetic report and
+the crossover, VRAM and utilisation rules are all pinned.
+
+⚠ **A dep bundle silently overrode three of ranga's own functions.** Including
+`lib/hisab.cyr` — which prakash's bundle references for `num_fft` — produced
+three duplicate-function warnings, and Cyrius resolves duplicates as LAST
+DEFINITION WINS. hisab's four-argument `premultiply_alpha(r, g, b, a)` replaced
+ranga's one-argument `premultiply_alpha(buf)`; every existing call site would
+have passed a PixelBuffer where four doubles were expected. hisab is only needed
+by prakash's `wave_pattern`, which this bridge never calls, so it is not
+included and `num_fft` links as an unreachable reference. **Read the duplicate
+warnings from `cyrius distlib` — they are the only signal.**
+
+**Mutation testing: 18 mutants, 17 killed.** The survivor is equivalent —
+`has_utilization` is redundant while the sentinel is negative, since `-1 > 90`
+is false either way — and is kept because it states the intent Rust spelled with
+`if let Some`. One mutant exposed a genuinely under-specified helper:
+`_hw_bytes_to_mb(-1)` returns 0 with or without its negative guard, because
+integer division truncates toward zero, so the test now pins a negative larger
+than a megabyte.
+
+**Filed upstream:** profile `.deps` sidecars are written EMPTY at 6.5.27 for any
+project following the documented "source files only need project includes"
+convention — the include-scan has nothing to find. `dist/ranga.deps` is
+authoritative for all three bundles.
 
 ### M6 — GPU
 

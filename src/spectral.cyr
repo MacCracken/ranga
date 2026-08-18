@@ -1,0 +1,145 @@
+# spectral.cyr -- spectral colour science bridge over prakash
+# Ported from rust-old/src/spectral.rs. Private prefix: _spec_
+#
+# OPTIONAL. This module is not in the core `[lib]` bundle. It was a non-default
+# cargo feature in the Rust line (`spectral = ["dep:prakash"]`) and stays
+# optional here, built via the `[lib.spectral]` profile. Nothing in ranga's core
+# depends on it.
+#
+# THE RE-EXPORTS NEED NO CODE. rust-old/src/spectral.rs is mostly a `pub use`
+# block naming 18 prakash items — CIE_1931_2DEG, Spd, VISIBLE_MIN_NM,
+# cct_from_xy, cie_cmf_at, color_rendering_index, color_temperature_to_rgb, the
+# five illuminants, linear_to_srgb_gamma, planck_radiance, srgb_gamma_to_linear,
+# wavelength_to_rgb, wien_peak, Rgb, Xyz. Cyrius has a flat namespace and the
+# prakash bundle is linked whole, so every one of those is ALREADY callable by
+# its prakash name once this profile is built. Re-declaring them here would be a
+# name collision, not a re-export. What Rust needed `pub use` for, Cyrius gets
+# for free; what remains is the part that was real code.
+#
+# So this file is exactly the six convenience functions and the two `From`
+# conversions — the only things rust-old/src/spectral.rs actually implemented.
+#
+# ⚠ TWO ALLOCATORS MEET HERE. prakash allocates with the bump allocator
+# (`alloc(sizeof(Xyz))`, no individual free), ranga's CieXyz with
+# `fl_alloc`/`fl_free`. A prakash Xyz therefore CANNOT be handed to
+# `cie_xyz_free`, and a ranga CieXyz cannot be left for prakash to reclaim.
+# Every conversion below COPIES the three doubles into a freshly allocated
+# struct of the destination's kind. The layouts happen to be identical — both
+# are 24 bytes, x@0 y@8 z@16 — and aliasing the pointer would "work" right up
+# until the first free, which is exactly the kind of silent corruption this port
+# is supposed to avoid. `tests/spectral.tcyr` pins the layout agreement so the
+# assumption is checked rather than assumed, but the code still copies.
+#
+# NAME PREFIX. Everything here is `spectral_`-prefixed because the bare names
+# collide: prakash already exports `spd_to_xyz`, which returns a prakash Xyz
+# where ranga's returns a CieXyz. Rust disambiguated by module path; Cyrius has
+# no module paths, so the prefix is load-bearing rather than stylistic.
+
+# The dep bundle. `cyrius distlib` strips include lines, so this does not
+# propagate into dist/ranga-spectral.cyr — a consumer of that bundle declares
+# prakash in its own manifest, which is what keeps the dep opt-in downstream.
+#
+# ⚠ hisab is deliberately NOT included, even though prakash's bundle references
+# `num_fft` from it. Including it produced three DUPLICATE FUNCTION warnings —
+# `linear_to_srgb`, `premultiply_alpha`, `unpremultiply_alpha` — and Cyrius
+# resolves duplicates as LAST DEFINITION WINS, so hisab's four-argument
+# `premultiply_alpha(r, g, b, a)` silently replaced ranga's one-argument
+# `premultiply_alpha(buf)` from composite.cyr. Every existing call site would
+# have passed a PixelBuffer to a function expecting four doubles, with no
+# diagnostic beyond a warning in the bundle log.
+#
+# hisab is only needed by prakash's `wave_pattern` module, which this bridge
+# never calls, so `num_fft` links as an unreachable reference and DCE drops it.
+# A consumer that DOES want prakash's wave surface declares hisab itself — and
+# must then rename around the collision, which is its problem to solve rather
+# than one ranga silently inflicts on everyone.
+include "lib/prakash.cyr"
+
+# ── prakash Xyz <-> ranga CieXyz ────────
+
+# Rust's `impl From<prakash::spectral::Xyz> for CieXyz`.
+# Returns 0 if `pk` is 0 or the ranga-side allocation fails.
+#must_use
+fn spectral_xyz_to_cie_xyz(pk) {
+    if (pk == 0) { return 0; }
+    return cie_xyz_new(Xyz_x(pk), Xyz_y(pk), Xyz_z(pk));
+}
+
+# Rust's `impl From<CieXyz> for prakash::spectral::Xyz`.
+# The result is bump-allocated by prakash and must NOT be passed to
+# `cie_xyz_free`.
+#must_use
+fn spectral_cie_xyz_to_xyz(c) {
+    if (c == 0) { return 0; }
+    return xyz_new(cie_xyz_x(c), cie_xyz_y(c), cie_xyz_z(c));
+}
+
+# ── Convenience functions ────────
+
+# Integrate a spectral power distribution against the CIE 1931 standard
+# observer, as a ranga CieXyz. Rust's `spd_to_xyz`.
+#must_use
+fn spectral_spd_to_cie_xyz(spd) {
+    if (spd == 0) { return 0; }
+    return spectral_xyz_to_cie_xyz(spd_to_xyz(spd));
+}
+
+# Correlated colour temperature from a ranga CieXyz, via McCamy's
+# approximation. Valid for roughly 3000-50000 K. Rust's `xyz_to_cct`.
+#
+# Rust built a prakash Xyz, called `to_xyy`, and took the first two components.
+# The intermediate allocation is avoided here: `xyz_to_xyy` divides each of x
+# and y by the sum, and that arithmetic is three lines. The black-point guard is
+# preserved — prakash returns (0, 0, 0) below 1e-15 rather than dividing, and
+# `cct_from_xy(0, 0)` is what Rust would then have passed on.
+#must_use
+fn spectral_cie_xyz_to_cct(c) {
+    if (c == 0) { return 0; }
+    var x = cie_xyz_x(c);
+    var y = cie_xyz_y(c);
+    var sum = f64_add(f64_add(x, y), cie_xyz_z(c));
+    if (f64_lt(sum, 0.000000000000001) == 1) {
+        return cct_from_xy(0, 0);
+    }
+    return cct_from_xy(f64_div(x, sum), f64_div(y, sum));
+}
+
+# Monochromatic light at `wavelength_nm` as a ranga CieXyz, via the CIE 1931
+# colour matching functions. Rust's `wavelength_to_xyz`.
+#
+# Outside 380-780 nm prakash returns an Xyz of (0, 0, 0) rather than an error,
+# which matches the Rust doc comment ("Returns zero outside 380-780 nm").
+#must_use
+fn spectral_wavelength_to_cie_xyz(wavelength_nm) {
+    return spectral_xyz_to_cie_xyz(cie_cmf_at(wavelength_nm));
+}
+
+# The D65 illuminant white point as a ranga CieXyz. Rust's `d65_white`.
+#
+# ⚠ This deliberately does NOT call prakash. ranga already carries the same
+# white point natively (`cie_xyz_d65_white`, src/color.cyr), and routing through
+# prakash would make the core module's constant and the optional module's
+# constant two different code paths that could drift. The test asserts the two
+# libraries agree; the implementation uses ranga's own so that enabling the
+# spectral feature cannot change a colour that core ranga already computed.
+#must_use
+fn spectral_d65_white() { return cie_xyz_d65_white(); }
+
+# The D50 illuminant white point as a ranga CieXyz. Rust's `d50_white`.
+#must_use
+fn spectral_d50_white() { return cie_xyz_d50_white(); }
+
+# A blackbody spectral power distribution at `temperature_k`. Rust's
+# `blackbody_spd`, wrapping `Spd::blackbody`.
+#
+# ⚠ `temperature_k` is an f64 BIT PATTERN, not a native integer — prakash feeds
+# it straight into `planck_radiance`. Passing a bare `5000` gives a temperature
+# of 2.5e-320 K and an all-zero SPD, with no diagnostic.
+#
+# The returned Spd is bump-allocated by prakash, as is its 648-byte sample
+# array (81 samples on the 380-780 nm / 5 nm grid). There is no `spd_free` in
+# prakash's surface and none is needed.
+#must_use
+fn spectral_blackbody_spd(temperature_k) {
+    return spd_blackbody(temperature_k);
+}

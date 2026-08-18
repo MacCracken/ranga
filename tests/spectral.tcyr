@@ -1,0 +1,205 @@
+# spectral.tcyr — the prakash bridge
+# Ported from rust-old/src/spectral.rs.
+#
+# This module is a BRIDGE, so the tests are about the seam, not about colour
+# science: prakash owns the science and has its own suite. What is tested here
+# is that values survive the crossing intact, that the two allocators stay on
+# their own sides of it, and that the constants both libraries define
+# independently actually agree.
+
+include "src/error.cyr"
+include "src/bytevec.cyr"
+include "src/pixel.cyr"
+include "src/color.cyr"
+include "src/spectral.cyr"
+
+alloc_init();
+
+fn approx(a, b, eps) {
+    if (f64_lt(f64_abs(f64_sub(a, b)), eps) == 1) { return 1; }
+    return 0;
+}
+
+# ================================================================
+test_group("xyz bridge");
+
+# A prakash Xyz crossing into ranga must arrive with all three components
+# unchanged. Distinct values per component so a transposed copy is visible.
+var pk = xyz_new(0.25, 0.5, 0.75);
+var rg = spectral_xyz_to_cie_xyz(pk);
+assert_eq(rg != 0, 1, "converting a prakash Xyz yields a ranga CieXyz");
+assert_eq(approx(cie_xyz_x(rg), 0.25, 0.000000001), 1, "x survives the crossing");
+assert_eq(approx(cie_xyz_y(rg), 0.5, 0.000000001), 1, "y survives the crossing");
+assert_eq(approx(cie_xyz_z(rg), 0.75, 0.000000001), 1, "z survives the crossing");
+
+# And back the other way.
+var back = spectral_cie_xyz_to_xyz(rg);
+assert_eq(back != 0, 1, "converting a ranga CieXyz yields a prakash Xyz");
+assert_eq(approx(Xyz_x(back), 0.25, 0.000000001), 1, "x round-trips");
+assert_eq(approx(Xyz_y(back), 0.5, 0.000000001), 1, "y round-trips");
+assert_eq(approx(Xyz_z(back), 0.75, 0.000000001), 1, "z round-trips");
+
+# ⚠ THE COPY IS LOAD-BEARING. prakash allocates with the bump allocator and
+# ranga with fl_alloc; a conversion that aliased the pointer would put a
+# bump-allocated struct on a path to fl_free. Distinct pointers prove the copy.
+assert_eq(rg != pk, 1, "the ranga CieXyz is a distinct allocation, not an alias");
+assert_eq(back != rg, 1, "and so is the prakash Xyz coming back");
+
+# Mutating one side must not disturb the other — the same property stated as
+# behaviour rather than as pointer identity.
+cie_xyz_free(rg);
+rg = spectral_xyz_to_cie_xyz(pk);
+Xyz_set_x(pk, 0.99);
+assert_eq(approx(cie_xyz_x(rg), 0.25, 0.000000001), 1,
+          "writing through the prakash struct does not reach the ranga copy");
+Xyz_set_x(pk, 0.25);
+
+# The layouts DO agree — both are 24 bytes, x@0 y@8 z@16 — and this is asserted
+# rather than assumed, because the comment in spectral.cyr claims it as the
+# reason aliasing would "work". If this ever fails, that comment is wrong.
+assert_eq(approx(load64(pk), cie_xyz_x(rg), 0.000000001), 1, "prakash Xyz x is at offset 0");
+assert_eq(approx(load64(pk + 8), cie_xyz_y(rg), 0.000000001), 1, "y is at offset 8");
+assert_eq(approx(load64(pk + 16), cie_xyz_z(rg), 0.000000001), 1, "z is at offset 16");
+
+# Null in, null out — rather than a segfault reading through 0.
+assert_eq(spectral_xyz_to_cie_xyz(0), 0, "a null prakash Xyz converts to null");
+assert_eq(spectral_cie_xyz_to_xyz(0), 0, "a null ranga CieXyz converts to null");
+cie_xyz_free(rg);
+
+# ================================================================
+test_group("white points");
+
+# ranga and prakash each define D65 and D50 independently — ranga from decimal
+# literals in color.cyr, prakash from integer ratios (_cie_r(95047, 100000)).
+# spectral_d65_white deliberately returns RANGA's, so that enabling this feature
+# cannot change a colour the core already computed. That is only safe if the two
+# actually agree, which is what this asserts.
+var rd65 = spectral_d65_white();
+var pd65 = xyz_d65_white();
+assert_eq(approx(cie_xyz_x(rd65), Xyz_x(pd65), 0.0000000001), 1, "ranga and prakash agree on D65 x");
+assert_eq(approx(cie_xyz_y(rd65), Xyz_y(pd65), 0.0000000001), 1, "and on D65 y");
+assert_eq(approx(cie_xyz_z(rd65), Xyz_z(pd65), 0.0000000001), 1, "and on D65 z");
+assert_eq(approx(cie_xyz_x(rd65), 0.95047, 0.0000001), 1, "D65 x is 0.95047");
+assert_eq(approx(cie_xyz_y(rd65), 1.0, 0.0000001), 1, "D65 y is exactly 1.0");
+assert_eq(approx(cie_xyz_z(rd65), 1.08883, 0.0000001), 1, "D65 z is 1.08883");
+
+var rd50 = spectral_d50_white();
+var pd50 = xyz_d50_white();
+assert_eq(approx(cie_xyz_x(rd50), Xyz_x(pd50), 0.0000000001), 1, "ranga and prakash agree on D50 x");
+assert_eq(approx(cie_xyz_z(rd50), Xyz_z(pd50), 0.0000000001), 1, "and on D50 z");
+assert_eq(approx(cie_xyz_x(rd50), 0.96422, 0.0000001), 1, "D50 x is 0.96422");
+assert_eq(approx(cie_xyz_z(rd50), 0.82521, 0.0000001), 1, "D50 z is 0.82521");
+
+# ================================================================
+test_group("cct");
+
+# McCamy's approximation on the D65 white point. prakash uses the
+# 449 / 3525 / 6823.3 / 5520.33 coefficient set — NOT the 437 / 3601 / 6861 /
+# 5517 variant that also circulates — so the expected value is 6503.46, not
+# 6506.55. Computed independently in Python from prakash's actual coefficients.
+assert_eq(approx(spectral_cie_xyz_to_cct(rd65), 6503.461953, 0.01), 1,
+          "D65 gives a CCT of ~6503 K");
+assert_eq(approx(spectral_cie_xyz_to_cct(rd50), 5002.115988, 0.01), 1,
+          "D50 gives a CCT of ~5002 K");
+
+# The chromaticity is scale-invariant, so a uniformly scaled XYZ is the same
+# colour at a different luminance and must give the same temperature. This is
+# what catches a bridge that forgot to normalise by the sum.
+var scaled = cie_xyz_new(f64_mul(cie_xyz_x(rd65), 3.0),
+                         f64_mul(cie_xyz_y(rd65), 3.0),
+                         f64_mul(cie_xyz_z(rd65), 3.0));
+assert_eq(approx(spectral_cie_xyz_to_cct(scaled), 6503.461953, 0.01), 1,
+          "CCT is invariant under a uniform scale of XYZ");
+cie_xyz_free(scaled);
+
+# The black point. Dividing by the sum would be a division by zero; the guard
+# returns the degenerate chromaticity instead, matching what prakash's own
+# xyz_to_xyy does below 1e-15.
+var black = cie_xyz_new(0, 0, 0);
+var bc = spectral_cie_xyz_to_cct(black);
+assert_eq(f64_eq(bc, bc), 1, "the black point gives a real number, not NaN");
+assert_eq(approx(bc, cct_from_xy(0, 0), 0.000001), 1,
+          "and it is what cct_from_xy(0, 0) returns, as in Rust");
+cie_xyz_free(black);
+assert_eq(spectral_cie_xyz_to_cct(0), 0, "a null CieXyz gives 0 rather than dereferencing");
+
+# ================================================================
+test_group("wavelength and spd");
+
+# 555 nm is the photopic peak: the CIE 1931 y-bar is at its maximum there, so y
+# should be very close to 1.0 and clearly the largest of the three.
+var w555 = spectral_wavelength_to_cie_xyz(555.0);
+assert_eq(w555 != 0, 1, "555 nm converts to a CieXyz");
+assert_eq(approx(cie_xyz_y(w555), 1.0, 0.01), 1, "y-bar peaks near 1.0 at 555 nm");
+assert_eq(f64_gt(cie_xyz_y(w555), cie_xyz_x(w555)), 1, "y exceeds x at the photopic peak");
+assert_eq(f64_gt(cie_xyz_y(w555), cie_xyz_z(w555)), 1, "and exceeds z");
+
+# 450 nm is deep blue: z must dominate. This is the assertion that fails if the
+# three components were ever crossed in the bridge.
+var w450 = spectral_wavelength_to_cie_xyz(450.0);
+assert_eq(f64_gt(cie_xyz_z(w450), cie_xyz_x(w450)), 1, "z dominates x in the blue");
+assert_eq(f64_gt(cie_xyz_z(w450), cie_xyz_y(w450)), 1, "and dominates y");
+
+# 600 nm is orange: x must dominate z, the opposite ordering.
+var w600 = spectral_wavelength_to_cie_xyz(600.0);
+assert_eq(f64_gt(cie_xyz_x(w600), cie_xyz_z(w600)), 1, "x dominates z in the orange");
+
+# Outside 380-780 nm the Rust doc comment promises zero, and prakash returns a
+# real (0,0,0) Xyz rather than a null, so the bridge must not report failure.
+var wlo = spectral_wavelength_to_cie_xyz(200.0);
+assert_eq(wlo != 0, 1, "an out-of-range wavelength still returns a CieXyz");
+assert_eq(approx(cie_xyz_x(wlo), 0, 0.0000001), 1, "below 380 nm x is zero");
+assert_eq(approx(cie_xyz_y(wlo), 0, 0.0000001), 1, "below 380 nm y is zero");
+assert_eq(approx(cie_xyz_z(wlo), 0, 0.0000001), 1, "below 380 nm z is zero");
+var whi = spectral_wavelength_to_cie_xyz(900.0);
+assert_eq(approx(cie_xyz_y(whi), 0, 0.0000001), 1, "above 780 nm y is zero");
+
+# The visible-range bounds prakash re-exports, which the Rust module named as
+# VISIBLE_MIN_NM / VISIBLE_MAX_NM.
+assert_eq(approx(spec_visible_min_nm(), 380.0, 0.0000001), 1, "the visible range starts at 380 nm");
+assert_eq(approx(spec_visible_max_nm(), 780.0, 0.0000001), 1, "and ends at 780 nm");
+
+# ⚠ temperature_k is an f64 BIT PATTERN. A blackbody at 6500 K should read as
+# roughly daylight; passing a native integer here would silently give 2.5e-320 K
+# and an all-zero SPD, so the CCT coming back in the right range is also the
+# assertion that the argument was passed correctly.
+var bb = spectral_blackbody_spd(6500.0);
+assert_eq(bb != 0, 1, "a blackbody SPD is built");
+assert_eq(Spd_len(bb), 81, "on the 81-sample 380-780 nm grid");
+assert_eq(approx(Spd_start_nm(bb), 380.0, 0.0000001), 1, "starting at 380 nm");
+assert_eq(approx(Spd_step_nm(bb), 5.0, 0.0000001), 1, "in 5 nm steps");
+
+var bbx = spectral_spd_to_cie_xyz(bb);
+assert_eq(bbx != 0, 1, "the blackbody SPD integrates to a CieXyz");
+var bbcct = spectral_cie_xyz_to_cct(bbx);
+# Planck at 6500 K, integrated against CIE 1931 and pushed back through McCamy,
+# lands near but not exactly on 6500 — the approximation and the 5 nm grid both
+# cost a little. A wide window here is deliberate: the assertion is "the
+# temperature survived the round trip", not "McCamy is exact".
+assert_eq(f64_gt(bbcct, 5500.0), 1, "a 6500 K blackbody round-trips above 5500 K");
+assert_eq(f64_lt(bbcct, 7500.0), 1, "and below 7500 K");
+
+# A hotter blackbody must read hotter. This ordering is what actually proves the
+# temperature argument reaches Planck's law, independent of any absolute value.
+var bb3 = spectral_spd_to_cie_xyz(spectral_blackbody_spd(3000.0));
+var bb9 = spectral_spd_to_cie_xyz(spectral_blackbody_spd(9000.0));
+assert_eq(f64_lt(spectral_cie_xyz_to_cct(bb3), bbcct), 1, "3000 K reads cooler than 6500 K");
+assert_eq(f64_gt(spectral_cie_xyz_to_cct(bb9), bbcct), 1, "9000 K reads hotter");
+
+assert_eq(spectral_spd_to_cie_xyz(0), 0, "a null SPD gives null rather than dereferencing");
+
+# The D65 illuminant SPD prakash re-exports should integrate back to a D65-ish
+# temperature — a genuine end-to-end pass through the re-exported surface.
+var id65 = spectral_spd_to_cie_xyz(illuminant_d65());
+var idcct = spectral_cie_xyz_to_cct(id65);
+assert_eq(f64_gt(idcct, 6000.0), 1, "the D65 illuminant integrates above 6000 K");
+assert_eq(f64_lt(idcct, 7000.0), 1, "and below 7000 K");
+
+cie_xyz_free(rd65); cie_xyz_free(rd50);
+cie_xyz_free(w555); cie_xyz_free(w450); cie_xyz_free(w600);
+cie_xyz_free(wlo); cie_xyz_free(whi);
+cie_xyz_free(bbx); cie_xyz_free(bb3); cie_xyz_free(bb9); cie_xyz_free(id65);
+
+var exit_code = assert_summary();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);
