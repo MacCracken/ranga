@@ -4268,3 +4268,921 @@ fn _fp_awb_scale(agray: f32, avg: f32) {
     if (f64_gt(d, 3.0) == 1) { return f32_from(3.0); }
     return s;
 }
+
+# --- filter_kernel.cyr ---
+
+# filter_kernel.cyr -- neighbourhood and generative filters
+# Ported from the KERNEL half of rust-old/src/filter.rs. Private prefix: _fk_
+#
+# The other half is filter_point.cyr (13 per-pixel ops). See its header for why
+# filter.rs is split.
+#
+# f32 DISCIPLINE. Every arithmetic operand must be a `: f32`-TYPED binding or
+# typed parameter — a call result is untyped and turns `*` into an integer
+# multiply with no diagnostic. That bug shipped twice during this port
+# (filter_point's luma kernel returned 0 for every pixel; auto_white_balance
+# silently did nothing), so every constant here is bound before use and the
+# arithmetic-carrying helpers take `: f32` parameters.
+#
+# exp(). The Gaussian and bilateral weights evaluate exp(-d^2 / 2*sigma^2),
+# which reaches -inf for a large distance. Rust yields a 0.0 weight there; the
+# bare f64_exp builtin yields NaN, which then poisons the whole accumulator for
+# that pixel. Every exp here goes through _rg_exp from error.cyr. This is the
+# single reason that shim exists.
+#
+# ERROR MODEL. Functions that allocate a new buffer (gaussian_blur, box_blur,
+# unsharp_mask, median, bilateral) use the err_out pointer convention and return
+# 0 on failure. Functions that mutate in place (vignette, apply_lut3d, both
+# noise fns, flood_fill) return an RG_ERR_* code directly.
+
+#must_use
+fn _fk_validate_rgba8(buf) {
+    if (pixel_buffer_format(buf) != PF_RGBA8) { return RG_ERR_INVALID_FORMAT; }
+    return RG_ERR_NONE;
+}
+
+# Rust's `.clamp(0.0, 255.0) as u8` with Rust's NaN semantics: NaN passes the
+# clamp and `as u8` saturates it to 0. NOT ganita_f32_clamp, which would return
+# the HIGH bound for a NaN.
+#must_use
+fn _fk_f32_to_u8(v) {
+    var d = f32_to(v);
+    if (f64_eq(d, d) == 0) { return 0; }
+    if (f64_lt(d, 0) == 1) { return 0; }
+    if (f64_gt(d, 255.0) == 1) { return 255; }
+    return f64_to(d);
+}
+
+#must_use
+fn _fk_u8_to_f32(n) { return f32_from(f64_from(n)); }
+
+# acc + sample * weight, in single precision. Typed parameters are what make
+# this f32 arithmetic rather than an integer multiply.
+#must_use
+fn _fk_fma(acc: f32, sample: f32, weight: f32) {
+    return acc + sample * weight;
+}
+
+#must_use
+fn _fk_mul(a: f32, b: f32) { return a * b; }
+#must_use
+fn _fk_div(a: f32, b: f32) { return a / b; }
+#must_use
+fn _fk_sub(a: f32, b: f32) { return a - b; }
+#must_use
+fn _fk_add(a: f32, b: f32) { return a + b; }
+
+# Clamp an integer index into [0, hi].
+#must_use
+fn _fk_clampi(v, hi) {
+    if (v < 0) { return 0; }
+    if (v > hi) { return hi; }
+    return v;
+}
+
+# ── Gaussian kernel ────────
+# Returns a freshly allocated array of (2*radius + 1) f32 bit patterns,
+# normalised to sum 1. Caller frees with fl_free.
+#
+# sigma is floored at 0.5: `(radius / 3.0).max(0.5)`. Without the floor a
+# radius of 1 would give sigma 0.333 and a kernel that is essentially a delta,
+# which is not what Rust produces.
+#must_use
+fn _fk_build_gaussian_kernel(radius) {
+    var len = 2 * radius + 1;
+    var k = fl_alloc(len * 4);
+    if (k == 0) { return 0; }
+    var sig: f32 = f32_from(f64_div(f64_from(radius), 3.0));
+    var halfv: f32 = f32_from(0.5);
+    if (f64_lt(f32_to(sig), 0.5) == 1) { sig = halfv; }
+    var two: f32 = f32_from(2.0);
+    var denom: f32 = two * sig * sig;
+
+    var sum: f32 = f32_from(0);
+    var i = 0;
+    while (i < len) {
+        var x: f32 = f32_from(f64_from(i - radius));
+        # `f32_from(0) - x * x` would put a CALL RESULT on the left of the
+        # subtraction, which is untyped and turns it into integer arithmetic.
+        var zero: f32 = f32_from(0);
+        var num: f32 = zero - x * x;
+        # _rg_exp, not f64_exp: a wide kernel drives this to -inf, where Rust
+        # gives 0.0 and the bare builtin gives NaN.
+        var v: f32 = f32_from(_rg_exp(f32_to(_fk_div(num, denom))));
+        store32(k + i * 4, v);
+        sum = sum + v;
+        i = i + 1;
+    }
+    # Normalise. A zero sum cannot happen for a real kernel (the centre tap is
+    # exp(0) == 1), so no guard is needed and Rust has none either.
+    var j = 0;
+    while (j < len) {
+        var cur: f32 = load32(k + j * 4);
+        store32(k + j * 4, _fk_div(cur, sum));
+        j = j + 1;
+    }
+    return k;
+}
+
+# ── separable blur passes ────────
+# Horizontal pass: for each output pixel, weight the kernel across x with EDGE
+# CLAMPING. Alpha is copied straight through, never blurred.
+fn _fk_blur_pass_h(src, dst, w, h, kernel, klen, radius) {
+    var y = 0;
+    while (y < h) {
+        var x = 0;
+        while (x < w) {
+            var rv: f32 = f32_from(0);
+            var gv: f32 = f32_from(0);
+            var bv: f32 = f32_from(0);
+            var ki = 0;
+            while (ki < klen) {
+                var kv: f32 = load32(kernel + ki * 4);
+                var sx = _fk_clampi(x + ki - radius, w - 1);
+                var idx = (y * w + sx) * 4;
+                rv = _fk_fma(rv, _fk_u8_to_f32(load8(src + idx)), kv);
+                gv = _fk_fma(gv, _fk_u8_to_f32(load8(src + idx + 1)), kv);
+                bv = _fk_fma(bv, _fk_u8_to_f32(load8(src + idx + 2)), kv);
+                ki = ki + 1;
+            }
+            var oi = (y * w + x) * 4;
+            store8(dst + oi, _fk_f32_to_u8(rv));
+            store8(dst + oi + 1, _fk_f32_to_u8(gv));
+            store8(dst + oi + 2, _fk_f32_to_u8(bv));
+            store8(dst + oi + 3, load8(src + oi + 3));
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+# Vertical pass. Rust processes this in 64-pixel-wide tiles for cache locality
+# and, under the `parallel` feature, across rayon threads. Both are performance
+# strategies over an identical computation, so this port is a straightforward
+# serial pass — a declared deviation, behaviour-identical.
+fn _fk_blur_pass_v(src, dst, w, h, kernel, klen, radius) {
+    var y = 0;
+    while (y < h) {
+        var x = 0;
+        while (x < w) {
+            var rv: f32 = f32_from(0);
+            var gv: f32 = f32_from(0);
+            var bv: f32 = f32_from(0);
+            var ki = 0;
+            while (ki < klen) {
+                var kv: f32 = load32(kernel + ki * 4);
+                var sy = _fk_clampi(y + ki - radius, h - 1);
+                var idx = (sy * w + x) * 4;
+                rv = _fk_fma(rv, _fk_u8_to_f32(load8(src + idx)), kv);
+                gv = _fk_fma(gv, _fk_u8_to_f32(load8(src + idx + 1)), kv);
+                bv = _fk_fma(bv, _fk_u8_to_f32(load8(src + idx + 2)), kv);
+                ki = ki + 1;
+            }
+            var oi = (y * w + x) * 4;
+            store8(dst + oi, _fk_f32_to_u8(rv));
+            store8(dst + oi + 1, _fk_f32_to_u8(gv));
+            store8(dst + oi + 2, _fk_f32_to_u8(bv));
+            store8(dst + oi + 3, load8(src + oi + 3));
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+# Shared driver for the two separable blurs: horizontal into a scratch buffer,
+# then vertical out of it. Takes ownership of neither; frees only its scratch.
+#must_use
+fn _fk_separable_blur(buf, kernel, klen, radius, err_out) {
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    var tmp = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    if (tmp == 0) { return 0; }
+    var out = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    if (out == 0) { pixel_buffer_free(tmp); return 0; }
+    _fk_blur_pass_h(pixel_buffer_data(buf), pixel_buffer_data(tmp), w, h, kernel, klen, radius);
+    _fk_blur_pass_v(pixel_buffer_data(tmp), pixel_buffer_data(out), w, h, kernel, klen, radius);
+    pixel_buffer_free(tmp);
+    store64(err_out, RG_ERR_NONE);
+    return out;
+}
+
+# ── gaussian_blur ────────
+# radius 0 is a CLONE, not an error and not a no-op-in-place: the function's
+# contract is to return a new buffer.
+#must_use
+fn gaussian_blur(buf, radius, err_out) {
+    var rc = _fk_validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    if (radius < 0) { store64(err_out, RG_ERR_INVALID_PARAMETER); return 0; }
+    if (radius == 0) {
+        var c = pixel_buffer_clone(buf);
+        if (c == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
+        store64(err_out, RG_ERR_NONE);
+        return c;
+    }
+    var k = _fk_build_gaussian_kernel(radius);
+    if (k == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    var out = _fk_separable_blur(buf, k, 2 * radius + 1, radius, err_out);
+    fl_free(k);
+    return out;
+}
+
+# ── box_blur ────────
+# The same separable machinery with a flat 1/len kernel.
+#must_use
+fn box_blur(buf, radius, err_out) {
+    var rc = _fk_validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    if (radius < 0) { store64(err_out, RG_ERR_INVALID_PARAMETER); return 0; }
+    if (radius == 0) {
+        var c = pixel_buffer_clone(buf);
+        if (c == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
+        store64(err_out, RG_ERR_NONE);
+        return c;
+    }
+    var len = 2 * radius + 1;
+    var k = fl_alloc(len * 4);
+    if (k == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    var one: f32 = f32_from(F64_ONE);
+    var flen: f32 = f32_from(f64_from(len));
+    var wv: f32 = _fk_div(one, flen);
+    var i = 0;
+    while (i < len) { store32(k + i * 4, wv); i = i + 1; }
+    var out = _fk_separable_blur(buf, k, len, radius, err_out);
+    fl_free(k);
+    return out;
+}
+
+# ── unsharp_mask ────────
+# out = orig + amount * (orig - blurred). Alpha comes from the original.
+#must_use
+fn unsharp_mask(buf, radius, amount, err_out) {
+    var rc = _fk_validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    var blurred = gaussian_blur(buf, radius, err_out);
+    if (blurred == 0) { return 0; }
+    var out = pixel_buffer_clone(buf);
+    if (out == 0) {
+        pixel_buffer_free(blurred);
+        store64(err_out, RG_ERR_ALLOCATION);
+        return 0;
+    }
+    var amt: f32 = amount;
+    var sp = pixel_buffer_data(buf);
+    var bp = pixel_buffer_data(blurred);
+    var dp = pixel_buffer_data(out);
+    var n = pixel_buffer_pixel_count(buf);
+    var i = 0;
+    while (i < n) {
+        var c = 0;
+        while (c < 3) {
+            var o: f32 = _fk_u8_to_f32(load8(sp + i * 4 + c));
+            var b: f32 = _fk_u8_to_f32(load8(bp + i * 4 + c));
+            store8(dp + i * 4 + c, _fk_f32_to_u8(_fk_add(o, _fk_mul(amt, _fk_sub(o, b)))));
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    pixel_buffer_free(blurred);
+    store64(err_out, RG_ERR_NONE);
+    return out;
+}
+
+# ── vignette ────────
+# Darkens by 1 - strength * d^2, where d is the distance from the centre
+# normalised by the half-diagonal. Samples at pixel CENTRES (+0.5).
+fn vignette(buf, strength) {
+    var rc = _fk_validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { return rc; }
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    var st: f32 = strength;
+    var two: f32 = f32_from(2.0);
+    var one: f32 = f32_from(F64_ONE);
+    var halfv: f32 = f32_from(0.5);
+    var fw: f32 = f32_from(f64_from(w));
+    var fh: f32 = f32_from(f64_from(h));
+    var cx: f32 = _fk_div(fw, two);
+    var cy: f32 = _fk_div(fh, two);
+    var maxd: f32 = f32_from(f64_sqrt(f32_to(_fk_add(_fk_mul(cx, cx), _fk_mul(cy, cy)))));
+    var p = pixel_buffer_data(buf);
+    var y = 0;
+    while (y < h) {
+        var x = 0;
+        while (x < w) {
+            var fx: f32 = f32_from(f64_from(x));
+            var fy: f32 = f32_from(f64_from(y));
+            var dx: f32 = _fk_sub(_fk_add(fx, halfv), cx);
+            var dy: f32 = _fk_sub(_fk_add(fy, halfv), cy);
+            var rad: f32 = f32_from(f64_sqrt(f32_to(_fk_add(_fk_mul(dx, dx), _fk_mul(dy, dy)))));
+            var d: f32 = _fk_div(rad, maxd);
+            var factor: f32 = _fk_sub(one, _fk_mul(_fk_mul(st, d), d));
+            var i = (y * w + x) * 4;
+            var c = 0;
+            while (c < 3) {
+                var v: f32 = _fk_u8_to_f32(load8(p + i + c));
+                store8(p + i + c, _fk_f32_to_u8(_fk_mul(v, factor)));
+                c = c + 1;
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+# ── Lut3d ────────
+#   +0  size   i64, the cube edge length
+#   +8  data   pointer to size^3 * 3 f32 bit patterns, laid out r + g*size + b*size^2
+var _FK_LUT_SIZE = 16;
+
+#must_use
+fn lut3d_new(size) {
+    if (size < 2) { return 0; }
+    var l = fl_alloc(_FK_LUT_SIZE);
+    if (l == 0) { return 0; }
+    var n = size * size * size * 3;
+    var d = fl_calloc(n * 4);
+    if (d == 0) { fl_free(l); return 0; }
+    store64(l, size);
+    store64(l + 8, d);
+    return l;
+}
+
+#must_use
+fn lut3d_size(l) { return load64(l); }
+#must_use
+fn lut3d_data(l) { return load64(l + 8); }
+fn lut3d_free(l) {
+    if (l == 0) { return RG_ERR_NONE; }
+    var d = load64(l + 8);
+    if (d != 0) { fl_free(d); }
+    fl_free(l);
+    return RG_ERR_NONE;
+}
+
+# Entry (r, g, b), channel c, as an f32 bit pattern.
+#must_use
+fn lut3d_get(l, r, g, b, c) {
+    var s = load64(l);
+    return load32(load64(l + 8) + ((r + g * s + b * s * s) * 3 + c) * 4);
+}
+
+fn lut3d_set(l, r, g, b, c, v) {
+    var s = load64(l);
+    store32(load64(l + 8) + ((r + g * s + b * s * s) * 3 + c) * 4, v);
+    return RG_ERR_NONE;
+}
+
+# Trilinear lookup. `r`, `g`, `b` are f32 bit patterns in [0,1]; writes three
+# f32 bit patterns to `out`.
+fn lut3d_lookup(l, r, g, b, out) {
+    var s = load64(l);
+    var n: f32 = f32_from(f64_from(s - 1));
+    var zero: f32 = f32_from(0);
+
+    var ri: f32 = _fk_mul(r, n);
+    if (f64_lt(f32_to(ri), 0) == 1) { ri = zero; }
+    if (f64_gt(f32_to(ri), f32_to(n)) == 1) { ri = n; }
+    var gi: f32 = _fk_mul(g, n);
+    if (f64_lt(f32_to(gi), 0) == 1) { gi = zero; }
+    if (f64_gt(f32_to(gi), f32_to(n)) == 1) { gi = n; }
+    var bi: f32 = _fk_mul(b, n);
+    if (f64_lt(f32_to(bi), 0) == 1) { bi = zero; }
+    if (f64_gt(f32_to(bi), f32_to(n)) == 1) { bi = n; }
+
+    var r0 = f64_to(f64_floor(f32_to(ri)));
+    var g0 = f64_to(f64_floor(f32_to(gi)));
+    var b0 = f64_to(f64_floor(f32_to(bi)));
+    var r1 = _fk_clampi(r0 + 1, s - 1);
+    var g1 = _fk_clampi(g0 + 1, s - 1);
+    var b1 = _fk_clampi(b0 + 1, s - 1);
+    var fr: f32 = _fk_sub(ri, f32_from(f64_from(r0)));
+    var fg: f32 = _fk_sub(gi, f32_from(f64_from(g0)));
+    var fb: f32 = _fk_sub(bi, f32_from(f64_from(b0)));
+
+    var c = 0;
+    while (c < 3) {
+        var c000: f32 = lut3d_get(l, r0, g0, b0, c);
+        var c100: f32 = lut3d_get(l, r1, g0, b0, c);
+        var c010: f32 = lut3d_get(l, r0, g1, b0, c);
+        var c110: f32 = lut3d_get(l, r1, g1, b0, c);
+        var c001: f32 = lut3d_get(l, r0, g0, b1, c);
+        var c101: f32 = lut3d_get(l, r1, g0, b1, c);
+        var c011: f32 = lut3d_get(l, r0, g1, b1, c);
+        var c111: f32 = lut3d_get(l, r1, g1, b1, c);
+        var c00: f32 = _fk_lerp(c000, c100, fr);
+        var c10: f32 = _fk_lerp(c010, c110, fr);
+        var c01: f32 = _fk_lerp(c001, c101, fr);
+        var c11: f32 = _fk_lerp(c011, c111, fr);
+        var d0: f32 = _fk_lerp(c00, c10, fg);
+        var d1: f32 = _fk_lerp(c01, c11, fg);
+        store32(out + c * 4, _fk_lerp(d0, d1, fb));
+        c = c + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+#must_use
+fn _fk_lerp(a: f32, b: f32, t: f32) { return a + (b - a) * t; }
+
+# ── apply_lut3d ────────
+fn apply_lut3d(buf, l) {
+    var rc = _fk_validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { return rc; }
+    if (l == 0) { return RG_ERR_INVALID_PARAMETER; }
+    var out = fl_alloc(12);
+    if (out == 0) { return RG_ERR_ALLOCATION; }
+    var f255: f32 = f32_from(255.0);
+    var p = pixel_buffer_data(buf);
+    var n = pixel_buffer_pixel_count(buf);
+    var i = 0;
+    while (i < n) {
+        var q = p + i * 4;
+        var r: f32 = _fk_div(_fk_u8_to_f32(load8(q)), f255);
+        var g: f32 = _fk_div(_fk_u8_to_f32(load8(q + 1)), f255);
+        var b: f32 = _fk_div(_fk_u8_to_f32(load8(q + 2)), f255);
+        lut3d_lookup(l, r, g, b, out);
+        var c = 0;
+        while (c < 3) {
+            var v: f32 = load32(out + c * 4);
+            store8(q + c, _fk_f32_to_u8(_fk_mul(v, f255)));
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    fl_free(out);
+    return RG_ERR_NONE;
+}
+
+# ── Xorshift64 ────────
+# The PRNG both noise filters use. State is one i64.
+#
+# ⚠ `x ^= x >> 7` is a LOGICAL shift on Rust's u64. Cyrius `>>` is logical and
+# `>>>` is arithmetic — the REVERSE of JS/Java — so `>>` is correct here. Using
+# `>>>` would sign-extend and diverge the entire sequence the moment the state's
+# high bit sets, which it does immediately.
+var _FK_SEED_DEFAULT = 0x123456789ABCDEF0;
+
+#must_use
+fn xorshift64_new(seed) {
+    var s = fl_alloc(8);
+    if (s == 0) { return 0; }
+    # A zero state is a fixed point of xorshift — it would emit zeros forever —
+    # so Rust substitutes a fixed non-zero constant.
+    var v = seed;
+    if (v == 0) { v = _FK_SEED_DEFAULT; }
+    store64(s, v);
+    return s;
+}
+
+fn xorshift64_free(s) { if (s != 0) { fl_free(s); } return RG_ERR_NONE; }
+
+#must_use
+fn xorshift64_next(s) {
+    var x = load64(s);
+    x = x ^ (x << 13);
+    x = x ^ (x >> 7);
+    x = x ^ (x << 17);
+    store64(s, x);
+    return x;
+}
+
+# Approximate N(0,1) by summing six uniforms and subtracting 3 — NOT true
+# Box-Muller, despite what the module docs elsewhere suggest. Range is roughly
+# [-3, 3]. Returns an f32 bit pattern.
+#must_use
+fn xorshift64_next_gaussian(s) {
+    var sum: f32 = f32_from(0);
+    var scale: f32 = f32_from(65535.0);
+    var i = 0;
+    while (i < 6) {
+        var raw = xorshift64_next(s) & 0xFFFF;
+        var u: f32 = _fk_div(f32_from(f64_from(raw)), scale);
+        sum = sum + u;
+        i = i + 1;
+    }
+    var three: f32 = f32_from(3.0);
+    return _fk_sub(sum, three);
+}
+
+# Uniform in [0,1] from the low 32 bits.
+#must_use
+fn xorshift64_next_f32(s) {
+    var raw = xorshift64_next(s) & 0xFFFFFFFF;
+    var d: f32 = f32_from(f64_from(raw));
+    # 4294967295.0 as a DECIMAL literal is 10 significant digits, which the
+    # lexer gets silently wrong. f64_from(int) is exact below 2^53.
+    var m: f32 = f32_from(f64_from(4294967295));
+    return _fk_div(d, m);
+}
+
+# ── noise_gaussian ────────
+# One INDEPENDENT draw per channel — three per pixel, in r,g,b order. The draw
+# order is part of the observable output for a given seed, so it must not be
+# reordered or hoisted.
+fn noise_gaussian(buf, amount, seed) {
+    var rc = _fk_validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { return rc; }
+    var rng = xorshift64_new(seed);
+    if (rng == 0) { return RG_ERR_ALLOCATION; }
+    var f255: f32 = f32_from(255.0);
+    var amt: f32 = amount;
+    var scale: f32 = _fk_mul(amt, f255);
+    var p = pixel_buffer_data(buf);
+    var n = pixel_buffer_pixel_count(buf);
+    var i = 0;
+    while (i < n) {
+        var c = 0;
+        while (c < 3) {
+            var g: f32 = xorshift64_next_gaussian(rng);
+            var noise: f32 = _fk_mul(g, scale);
+            var v: f32 = _fk_u8_to_f32(load8(p + i * 4 + c));
+            store8(p + i * 4 + c, _fk_f32_to_u8(_fk_add(v, noise)));
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    xorshift64_free(rng);
+    return RG_ERR_NONE;
+}
+
+# ── noise_salt_pepper ────────
+# ONE draw per pixel, not per channel. Below density/2 the pixel goes black,
+# below density it goes white, otherwise untouched — so the two halves of the
+# density split are pepper and salt respectively.
+fn noise_salt_pepper(buf, density, seed) {
+    var rc = _fk_validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { return rc; }
+    var rng = xorshift64_new(seed);
+    if (rng == 0) { return RG_ERR_ALLOCATION; }
+    var dens = f32_to(density);
+    var half = f64_div(dens, 2.0);
+    var p = pixel_buffer_data(buf);
+    var n = pixel_buffer_pixel_count(buf);
+    var i = 0;
+    while (i < n) {
+        var r = f32_to(xorshift64_next_f32(rng));
+        var q = p + i * 4;
+        if (f64_lt(r, half) == 1) {
+            store8(q, 0); store8(q + 1, 0); store8(q + 2, 0);
+        }
+        if (f64_lt(r, half) == 0) {
+            if (f64_lt(r, dens) == 1) {
+                store8(q, 255); store8(q + 1, 255); store8(q + 2, 255);
+            }
+        }
+        i = i + 1;
+    }
+    xorshift64_free(rng);
+    return RG_ERR_NONE;
+}
+
+# ── median (histogram-based Huang) ────────
+# Walks a 256-bin histogram to the target rank. The comparison is STRICTLY
+# greater: the first bin whose cumulative count exceeds the rank is the median.
+# A `>=` here shifts every result by one bin.
+#must_use
+fn _fk_find_median(hist, target) {
+    var sum = 0;
+    var v = 0;
+    while (v < 256) {
+        sum = sum + load64(hist + v * 8);
+        if (sum > target) { return v; }
+        v = v + 1;
+    }
+    return 255;
+}
+
+# O(n*radius) per channel, NOT a sort-the-window implementation: the histogram
+# is built once per row and then slid one column at a time, removing the
+# departing column and adding the arriving one. 1.0.0 replaced an
+# O(n*r^2*log(r^2)) sort with this.
+#must_use
+fn median(buf, radius, err_out) {
+    var rc = _fk_validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    if (radius < 0) { store64(err_out, RG_ERR_INVALID_PARAMETER); return 0; }
+    if (radius == 0) {
+        var cl = pixel_buffer_clone(buf);
+        if (cl == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
+        store64(err_out, RG_ERR_NONE);
+        return cl;
+    }
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    var out = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    if (out == 0) { return 0; }
+    var hist = fl_alloc(256 * 8);
+    if (hist == 0) {
+        pixel_buffer_free(out);
+        store64(err_out, RG_ERR_ALLOCATION);
+        return 0;
+    }
+    var sp = pixel_buffer_data(buf);
+    var dp = pixel_buffer_data(out);
+
+    var c = 0;
+    while (c < 3) {
+        var y = 0;
+        while (y < h) {
+            memset(hist, 0, 256 * 8);
+            var count = 0;
+            var ky = 0 - radius;
+            while (ky <= radius) {
+                var sy = _fk_clampi(y + ky, h - 1);
+                var kx = 0 - radius;
+                while (kx <= radius) {
+                    # The x=0 window clamps EVERY column to [0, w-1], so the
+                    # left overhang all collapses onto column 0.
+                    var sx = _fk_clampi(kx, w - 1);
+                    var val = load8(sp + (sy * w + sx) * 4 + c);
+                    store64(hist + val * 8, load64(hist + val * 8) + 1);
+                    count = count + 1;
+                    kx = kx + 1;
+                }
+                ky = ky + 1;
+            }
+            var mpos = count / 2;
+            store8(dp + (y * w) * 4 + c, _fk_find_median(hist, mpos));
+
+            var x = 1;
+            while (x < w) {
+                var oldc = _fk_clampi(x - radius - 1, w - 1);
+                var newc = _fk_clampi(x + radius, w - 1);
+                var ky2 = 0 - radius;
+                while (ky2 <= radius) {
+                    var sy2 = _fk_clampi(y + ky2, h - 1);
+                    var ov = load8(sp + (sy2 * w + oldc) * 4 + c);
+                    store64(hist + ov * 8, load64(hist + ov * 8) - 1);
+                    var nv = load8(sp + (sy2 * w + newc) * 4 + c);
+                    store64(hist + nv * 8, load64(hist + nv * 8) + 1);
+                    ky2 = ky2 + 1;
+                }
+                store8(dp + (y * w + x) * 4 + c, _fk_find_median(hist, mpos));
+                x = x + 1;
+            }
+            y = y + 1;
+        }
+        c = c + 1;
+    }
+    # Alpha is copied, never filtered.
+    var i = 0;
+    var n = w * h;
+    while (i < n) {
+        store8(dp + i * 4 + 3, load8(sp + i * 4 + 3));
+        i = i + 1;
+    }
+    fl_free(hist);
+    store64(err_out, RG_ERR_NONE);
+    return out;
+}
+
+# ── bilateral ────────
+# Edge-preserving smoothing: the weight is a spatial Gaussian times a colour
+# Gaussian, so a sample across an edge contributes almost nothing.
+#
+# BOTH sigmas are guarded `<= 0`, independently. 1.0.0 added this: sigma 0
+# previously produced a -inf coefficient. A `== 0` check would let a negative
+# sigma through, which silently inverts the Gaussian into a growth function.
+#
+# The spatial weights are PRECOMPUTED into a (2r+1)^2 table — they depend only
+# on (kx, ky), so evaluating exp() per sample per pixel was pure waste.
+#must_use
+fn bilateral(buf, radius, sigma_space, sigma_color, err_out) {
+    var rc = _fk_validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    var ss = f32_to(sigma_space);
+    var sc = f32_to(sigma_color);
+    if (f64_eq(ss, ss) == 0) { store64(err_out, RG_ERR_INVALID_PARAMETER); return 0; }
+    if (f64_eq(sc, sc) == 0) { store64(err_out, RG_ERR_INVALID_PARAMETER); return 0; }
+    if (f64_le(ss, 0) == 1) { store64(err_out, RG_ERR_INVALID_PARAMETER); return 0; }
+    if (f64_le(sc, 0) == 1) { store64(err_out, RG_ERR_INVALID_PARAMETER); return 0; }
+    if (radius < 0) { store64(err_out, RG_ERR_INVALID_PARAMETER); return 0; }
+    if (radius == 0) {
+        var cl = pixel_buffer_clone(buf);
+        if (cl == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
+        store64(err_out, RG_ERR_NONE);
+        return cl;
+    }
+
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    var diameter = 2 * radius + 1;
+    var space_coeff = f64_div(f64_neg(0.5), f64_mul(ss, ss));
+    var color_coeff = f64_div(f64_neg(0.5), f64_mul(sc, sc));
+
+    var sw_tab = fl_alloc(diameter * diameter * 4);
+    if (sw_tab == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    var ky = 0 - radius;
+    while (ky <= radius) {
+        var kx = 0 - radius;
+        while (kx <= radius) {
+            var d2 = kx * kx + ky * ky;
+            var e = _rg_exp(f64_mul(f64_from(d2), space_coeff));
+            store32(sw_tab + ((ky + radius) * diameter + (kx + radius)) * 4, f32_from(e));
+            kx = kx + 1;
+        }
+        ky = ky + 1;
+    }
+
+    var out = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    if (out == 0) { fl_free(sw_tab); return 0; }
+    var sp = pixel_buffer_data(buf);
+    var dp = pixel_buffer_data(out);
+
+    var y = 0;
+    while (y < h) {
+        var x = 0;
+        while (x < w) {
+            var ci = (y * w + x) * 4;
+            var cr: f32 = _fk_u8_to_f32(load8(sp + ci));
+            var cg: f32 = _fk_u8_to_f32(load8(sp + ci + 1));
+            var cb: f32 = _fk_u8_to_f32(load8(sp + ci + 2));
+            var sum_r: f32 = f32_from(0);
+            var sum_g: f32 = f32_from(0);
+            var sum_b: f32 = f32_from(0);
+            var sum_w: f32 = f32_from(0);
+
+            var by = 0 - radius;
+            while (by <= radius) {
+                var sy = _fk_clampi(y + by, h - 1);
+                var bx = 0 - radius;
+                while (bx <= radius) {
+                    var sx = _fk_clampi(x + bx, w - 1);
+                    var si = (sy * w + sx) * 4;
+                    var sr: f32 = _fk_u8_to_f32(load8(sp + si));
+                    var sg: f32 = _fk_u8_to_f32(load8(sp + si + 1));
+                    var sb: f32 = _fk_u8_to_f32(load8(sp + si + 2));
+                    var spw: f32 = load32(sw_tab + ((by + radius) * diameter + (bx + radius)) * 4);
+                    var dr: f32 = _fk_sub(sr, cr);
+                    var dg: f32 = _fk_sub(sg, cg);
+                    var db: f32 = _fk_sub(sb, cb);
+                    var cd: f32 = _fk_add(_fk_add(_fk_mul(dr, dr), _fk_mul(dg, dg)), _fk_mul(db, db));
+                    var cw: f32 = f32_from(_rg_exp(f64_mul(f32_to(cd), color_coeff)));
+                    var weight: f32 = _fk_mul(spw, cw);
+                    sum_r = _fk_fma(sum_r, sr, weight);
+                    sum_g = _fk_fma(sum_g, sg, weight);
+                    sum_b = _fk_fma(sum_b, sb, weight);
+                    sum_w = _fk_add(sum_w, weight);
+                    bx = bx + 1;
+                }
+                by = by + 1;
+            }
+
+            var di = (y * w + x) * 4;
+            # A zero total weight would divide by zero; Rust falls back to the
+            # centre pixel unchanged rather than emitting NaN.
+            if (f64_gt(f32_to(sum_w), 0) == 1) {
+                store8(dp + di, _fk_f32_to_u8(_fk_div(sum_r, sum_w)));
+                store8(dp + di + 1, _fk_f32_to_u8(_fk_div(sum_g, sum_w)));
+                store8(dp + di + 2, _fk_f32_to_u8(_fk_div(sum_b, sum_w)));
+            }
+            if (f64_gt(f32_to(sum_w), 0) == 0) {
+                store8(dp + di, load8(sp + ci));
+                store8(dp + di + 1, load8(sp + ci + 1));
+                store8(dp + di + 2, load8(sp + ci + 2));
+            }
+            store8(dp + di + 3, load8(sp + ci + 3));
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    fl_free(sw_tab);
+    store64(err_out, RG_ERR_NONE);
+    return out;
+}
+
+# ── flood_fill ────────
+# SCANLINE algorithm, not naive 4-neighbour push. The naive version pushes every
+# pixel individually and grew the stack to O(4n); this one fills a whole
+# horizontal span at a time and only pushes one seed per matching run on the
+# rows above and below.
+#
+# `fill_color` is 4 bytes. Tolerance is compared per channel INCLUDING alpha.
+fn flood_fill(buf, seed_x, seed_y, fill_color, tolerance) {
+    var rc = _fk_validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { return rc; }
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    if (seed_x < 0) { return RG_ERR_NONE; }
+    if (seed_y < 0) { return RG_ERR_NONE; }
+    if (seed_x >= w) { return RG_ERR_NONE; }
+    if (seed_y >= h) { return RG_ERR_NONE; }
+
+    var p = pixel_buffer_data(buf);
+    var si = (seed_y * w + seed_x) * 4;
+    var s0 = load8(p + si);
+    var s1 = load8(p + si + 1);
+    var s2 = load8(p + si + 2);
+    var s3 = load8(p + si + 3);
+
+    # Already the fill colour: nothing to do, and proceeding would loop.
+    var same = 1;
+    if (s0 != load8(fill_color)) { same = 0; }
+    if (s1 != load8(fill_color + 1)) { same = 0; }
+    if (s2 != load8(fill_color + 2)) { same = 0; }
+    if (s3 != load8(fill_color + 3)) { same = 0; }
+    if (same == 1) { return RG_ERR_NONE; }
+
+    var visited = fl_calloc(w * h);
+    if (visited == 0) { return RG_ERR_ALLOCATION; }
+    # Stack of (x, y) pairs. Named qstack because `stack` is a RESERVED WORD in
+    # Cyrius (v5.5.36's `stack var buf[N]` stack-local array qualifier) — using
+    # it as an identifier produces "expected '(', got ')'" pointing at an
+    # unrelated line several statements later. Worst case is one entry per row per span; w*h is a
+    # safe upper bound and matches Rust's unbounded Vec in practice.
+    var qstack = fl_alloc(w * h * 16);
+    if (qstack == 0) { fl_free(visited); return RG_ERR_ALLOCATION; }
+    var sp2 = 0;
+    store64(qstack, seed_x);
+    store64(qstack + 8, seed_y);
+    sp2 = 1;
+
+    while (sp2 > 0) {
+        sp2 = sp2 - 1;
+        var cx = load64(qstack + sp2 * 16);
+        var cy = load64(qstack + sp2 * 16 + 8);
+        if (load8(visited + cy * w + cx) == 0) {
+            # Walk left then right to the ends of the matching span. Exactly
+            # Rust's shape: test the NEXT pixel and stop before stepping onto a
+            # non-matching one, so left/right always end inside the span.
+            var left = cx;
+            while (left > 0) {
+                if (_fk_span_ok(p, visited, w, left - 1, cy, s0, s1, s2, s3, tolerance) == 0) {
+                    break;
+                }
+                left = left - 1;
+            }
+            var right = cx;
+            while (right + 1 < w) {
+                if (_fk_span_ok(p, visited, w, right + 1, cy, s0, s1, s2, s3, tolerance) == 0) {
+                    break;
+                }
+                right = right + 1;
+            }
+            var fx = left;
+            while (fx <= right) {
+                var fi = (cy * w + fx) * 4;
+                store8(p + fi, load8(fill_color));
+                store8(p + fi + 1, load8(fill_color + 1));
+                store8(p + fi + 2, load8(fill_color + 2));
+                store8(p + fi + 3, load8(fill_color + 3));
+                store8(visited + cy * w + fx, 1);
+                fx = fx + 1;
+            }
+            # Seed the rows above and below, one push per matching RUN.
+            var dir = 0;
+            while (dir < 2) {
+                var ny = cy - 1;
+                if (dir == 1) { ny = cy + 1; }
+                if (ny >= 0) {
+                    if (ny < h) {
+                        var nx = left;
+                        while (nx <= right) {
+                            if (_fk_span_ok(p, visited, w, nx, ny, s0, s1, s2, s3, tolerance) == 1) {
+                                store64(qstack + sp2 * 16, nx);
+                                store64(qstack + sp2 * 16 + 8, ny);
+                                sp2 = sp2 + 1;
+                                # Skip to the end of this run so one run yields
+                                # one push, not one per pixel.
+                                while (nx < right) {
+                                    if (_fk_span_ok(p, visited, w, nx + 1, ny, s0, s1, s2, s3, tolerance) == 0) {
+                                        break;
+                                    }
+                                    nx = nx + 1;
+                                }
+                            }
+                            nx = nx + 1;
+                        }
+                    }
+                }
+                dir = dir + 1;
+            }
+        }
+    }
+    fl_free(qstack);
+    fl_free(visited);
+    return RG_ERR_NONE;
+}
+
+# 1 if (x, y) is unvisited and within tolerance of the seed colour on all four
+# channels. Alpha is included — a fill must not bleed across an alpha edge.
+#must_use
+fn _fk_span_ok(p, visited, w, x, y, s0, s1, s2, s3, tol) {
+    if (load8(visited + y * w + x) != 0) { return 0; }
+    var pi = (y * w + x) * 4;
+    if (_fk_absdiff(load8(p + pi), s0) > tol) { return 0; }
+    if (_fk_absdiff(load8(p + pi + 1), s1) > tol) { return 0; }
+    if (_fk_absdiff(load8(p + pi + 2), s2) > tol) { return 0; }
+    if (_fk_absdiff(load8(p + pi + 3), s3) > tol) { return 0; }
+    return 1;
+}
+
+#must_use
+fn _fk_absdiff(a, b) {
+    if (a > b) { return a - b; }
+    return b - a;
+}

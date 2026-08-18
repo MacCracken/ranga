@@ -1,0 +1,533 @@
+# filter_kernel.tcyr — blurs, median, bilateral, vignette, LUT, noise, flood fill
+# Ported from rust-old/src/filter.rs #[cfg(test)] and doctests, kernel half.
+# Expected values came from a Python oracle replicating the Rust f32 formulas.
+
+include "src/error.cyr"
+include "src/bytevec.cyr"
+include "src/pixel.cyr"
+include "src/filter_kernel.cyr"
+
+alloc_init();
+
+var err = fl_alloc(8);
+
+fn f32c(x) { return f32_from(x); }
+fn mkbuf(w, h) { return pixel_buffer_zeroed(w, h, PF_RGBA8, err); }
+fn put(b, i, r, g, bl, a) {
+    var p = pixel_buffer_data(b) + i * 4;
+    store8(p, r); store8(p + 1, g); store8(p + 2, bl); store8(p + 3, a);
+    return 0;
+}
+fn chan(b, i, c) { return load8(pixel_buffer_data(b) + i * 4 + c); }
+fn px3(b, i, r, g, bl) {
+    if (chan(b, i, 0) != r) { return 0; }
+    if (chan(b, i, 1) != g) { return 0; }
+    if (chan(b, i, 2) != bl) { return 0; }
+    return 1;
+}
+fn approx(a, b, eps) {
+    if (f64_lt(f64_abs(f64_sub(a, b)), eps) == 1) { return 1; }
+    return 0;
+}
+fn fill(b, v) { bv_fill(pixel_buffer_bv(b), v); return 0; }
+
+var argb = pixel_buffer_zeroed(2, 2, PF_ARGB8, err);
+
+# ================================================================
+# Gaussian kernel
+# ================================================================
+test_group("gaussian kernel");
+
+# radius 1: sigma is the 0.5 FLOOR, not radius/3 == 0.333. Oracle gives taps
+# 0.106507 / 0.786986 / 0.106507. A missing floor makes this a near-delta.
+var k1 = _fk_build_gaussian_kernel(1);
+assert_eq(k1 != 0, 1, "kernel allocates");
+assert_eq(approx(f32_to(load32(k1)), 0.106507, 0.00001), 1, "r=1 tap 0 is 0.106507 (sigma floored at 0.5)");
+assert_eq(approx(f32_to(load32(k1 + 4)), 0.786986, 0.00001), 1, "r=1 centre tap is 0.786986");
+assert_eq(approx(f32_to(load32(k1 + 8)), 0.106507, 0.00001), 1, "r=1 tap 2 is symmetric");
+
+# Normalisation: the taps sum to 1, which is what makes a blur preserve
+# brightness. This one identity pins both the exp and the normalise loop.
+var ksum: f32 = f32_from(0);
+var ki = 0;
+while (ki < 3) {
+    var t: f32 = load32(k1 + ki * 4);
+    ksum = ksum + t;
+    ki = ki + 1;
+}
+assert_eq(approx(f32_to(ksum), F64_ONE, 0.0001), 1, "the gaussian kernel sums to 1");
+fl_free(k1);
+
+# radius 3: radius/3 == 1.0 beats the floor, so the taps must DIFFER from r=1's.
+var k3 = _fk_build_gaussian_kernel(3);
+assert_eq(f64_lt(f32_to(load32(k3 + 12)), 0.786986), 1, "r=3 centre tap is lower than r=1's (sigma 1.0, not 0.5)");
+fl_free(k3);
+
+# ================================================================
+# gaussian_blur / box_blur
+# ================================================================
+test_group("blurs");
+
+# radius 0 is a CLONE — a new buffer with identical content, not an error.
+var b1 = mkbuf(4, 4);
+fill(b1, 100);
+var g0 = gaussian_blur(b1, 0, err);
+assert_eq(load64(err), RG_ERR_NONE, "radius 0 gaussian succeeds");
+assert_eq(g0 != 0, 1, "radius 0 returns a buffer, not 0");
+assert_eq(chan(g0, 5, 0), 100, "radius 0 is an exact copy");
+assert_eq(pixel_buffer_data(g0) != pixel_buffer_data(b1), 1, "radius 0 returns a SEPARATE allocation (a clone)");
+pixel_buffer_free(g0);
+
+# ⚠ A uniform image does NOT survive gaussian_blur unchanged, and asserting
+# that it does would mean "fixing" a faithful port. The r=1 taps sum to
+# 0.999999881 in f32 — just BELOW 1 — so a uniform 100 accumulates to 99.99998
+# and `as u8` truncates to 99 on the horizontal pass, then 98 on the vertical.
+# The oracle confirms Rust produces exactly the same 98.
+#
+# box_blur below is the instructive contrast: its 1/3 taps sum to 1.0000000298,
+# just ABOVE 1, so a uniform image DOES survive it. Same code path, opposite
+# side of the rounding boundary.
+var g1 = gaussian_blur(b1, 1, err);
+assert_eq(load64(err), RG_ERR_NONE, "gaussian_blur succeeds");
+assert_eq(chan(g1, 5, 0), 98, "uniform 100 -> 98: the f32 kernel sums just below 1 and each pass truncates");
+assert_eq(chan(g1, 0, 0), 98, "edge clamping gives the corner the same 98, not a darker fringe");
+pixel_buffer_free(g1);
+
+# A single bright pixel must SPREAD — that is what distinguishes a blur from a
+# copy, and the centre must drop.
+var b2 = mkbuf(5, 5);
+put(b2, 12, 255, 255, 255, 255);      # centre of a 5x5
+var g2 = gaussian_blur(b2, 1, err);
+assert_lt(chan(g2, 12, 0), 255, "the bright centre is dimmed by the blur");
+assert_gt(chan(g2, 11, 0), 0, "brightness spread to the left neighbour");
+assert_gt(chan(g2, 7, 0), 0, "brightness spread to the pixel above (the VERTICAL pass ran)");
+assert_eq(chan(g2, 0, 0), 0, "a far corner is untouched by a radius-1 kernel");
+pixel_buffer_free(g2);
+
+# Alpha is copied through, never blurred — blurring coverage is a classic bug.
+var b3 = mkbuf(3, 3);
+fill(b3, 0);
+put(b3, 4, 200, 200, 200, 40);
+var g3 = gaussian_blur(b3, 1, err);
+assert_eq(chan(g3, 4, 3), 40, "gaussian_blur copies alpha rather than blurring it");
+assert_eq(chan(g3, 0, 3), 0, "a neighbour's alpha is its own, not a blend");
+pixel_buffer_free(g3);
+
+var bx = box_blur(b1, 1, err);
+assert_eq(load64(err), RG_ERR_NONE, "box_blur succeeds");
+assert_eq(chan(bx, 5, 0), 100, "box_blur DOES preserve a uniform image — its taps sum just above 1");
+pixel_buffer_free(bx);
+
+# The two blurs must DIFFER on a point source: box weights all taps equally,
+# gaussian concentrates on the centre.
+var bx2 = box_blur(b2, 1, err);
+var g2b = gaussian_blur(b2, 1, err);
+assert_gt(chan(g2b, 12, 0), chan(bx2, 12, 0), "gaussian keeps more centre energy than box");
+pixel_buffer_free(bx2); pixel_buffer_free(g2b);
+
+assert_eq(gaussian_blur(argb, 1, err), 0, "gaussian_blur rejects non-Rgba8");
+assert_eq(load64(err), RG_ERR_INVALID_FORMAT, "blur reports INVALID_FORMAT");
+assert_eq(box_blur(argb, 1, err), 0, "box_blur rejects non-Rgba8");
+
+# ================================================================
+# unsharp_mask
+# ================================================================
+test_group("unsharp mask");
+
+# amount 0 is the identity: out = orig + 0 * (orig - blur).
+var u0 = unsharp_mask(b2, 1, f32c(0.0), err);
+assert_eq(load64(err), RG_ERR_NONE, "unsharp_mask succeeds");
+assert_eq(chan(u0, 12, 0), 255, "amount 0 leaves the centre alone");
+assert_eq(chan(u0, 11, 0), 0, "amount 0 leaves a neighbour alone");
+pixel_buffer_free(u0);
+
+# A positive amount pushes the edge FURTHER than the original — that is what
+# sharpening is. The centre was already 255 so it clamps; the dark neighbour
+# must go darker, i.e. stay 0 rather than pick up spread.
+var b4 = mkbuf(5, 5);
+fill(b4, 120);
+put(b4, 12, 200, 200, 200, 255);
+var u1 = unsharp_mask(b4, 1, f32c(1.0), err);
+assert_gt(chan(u1, 12, 0), 200, "sharpening pushes the bright centre ABOVE its original value");
+assert_lt(chan(u1, 11, 0), 120, "sharpening pushes the neighbouring pixel BELOW its original (undershoot)");
+pixel_buffer_free(u1);
+assert_eq(unsharp_mask(argb, 1, f32c(1.0), err), 0, "unsharp_mask rejects non-Rgba8");
+
+# ================================================================
+# vignette
+# ================================================================
+test_group("vignette");
+
+var v1 = mkbuf(4, 4);
+fill(v1, 200);
+assert_eq(vignette(v1, f32c(1.0)), RG_ERR_NONE, "vignette succeeds");
+# Oracle: (0,0) d=0.75 -> factor 0.4375 -> 87; (1,1) d=0.25 -> 0.9375 -> 187.
+assert_eq(chan(v1, 0, 0), 87, "vignette corner: 200 * 0.4375 -> 87");
+assert_eq(chan(v1, 5, 0), 187, "vignette near-centre: 200 * 0.9375 -> 187");
+assert_gt(chan(v1, 5, 0), chan(v1, 0, 0), "the centre is brighter than the corner");
+assert_eq(chan(v1, 0, 3), 200, "vignette leaves alpha alone (fill() set it to 200)");
+
+# strength 0 is the identity.
+var v2 = mkbuf(4, 4);
+fill(v2, 200);
+assert_eq(vignette(v2, f32c(0.0)), RG_ERR_NONE, "vignette strength 0 succeeds");
+assert_eq(chan(v2, 0, 0), 200, "strength 0 is the identity even at the corner");
+pixel_buffer_free(v1); pixel_buffer_free(v2);
+assert_eq(vignette(argb, f32c(1.0)), RG_ERR_INVALID_FORMAT, "vignette rejects non-Rgba8");
+
+# ================================================================
+# Lut3d
+# ================================================================
+test_group("lut3d");
+
+# A 2x2x2 identity LUT: entry (r,g,b) maps to (r,g,b) normalised.
+var lut = lut3d_new(2);
+assert_eq(lut != 0, 1, "lut3d_new(2) succeeds");
+assert_eq(lut3d_size(lut), 2, "lut size");
+assert_eq(lut3d_new(1), 0, "a LUT smaller than 2 is rejected");
+var ri = 0;
+while (ri < 2) {
+    var gi = 0;
+    while (gi < 2) {
+        var bi = 0;
+        while (bi < 2) {
+            lut3d_set(lut, ri, gi, bi, 0, f32c(f64_from(ri)));
+            lut3d_set(lut, ri, gi, bi, 1, f32c(f64_from(gi)));
+            lut3d_set(lut, ri, gi, bi, 2, f32c(f64_from(bi)));
+            bi = bi + 1;
+        }
+        gi = gi + 1;
+    }
+    ri = ri + 1;
+}
+var trip = fl_alloc(12);
+lut3d_lookup(lut, f32c(0.0), f32c(0.0), f32c(0.0), trip);
+assert_eq(approx(f32_to(load32(trip)), 0, 0.0001), 1, "identity LUT: black stays black");
+lut3d_lookup(lut, f32c(F64_ONE), f32c(F64_ONE), f32c(F64_ONE), trip);
+assert_eq(approx(f32_to(load32(trip)), F64_ONE, 0.0001), 1, "identity LUT: white stays white");
+# The trilinear interpolation itself: a midpoint must come back mid.
+lut3d_lookup(lut, f32c(0.5), f32c(0.25), f32c(0.75), trip);
+assert_eq(approx(f32_to(load32(trip)), 0.5, 0.0001), 1, "trilinear midpoint r");
+assert_eq(approx(f32_to(load32(trip + 4)), 0.25, 0.0001), 1, "trilinear interpolates g independently");
+assert_eq(approx(f32_to(load32(trip + 8)), 0.75, 0.0001), 1, "trilinear interpolates b independently");
+
+var l1 = mkbuf(2, 1);
+put(l1, 0, 0, 128, 255, 77);
+put(l1, 1, 255, 255, 255, 255);
+assert_eq(apply_lut3d(l1, lut), RG_ERR_NONE, "apply_lut3d succeeds");
+assert_eq(px3(l1, 0, 0, 128, 255), 1, "an identity LUT is an identity transform");
+assert_eq(chan(l1, 0, 3), 77, "apply_lut3d leaves alpha alone");
+assert_eq(apply_lut3d(l1, 0), RG_ERR_INVALID_PARAMETER, "apply_lut3d rejects a null LUT");
+assert_eq(apply_lut3d(argb, lut), RG_ERR_INVALID_FORMAT, "apply_lut3d rejects non-Rgba8");
+
+# An INVERTING LUT proves the lookup is actually consulted.
+var inv = lut3d_new(2);
+var ri2 = 0;
+while (ri2 < 2) {
+    var gi2 = 0;
+    while (gi2 < 2) {
+        var bi2 = 0;
+        while (bi2 < 2) {
+            lut3d_set(inv, ri2, gi2, bi2, 0, f32c(f64_from(1 - ri2)));
+            lut3d_set(inv, ri2, gi2, bi2, 1, f32c(f64_from(1 - gi2)));
+            lut3d_set(inv, ri2, gi2, bi2, 2, f32c(f64_from(1 - bi2)));
+            bi2 = bi2 + 1;
+        }
+        gi2 = gi2 + 1;
+    }
+    ri2 = ri2 + 1;
+}
+put(l1, 0, 0, 0, 0, 255);
+assert_eq(apply_lut3d(l1, inv), RG_ERR_NONE, "inverting LUT succeeds");
+assert_eq(px3(l1, 0, 255, 255, 255), 1, "an inverting LUT turns black into white");
+lut3d_free(inv); lut3d_free(lut);
+pixel_buffer_free(l1);
+
+# ================================================================
+# Xorshift64
+# ================================================================
+test_group("xorshift64");
+
+# Oracle: from seed 1 the first draw is 1082269761. This pins that `>>` is the
+# LOGICAL shift — with `>>>` (arithmetic) the sequence diverges as soon as the
+# state's high bit sets, which happens on draw 2.
+var rng = xorshift64_new(1);
+assert_eq(xorshift64_next(rng), 1082269761, "first draw from seed 1 matches Rust");
+assert_eq(xorshift64_next(rng), 1152992998833853505, "second draw matches (high bit now set)");
+# ⚠ The `>>` vs `>>>` distinction is NOT observable until draw 7. The state's
+# bit 63 stays clear through draw 6, so both shifts agree; and at draw 7 the low
+# 16 bits coincidentally match too (40561 either way), so only the FULL value
+# separates them. Oracle: correct -6753709453369041295, arithmetic
+# +6649003037685554801. Checking three draws — the obvious thing to do — leaves
+# a wrong shift undetected.
+assert_eq(xorshift64_next(rng), (0 - 7269227409276787159), "draw 3");
+assert_eq(xorshift64_next(rng), (0 - 768720241707614171), "draw 4");
+assert_eq(xorshift64_next(rng), (0 - 8787613929710185883), "draw 5");
+assert_eq(xorshift64_next(rng), (0 - 670945072575735807), "draw 6");
+var _lv = xorshift64_next(rng);
+assert_eq(_lv, (0 - 6753709453369041295), "draw 7 pins `>>` as LOGICAL, not arithmetic");
+xorshift64_free(rng);
+
+# Seed 0 is a fixed point of xorshift (it would emit zeros forever), so Rust
+# substitutes a constant. Without that, all noise on seed 0 would be a no-op.
+var rz = xorshift64_new(0);
+assert_neq(xorshift64_next(rz), 0, "seed 0 does not produce zeros (a constant is substituted)");
+xorshift64_free(rz);
+
+# Determinism: the same seed gives the same sequence.
+var ra = xorshift64_new(42);
+var rb = xorshift64_new(42);
+assert_eq(xorshift64_next(ra), xorshift64_next(rb), "the same seed gives the same sequence");
+xorshift64_free(ra); xorshift64_free(rb);
+
+# ================================================================
+# noise
+# ================================================================
+test_group("noise");
+
+# amount 0 scales the noise to zero, so the image is untouched.
+var n1 = mkbuf(4, 4);
+fill(n1, 128);
+assert_eq(noise_gaussian(n1, f32c(0.0), 1), RG_ERR_NONE, "noise_gaussian amount 0 succeeds");
+assert_eq(chan(n1, 5, 0), 128, "amount 0 leaves the image unchanged");
+
+# Deterministic for a fixed seed: two identical buffers must come out identical.
+var n2 = mkbuf(4, 4);
+var n3 = mkbuf(4, 4);
+fill(n2, 128); fill(n3, 128);
+assert_eq(noise_gaussian(n2, f32c(0.2), 7), RG_ERR_NONE, "noise on buffer 2 succeeds");
+assert_eq(noise_gaussian(n3, f32c(0.2), 7), RG_ERR_NONE, "noise on buffer 3 succeeds");
+var same = 1;
+var q = 0;
+while (q < 16) {
+    if (chan(n2, q, 0) != chan(n3, q, 0)) { same = 0; }
+    q = q + 1;
+}
+assert_eq(same, 1, "the same seed gives byte-identical noise");
+# And a DIFFERENT seed must differ, or the seed is being ignored.
+var n4 = mkbuf(4, 4);
+fill(n4, 128);
+noise_gaussian(n4, f32c(0.2), 8);
+var differs = 0;
+var q2 = 0;
+while (q2 < 16) {
+    if (chan(n4, q2, 0) != chan(n2, q2, 0)) { differs = 1; }
+    q2 = q2 + 1;
+}
+assert_eq(differs, 1, "a different seed gives different noise");
+# Each channel gets its OWN draw, so r/g/b of one pixel must not be equal.
+var chan_differs = 0;
+if (chan(n2, 0, 0) != chan(n2, 0, 1)) { chan_differs = 1; }
+assert_eq(chan_differs, 1, "r and g get independent draws, not a shared one");
+assert_eq(chan(n2, 0, 3), 128, "noise_gaussian leaves alpha alone (fill() set it to 128)");
+
+# salt and pepper: density 0 is a no-op, density 1 makes every pixel extreme.
+var n5 = mkbuf(8, 8);
+fill(n5, 128);
+assert_eq(noise_salt_pepper(n5, f32c(0.0), 3), RG_ERR_NONE, "salt-pepper density 0 succeeds");
+assert_eq(chan(n5, 5, 0), 128, "density 0 leaves the image unchanged");
+
+var n6 = mkbuf(8, 8);
+fill(n6, 128);
+assert_eq(noise_salt_pepper(n6, f32c(1.0), 3), RG_ERR_NONE, "salt-pepper density 1 succeeds");
+var all_extreme = 1;
+var mid_found = 0;
+var q3 = 0;
+while (q3 < 64) {
+    var v = chan(n6, q3, 0);
+    if (v != 0) { if (v != 255) { all_extreme = 0; } }
+    if (v == 128) { mid_found = 1; }
+    q3 = q3 + 1;
+}
+assert_eq(all_extreme, 1, "density 1 makes every pixel pure black or pure white");
+assert_eq(mid_found, 0, "no pixel keeps its original value at density 1");
+assert_eq(noise_gaussian(argb, f32c(0.1), 1), RG_ERR_INVALID_FORMAT, "noise rejects non-Rgba8");
+assert_eq(noise_salt_pepper(argb, f32c(0.1), 1), RG_ERR_INVALID_FORMAT, "salt-pepper rejects non-Rgba8");
+pixel_buffer_free(n1); pixel_buffer_free(n2); pixel_buffer_free(n3);
+pixel_buffer_free(n4); pixel_buffer_free(n5); pixel_buffer_free(n6);
+
+# ================================================================
+# median (Huang)
+# ================================================================
+test_group("median");
+
+# find_median walks to the first bin whose CUMULATIVE count EXCEEDS the rank.
+# Oracle: 4 samples at 10 and 5 at 20, rank 4 -> bin 20. With `>=` it would
+# stop at bin 10 — an off-by-one bin on every pixel.
+var hist = fl_calloc(256 * 8);
+store64(hist + 10 * 8, 4);
+store64(hist + 20 * 8, 5);
+assert_eq(_fk_find_median(hist, 4), 20, "find_median needs cumsum > rank, not >=");
+assert_eq(_fk_find_median(hist, 3), 10, "rank 3 falls inside the first bin");
+fl_free(hist);
+
+var m0 = mkbuf(3, 3);
+fill(m0, 90);
+var md0 = median(m0, 0, err);
+assert_eq(load64(err), RG_ERR_NONE, "median radius 0 succeeds");
+assert_eq(chan(md0, 4, 0), 90, "radius 0 is a clone");
+pixel_buffer_free(md0);
+
+# A uniform image is unchanged.
+var md1 = median(m0, 1, err);
+assert_eq(load64(err), RG_ERR_NONE, "median succeeds");
+assert_eq(chan(md1, 4, 0), 90, "a uniform image is unchanged by median");
+pixel_buffer_free(md1);
+
+# The whole point of a median filter: a single-pixel spike is REMOVED entirely,
+# where a blur would only dim it. This is what distinguishes the two.
+var m1 = mkbuf(3, 3);
+fill(m1, 50);
+put(m1, 4, 255, 255, 255, 255);
+var md2 = median(m1, 1, err);
+assert_eq(chan(md2, 4, 0), 50, "a lone spike is removed completely by the median");
+pixel_buffer_free(md2);
+
+# Alpha is copied, never filtered.
+var m2 = mkbuf(3, 3);
+fill(m2, 50);
+put(m2, 4, 50, 50, 50, 33);
+var md3 = median(m2, 1, err);
+assert_eq(chan(md3, 4, 3), 33, "median copies alpha rather than filtering it");
+pixel_buffer_free(md3);
+assert_eq(median(argb, 1, err), 0, "median rejects non-Rgba8");
+pixel_buffer_free(m0); pixel_buffer_free(m1); pixel_buffer_free(m2);
+
+# ================================================================
+# bilateral
+# ================================================================
+test_group("bilateral");
+
+var bl1 = mkbuf(4, 4);
+fill(bl1, 120);
+# BOTH sigmas are guarded independently, and the guard is `<= 0` not `== 0` —
+# a negative sigma would invert the Gaussian into a growth function. Each needs
+# its own case, because either guard alone would mask the other.
+assert_eq(bilateral(bl1, 1, f32c(0.0), f32c(10.0), err), 0, "sigma_space 0 is rejected");
+assert_eq(load64(err), RG_ERR_INVALID_PARAMETER, "sigma_space 0 is INVALID_PARAMETER");
+assert_eq(bilateral(bl1, 1, f32c(10.0), f32c(0.0), err), 0, "sigma_color 0 is rejected");
+assert_eq(bilateral(bl1, 1, f32c(f64_neg(1.0)), f32c(10.0), err), 0, "NEGATIVE sigma_space is rejected too");
+assert_eq(bilateral(bl1, 1, f32c(10.0), f32c(f64_neg(1.0)), err), 0, "NEGATIVE sigma_color is rejected too");
+assert_eq(bilateral(bl1, 1, f32_from(_RG_NAN), f32c(10.0), err), 0, "NaN sigma_space is rejected");
+
+# A denormal-scale sigma is legal (it passes the > 0 guard) and must not
+# produce NaN. In f32 the smallest positive value is ~1.4e-45, whose square is
+# still comfortably representable in f64, so the exp argument stays finite and
+# underflows to a 0 weight rather than reaching -inf.
+#
+# That means _rg_exp is DEFENSIVE at both exp sites in this module, not
+# load-bearing: replacing it with the bare f64_exp passes the whole suite,
+# because neither the gaussian kernel (|arg| <= 4.5 for any radius) nor the
+# bilateral colour term (arg finite for any f32 sigma) can reach -inf. It is
+# kept because the cost is nil and the invariant is not obvious. Saying so is
+# better than inventing an assertion that cannot fail.
+var tiny = bilateral(bl1, 1, f32c(3.0), f32_from(0.00000001), err);
+assert_eq(load64(err), RG_ERR_NONE, "a denormal-scale sigma_color is accepted");
+assert_eq(chan(tiny, 5, 0), 120, "a tiny sigma_color gives a self-only weight, not NaN");
+pixel_buffer_free(tiny);
+
+var bl0 = bilateral(bl1, 0, f32c(3.0), f32c(30.0), err);
+assert_eq(load64(err), RG_ERR_NONE, "bilateral radius 0 succeeds");
+assert_eq(chan(bl0, 5, 0), 120, "radius 0 is a clone");
+pixel_buffer_free(bl0);
+
+var bl2 = bilateral(bl1, 1, f32c(3.0), f32c(30.0), err);
+assert_eq(load64(err), RG_ERR_NONE, "bilateral succeeds");
+assert_eq(chan(bl2, 5, 0), 120, "a uniform image is unchanged by bilateral");
+pixel_buffer_free(bl2);
+
+# EDGE PRESERVATION — the defining property. A hard step edge must survive
+# bilateral almost intact, where a gaussian blur of the same radius smears it.
+var e1 = mkbuf(6, 1);
+put(e1, 0, 20, 20, 20, 255); put(e1, 1, 20, 20, 20, 255); put(e1, 2, 20, 20, 20, 255);
+put(e1, 3, 220, 220, 220, 255); put(e1, 4, 220, 220, 220, 255); put(e1, 5, 220, 220, 220, 255);
+var eb = bilateral(e1, 1, f32c(3.0), f32c(10.0), err);
+var gb = gaussian_blur(e1, 1, err);
+# With sigma_color 10 a 200-level jump is ~e^-200 down, so the edge holds.
+assert_lt(chan(eb, 2, 0), 40, "bilateral keeps the dark side of the edge dark");
+assert_gt(chan(eb, 3, 0), 200, "bilateral keeps the bright side bright");
+assert_gt(chan(gb, 2, 0), chan(eb, 2, 0), "gaussian smears the edge where bilateral does not");
+pixel_buffer_free(eb); pixel_buffer_free(gb); pixel_buffer_free(e1);
+pixel_buffer_free(bl1);
+
+# ================================================================
+# flood_fill
+# ================================================================
+test_group("flood fill");
+
+var red = fl_alloc(4);
+store8(red, 255); store8(red + 1, 0); store8(red + 2, 0); store8(red + 3, 255);
+
+# A uniform region fills entirely.
+var ff1 = mkbuf(4, 4);
+fill(ff1, 100);
+var q4 = 0;
+while (q4 < 16) { put(ff1, q4, 100, 100, 100, 255); q4 = q4 + 1; }
+assert_eq(flood_fill(ff1, 0, 0, red, 0), RG_ERR_NONE, "flood_fill succeeds");
+var all_red = 1;
+var q5 = 0;
+while (q5 < 16) {
+    if (px3(ff1, q5, 255, 0, 0) == 0) { all_red = 0; }
+    q5 = q5 + 1;
+}
+assert_eq(all_red, 1, "a uniform region floods completely, including across rows");
+pixel_buffer_free(ff1);
+
+# A BARRIER must stop the fill — this is what proves the span walk respects
+# tolerance rather than filling the whole buffer.
+var ff2 = mkbuf(5, 1);
+put(ff2, 0, 100, 100, 100, 255);
+put(ff2, 1, 100, 100, 100, 255);
+put(ff2, 2, 10, 10, 10, 255);      # barrier
+put(ff2, 3, 100, 100, 100, 255);
+put(ff2, 4, 100, 100, 100, 255);
+assert_eq(flood_fill(ff2, 0, 0, red, 0), RG_ERR_NONE, "flood_fill with a barrier succeeds");
+assert_eq(px3(ff2, 0, 255, 0, 0), 1, "the seed pixel is filled");
+assert_eq(px3(ff2, 1, 255, 0, 0), 1, "the pixel up to the barrier is filled");
+assert_eq(px3(ff2, 2, 10, 10, 10), 1, "the barrier itself is NOT filled");
+assert_eq(px3(ff2, 3, 100, 100, 100), 1, "the region BEYOND the barrier is not filled");
+pixel_buffer_free(ff2);
+
+# Tolerance lets a near-match through.
+var ff3 = mkbuf(3, 1);
+put(ff3, 0, 100, 100, 100, 255);
+put(ff3, 1, 105, 105, 105, 255);
+put(ff3, 2, 200, 200, 200, 255);
+assert_eq(flood_fill(ff3, 0, 0, red, 10), RG_ERR_NONE, "flood_fill with tolerance succeeds");
+assert_eq(px3(ff3, 1, 255, 0, 0), 1, "a within-tolerance neighbour is filled");
+assert_eq(px3(ff3, 2, 200, 200, 200), 1, "an out-of-tolerance pixel is not");
+pixel_buffer_free(ff3);
+
+# Filling with the colour already there is a no-op, not an infinite loop.
+var ff4 = mkbuf(2, 1);
+put(ff4, 0, 255, 0, 0, 255);
+put(ff4, 1, 255, 0, 0, 255);
+assert_eq(flood_fill(ff4, 0, 0, red, 0), RG_ERR_NONE, "filling with the existing colour terminates");
+assert_eq(px3(ff4, 0, 255, 0, 0), 1, "the pixel is unchanged");
+pixel_buffer_free(ff4);
+
+# An out-of-bounds seed is a silent no-op, matching Rust.
+var ff5 = mkbuf(2, 2);
+fill(ff5, 50);
+assert_eq(flood_fill(ff5, 99, 0, red, 0), RG_ERR_NONE, "an out-of-bounds seed is not an error");
+assert_eq(chan(ff5, 0, 0), 50, "an out-of-bounds seed changes nothing");
+pixel_buffer_free(ff5);
+
+# Alpha participates in the tolerance test — a fill must not cross an alpha edge.
+var ff6 = mkbuf(2, 1);
+put(ff6, 0, 100, 100, 100, 255);
+put(ff6, 1, 100, 100, 100, 0);
+assert_eq(flood_fill(ff6, 0, 0, red, 0), RG_ERR_NONE, "alpha-edge flood succeeds");
+assert_eq(px3(ff6, 0, 255, 0, 0), 1, "the seed side is filled");
+assert_eq(chan(ff6, 1, 3), 0, "the fill does NOT cross an alpha-only difference");
+pixel_buffer_free(ff6);
+
+assert_eq(flood_fill(argb, 0, 0, red, 0), RG_ERR_INVALID_FORMAT, "flood_fill rejects non-Rgba8");
+
+pixel_buffer_free(b1); pixel_buffer_free(b2); pixel_buffer_free(b3); pixel_buffer_free(b4);
+pixel_buffer_free(argb);
+fl_free(red); fl_free(trip); fl_free(err);
+
+var exit_code = assert_summary();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

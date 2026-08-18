@@ -70,7 +70,7 @@ multiplies, and decimal float literals past ~9 significant digits parse wrong
 (filed upstream as
 `cyrius/docs/development/issues/2026-08-17-decimal-float-literal-silent-precision-loss.md`).
 
-### M2 — Pixel ops — in progress (556 assertions green across the port)
+### M2 — Pixel ops — ✅ complete (936 assertions green across the port)
 
 - [x] `src/composite.cyr` — all 13 fns: premultiply/unpremultiply, apply_mask,
       dissolve/fade/wipe, fill_solid/fill_checkerboard, three gradients,
@@ -82,16 +82,25 @@ multiplies, and decimal float literals past ~9 significant digits parse wrong
       flips, `affine_transform`, `Perspective` (+ `from_quad`'s 8×8 Gaussian
       elimination with partial pivoting), `perspective_transform`.
       148 assertions; 16/16 mutants caught.
-- [ ] `src/filter_point.cyr` — 13 per-pixel functions
-- [ ] `src/filter_kernel.cyr` — 10 neighbourhood/generative functions
+- [x] `src/filter_point.cyr` — 13 per-pixel fns: brightness, contrast,
+      saturation, levels, curves, grayscale, invert, hue_shift, color_balance,
+      vibrance, channel_mixer, threshold, auto_white_balance. 112 assertions;
+      17/18 mutants caught.
+- [x] `src/filter_kernel.cyr` — 10 neighbourhood/generative fns: gaussian_blur,
+      box_blur, unsharp_mask, median (Huang), bilateral, vignette, apply_lut3d
+      (+ `Lut3d` trilinear), noise_gaussian, noise_salt_pepper, flood_fill
+      (scanline). 120 assertions; 17/19 mutants caught.
 
-First fan-out (two port agents + two adversarial verifiers). The verifiers
-earned their keep: a use-after-free in the composite tests, and four histogram
-assertions that passed against deliberately broken code. Both modules were
-*correct* — every gap was test coverage, and the new assertions passed on the
-first run against the existing implementations.
+`filter.rs` (2007 lines, 23 fns) was split into a point half and a kernel half,
+matching prakash's split of `ray/mod.rs` — Cyrius `src/` is flat and one file
+that size is unwieldy.
 
-### M3 — SIMD modules
+First half fanned out to agents (two porters + two adversarial verifiers), which
+found a use-after-free in the composite tests and four histogram assertions that
+passed against deliberately broken code. The second half was ported inline after
+three consecutive API 529 failures made the agent path unreliable.
+
+### M3 — SIMD modules — next
 
 `convert`, `blend`. Scalar path first for correctness parity, then the `asm { }`
 kernels — SIMD ships in 2.0.0, not deferred.

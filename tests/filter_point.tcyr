@@ -144,7 +144,8 @@ assert_eq(chan(b4, 2, 0), 255, "identity levels: 255 stays 255");
 # The gamma guard is `<= 0`, not `== 0`. A NEGATIVE gamma must be rejected too —
 # an equality check would let it through into powf(1/negative).
 assert_eq(levels(b4, f32c(0.0), f32c(1.0), f32c(0.0)), RG_ERR_INVALID_PARAMETER, "gamma 0 is rejected");
-assert_eq(levels(b4, f32c(0.0), f32c(1.0), f32c(f64_neg(1.0))), RG_ERR_INVALID_PARAMETER, "NEGATIVE gamma is rejected too");
+var _lv = levels(b4, f32c(0.0), f32c(1.0), f32c(f64_neg(1.0)));
+assert_eq(_lv, RG_ERR_INVALID_PARAMETER, "NEGATIVE gamma is rejected too");
 assert_eq(levels(b4, f32c(0.0), f32c(1.0), f32_from(_RG_NAN)), RG_ERR_INVALID_PARAMETER, "NaN gamma is rejected");
 
 # A zero-width window must not divide by zero — the range is floored at 1e-6.
