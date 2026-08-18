@@ -16,7 +16,9 @@ form. Both are wrong now: generics have been on by default since v6.4.0
 below was verified against that release, several points empirically rather than
 from docs.
 
-Status: **planning complete, not started.**
+Status: **M0 done, M1 done, M2 in progress.** Live milestone state is in
+[`roadmap.md`](roadmap.md); the automation learnings are in
+[`port-mechanics.md`](port-mechanics.md).
 
 ---
 
@@ -209,7 +211,8 @@ ported → `cyrius test` green → next. Never port tests after the fact.
 | 3 | `composite.cyr` | `composite.rs` | 791 | mechanical — integer/byte arithmetic |
 | 3 | `histogram.cyr` | `histogram.rs` | 364 | mechanical |
 | 4 | `transform.cyr` | `transform.rs` | 930 | moderate — 8×8 Gaussian elimination in `Perspective::from_quad` |
-| 4 | `filter.cyr` | `filter.rs` | 2007 | moderate — largest non-GPU module; needs f64 exp for gaussian/bilateral |
+| 4 | `filter_point.cyr` | `filter.rs` (13 point fns) | ~900 | moderate — brightness/contrast/saturation/levels/curves/grayscale/invert/hue_shift/color_balance/vibrance/channel_mixer/threshold/auto_white_balance |
+| 4 | `filter_kernel.cyr` | `filter.rs` (10 kernel fns) | ~1100 | moderate — blur/unsharp/median(Huang)/bilateral/vignette/lut3d/noise/flood_fill; needs `_rg_exp` |
 | 5 | `icc.cyr` | `icc.rs` | 1142 | moderate — big-endian tag-table parsing, 5 parametric curve types, needs `ranga_f64_powf` |
 | 6 | `spectral.cyr` | `spectral.rs` | 102 | thin re-export over prakash — **verified 18/18 covered** |
 | 6 | `hwaccel.cyr` | `hwaccel.rs` | 164 | thin wrapper over ai-hwaccel v2.3.16 |

@@ -77,8 +77,13 @@ multiplies, and decimal float literals past ~9 significant digits parse wrong
       composite_at + composite_at_argb. 159 assertions, 13 doctests.
 - [x] `src/histogram.cyr` — all 5 fns plus the `Hist` record standing in for
       `Vec<f64>`. 150 assertions, 5 doctests.
-- [ ] `src/transform.cyr`
-- [ ] `src/filter.cyr`
+- [x] `src/transform.cyr` — `Affine` (+ translate/scale/rotate/then/apply/inverse/
+      is_identity), `ScaleFilter`, crop, resize (nearest/bilinear/bicubic), both
+      flips, `affine_transform`, `Perspective` (+ `from_quad`'s 8×8 Gaussian
+      elimination with partial pivoting), `perspective_transform`.
+      148 assertions; 16/16 mutants caught.
+- [ ] `src/filter_point.cyr` — 13 per-pixel functions
+- [ ] `src/filter_kernel.cyr` — 10 neighbourhood/generative functions
 
 First fan-out (two port agents + two adversarial verifiers). The verifiers
 earned their keep: a use-after-free in the composite tests, and four histogram

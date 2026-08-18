@@ -145,6 +145,24 @@ already relies on this. Only an end-to-end f64 chain that never narrows its
 intermediates diverges. Do not "fix" a correct widen-narrow helper into the
 trap below.
 
+**0b. The compiler DOES have a guard for this — but only `cyrius test` shows it.**
+`f64 arithmetic with a non-f64 right operand` is a real diagnostic, and it fires
+on exactly the mixed-type mistake above. It is emitted by the compile that
+`cyrius test` drives and **not** by `cyrius lint`, which is another reason to run
+all three commands.
+
+**BOTH operands must be typed, not just the left.** These are all wrong:
+
+```
+store64(out, a * px + c * py + load64(m + 32));   # untyped RIGHT  -> warns
+var factor: f64 = load64(a + i) / pivot;          # untyped LEFT   -> silent, gives 0
+s = s + _tf_cubic_weight(x);                       # call result on the right -> warns
+```
+
+Bind every operand to a `: f64` local first, then combine. The left-operand form
+is the dangerous one: it produced a `from_quad` that reported every quad as
+degenerate, with no diagnostic at all.
+
 **1. f32 arithmetic on an untyped operand becomes an integer multiply.**
 The operators dispatch through `EMIT_F32_BINOP` only when the operand carries
 `F32_TYID`, which comes from a typed binding or a typed parameter. A **call
@@ -226,8 +244,33 @@ mutation-testing M2 rather than by reasoning:
   at `bins == 256`; grey 219 with 7 bins separates them (bin 5 vs bin 6). Truncation
   vs rounding needs an input landing on `x.5`, not on a bin edge.
 
+- **Guards mask each other, so exercise them one at a time.** `resize` has four
+  zero-dimension guards and `crop` has two ordering guards; a 0×0 source or a
+  fully-inverted rectangle is caught by whichever guard runs first, which
+  short-circuits and hides the rest. Removing any single guard still passed. A
+  0×4 source, a 4×0 source, an x-only inversion and a y-only inversion each pin
+  exactly one.
+- **Probe every basis vector.** A rotation's `b` and `c` have opposite signs, but
+  applying it only to (1,0) exercises `a` and `b`; flipping the sign of `c` —
+  rotating the wrong way — passed until (0,1) was probed too. Same for
+  `affine_inverse`: the first round-trip used translate-then-scale, where
+  `b == c == 0`, so the off-diagonal negations were never exercised.
+
 **Budget a numeric-oracle pass per module.** Deriving discriminating inputs by
 hand gets the rounding wrong; a short Python/numpy search finds them reliably.
+
+**The oracle also stops you "fixing" correct code.** Two examples from
+`transform`, both of which looked like port bugs and were not:
+
+- *"A uniform image survives bicubic unchanged"* is FALSE. The four cubic weights
+  sum to exactly 1.0 in isolation, but after sixteen multiply-accumulates the
+  interior accumulator lands on `76.99999999999996`, and `as u8` truncates it to
+  76. Rust produces the same 76. Asserting 77 would have meant rewriting a
+  faithful port.
+- A hand-written "degenerate perspective" matrix `[[1,0,0],[0,1,0],[1,0,0]]` has
+  `det == 0`, so it is rejected up front and never reaches the NaN path it was
+  meant to test. The oracle found `[[1,0,0],[0,1,0],[0.4,0,-0.4]]`, which is
+  invertible and whose *inverse* is singular exactly at a sampled coordinate.
 
 ### Mutation-test each module the moment its suite goes green
 

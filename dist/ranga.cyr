@@ -2924,3 +2924,831 @@ fn auto_levels(buf) {
     }
     return RG_ERR_NONE;
 }
+
+# --- transform.cyr ---
+
+# transform.cyr -- crop, resize, flips, affine and perspective transforms
+# Ported from rust-old/src/transform.rs (930 lines). Private prefix: _tf_
+#
+# STRUCT LAYOUT, per the pattern settled in pixel.cyr / color.cyr — raw byte
+# offsets with width-correct accessors, because Cyrius struct fields have no f64
+# type and #derive(accessors) would be wrong for anything narrower than 8 bytes.
+#
+#   Affine      48 bytes  +0 a  +8 b  +16 c  +24 d  +32 tx  +40 ty   (f64 each)
+#   Perspective 72 bytes  row-major 3x3, +0 m00 .. +64 m22            (f64 each)
+#
+# FLOAT STYLE. This module uses `: f64`-annotated locals and parameters and then
+# BARE OPERATORS (`a * b + c`, `t <= 1.0`). Verified on 6.5.27: annotating the
+# binding or the parameter is what carries F64_TYID, and the operators then
+# dispatch to real f64 arithmetic and comparison. It is far more legible than
+# nested f64_mul/f64_add for matrix work, and it is the same mechanism the f32
+# helpers in color.cyr rely on — the trap is an UNTYPED operand (a call result),
+# not the operator form itself.
+#
+# ERROR MODEL. Every public transform ALLOCATES a new PixelBuffer, so all of them
+# use the err_out pointer convention from pixel_buffer_new / pixel_buffer_zeroed:
+# they return the new buffer, or 0 with a code written through err_out. The
+# Affine/Perspective helpers that cannot fail return their value directly;
+# affine_inverse / perspective_inverse return 0 for a singular matrix, standing
+# in for Rust's Option::None.
+#
+# OWNERSHIP. The caller owns every returned PixelBuffer (pixel_buffer_free) and
+# every returned Affine/Perspective (affine_free / perspective_free). Nothing
+# here takes ownership of its input.
+
+# ── ScaleFilter ────────
+var SF_NEAREST  = 0;
+var SF_BILINEAR = 1;
+var SF_BICUBIC  = 2;
+
+#must_use
+fn scale_filter_name(f) {
+    if (f == SF_NEAREST) { return "Nearest"; }
+    if (f == SF_BILINEAR) { return "Bilinear"; }
+    if (f == SF_BICUBIC) { return "Bicubic"; }
+    return "unknown";
+}
+
+#must_use
+fn scale_filter_is_valid(f) {
+    if (f < 0) { return 0; }
+    if (f > SF_BICUBIC) { return 0; }
+    return 1;
+}
+
+# Rust's 1e-12 singularity threshold and 1e-9 identity tolerance, kept distinct
+# because they mean different things: one is "this matrix cannot be inverted",
+# the other is "this matrix is close enough to identity to skip work".
+var _TF_SINGULAR_EPS = 0.000000000001;   # 1e-12
+var _TF_IDENTITY_EPS = 0.000000001;      # 1e-9
+
+# ── Affine ────────
+var _TF_AFFINE_SIZE = 48;
+
+#must_use
+fn affine_new(a, b, c, d, tx, ty) {
+    var m = fl_alloc(_TF_AFFINE_SIZE);
+    if (m == 0) { return 0; }
+    store64(m, a);
+    store64(m + 8, b);
+    store64(m + 16, c);
+    store64(m + 24, d);
+    store64(m + 32, tx);
+    store64(m + 40, ty);
+    return m;
+}
+
+#must_use
+fn affine_a(m) { return load64(m); }
+#must_use
+fn affine_b(m) { return load64(m + 8); }
+#must_use
+fn affine_c(m) { return load64(m + 16); }
+#must_use
+fn affine_d(m) { return load64(m + 24); }
+#must_use
+fn affine_tx(m) { return load64(m + 32); }
+#must_use
+fn affine_ty(m) { return load64(m + 40); }
+
+fn affine_free(m) { if (m != 0) { fl_free(m); } return RG_ERR_NONE; }
+
+#must_use
+fn affine_identity() { return affine_new(1.0, 0.0, 0.0, 1.0, 0.0, 0.0); }
+
+#must_use
+fn affine_translate(tx, ty) { return affine_new(1.0, 0.0, 0.0, 1.0, tx, ty); }
+
+#must_use
+fn affine_scale(sx, sy) { return affine_new(sx, 0.0, 0.0, sy, 0.0, 0.0); }
+
+# Rust uses sin_cos(); the two calls are equivalent and go through the domain
+# guards in error.cyr so a huge angle yields NaN rather than the argument back.
+#must_use
+fn affine_rotate(angle_rad) {
+    var s = _rg_sin(angle_rad);
+    var c = _rg_cos(angle_rad);
+    return affine_new(c, s, f64_neg(s), c, 0.0, 0.0);
+}
+
+# Compose: apply `other` FIRST, then `self`. The operand order matters and is
+# the opposite of what the name reads like — matching Rust's `then`.
+#must_use
+fn affine_then(sm, om) {
+    var sa: f64 = load64(sm);
+    var sb: f64 = load64(sm + 8);
+    var sc: f64 = load64(sm + 16);
+    var sd: f64 = load64(sm + 24);
+    var stx: f64 = load64(sm + 32);
+    var sty: f64 = load64(sm + 40);
+    var oa: f64 = load64(om);
+    var ob: f64 = load64(om + 8);
+    var oc: f64 = load64(om + 16);
+    var od: f64 = load64(om + 24);
+    var otx: f64 = load64(om + 32);
+    var oty: f64 = load64(om + 40);
+    return affine_new(sa * oa + sc * ob,
+                      sb * oa + sd * ob,
+                      sa * oc + sc * od,
+                      sb * oc + sd * od,
+                      sa * otx + sc * oty + stx,
+                      sb * otx + sd * oty + sty);
+}
+
+# Apply to a point; writes the (x, y) pair as two f64 to `out` (16 bytes),
+# since Cyrius has no tuple return.
+fn affine_apply(m, x, y, out) {
+    var a: f64 = load64(m);
+    var b: f64 = load64(m + 8);
+    var c: f64 = load64(m + 16);
+    var d: f64 = load64(m + 24);
+    var px: f64 = x;
+    var py: f64 = y;
+    # Every operand must be an f64-TYPED binding, not just the left one — the
+    # compiler warns "f64 arithmetic with a non-f64 right operand" for a bare
+    # load64 on the right, and the result is wrong. Bind, then combine.
+    var tx: f64 = load64(m + 32);
+    var ty: f64 = load64(m + 40);
+    store64(out, a * px + c * py + tx);
+    store64(out + 8, b * px + d * py + ty);
+    return RG_ERR_NONE;
+}
+
+# Returns 0 for a singular matrix — Rust's Option::None.
+#must_use
+fn affine_inverse(m) {
+    var a: f64 = load64(m);
+    var b: f64 = load64(m + 8);
+    var c: f64 = load64(m + 16);
+    var d: f64 = load64(m + 24);
+    var tx: f64 = load64(m + 32);
+    var ty: f64 = load64(m + 40);
+    var det: f64 = a * d - b * c;
+    if (f64_lt(f64_abs(det), _TF_SINGULAR_EPS) == 1) { return 0; }
+    var s: f64 = 1.0 / det;
+    var ia: f64 = d * s;
+    var ib: f64 = f64_neg(b) * s;
+    var ic: f64 = f64_neg(c) * s;
+    var id: f64 = a * s;
+    return affine_new(ia, ib, ic, id,
+                      f64_neg(ia * tx + ic * ty),
+                      f64_neg(ib * tx + id * ty));
+}
+
+#must_use
+fn affine_is_identity(m) {
+    var a: f64 = load64(m);
+    var d: f64 = load64(m + 24);
+    if (f64_ge(f64_abs(a - 1.0), _TF_IDENTITY_EPS) == 1) { return 0; }
+    if (f64_ge(f64_abs(load64(m + 8)), _TF_IDENTITY_EPS) == 1) { return 0; }
+    if (f64_ge(f64_abs(load64(m + 16)), _TF_IDENTITY_EPS) == 1) { return 0; }
+    if (f64_ge(f64_abs(d - 1.0), _TF_IDENTITY_EPS) == 1) { return 0; }
+    if (f64_ge(f64_abs(load64(m + 32)), _TF_IDENTITY_EPS) == 1) { return 0; }
+    if (f64_ge(f64_abs(load64(m + 40)), _TF_IDENTITY_EPS) == 1) { return 0; }
+    return 1;
+}
+
+# ── sampling helpers ────────
+# Catmull-Rom cubic kernel, a = -0.5.
+#must_use
+fn _tf_cubic_weight(t: f64) {
+    var a: f64 = t;
+    if (a < 0.0) { a = 0.0 - a; }
+    if (a <= 1.0) { return (1.5 * a - 2.5) * a * a + 1.0; }
+    # Nesting kept identical to Rust's ((-0.5t + 2.5) * t - 4.0) * t + 2.0.
+    # An algebraically-equal reassociation differs in the last mantissa bit, and
+    # this feeds a byte truncation, so the grouping is load-bearing.
+    if (a <= 2.0) { return (((0.0 - 0.5) * a + 2.5) * a - 4.0) * a + 2.0; }
+    return 0.0;
+}
+
+# Sample one channel with EDGE CLAMPING, so the bicubic 4x4 footprint can hang
+# off the border without an out-of-bounds read. Returns an f64.
+#must_use
+fn _tf_sample_clamped(data, x, y, w, h, c) {
+    var cx = x;
+    var cy = y;
+    if (cx < 0) { cx = 0; }
+    if (cy < 0) { cy = 0; }
+    if (cx > w - 1) { cx = w - 1; }
+    if (cy > h - 1) { cy = h - 1; }
+    return f64_from(load8(data + (cy * w + cx) * 4 + c));
+}
+
+# Rust's `val.clamp(0.0, 255.0) as u8`. `as` truncates, and the Rust does NOT
+# add a rounding term here — resize/affine/perspective all truncate, unlike the
+# +0.5 round-half-up in color.cyr's byte conversions. Matching that exactly.
+#must_use
+fn _tf_f64_to_u8(v: f64) {
+    if (v < 0.0) { return 0; }
+    if (v > 255.0) { return 255; }
+    return f64_to(v);
+}
+
+#must_use
+fn _tf_validate_rgba8(buf) {
+    if (pixel_buffer_format(buf) != PF_RGBA8) { return RG_ERR_INVALID_FORMAT; }
+    return RG_ERR_NONE;
+}
+
+# ── crop ────────
+# Clamps the rectangle into the buffer, then orders it so right >= left and
+# bottom >= top — an inverted rectangle yields an empty result, not a negative
+# stride. A fully-clipped rectangle returns a 0x0 buffer, matching Rust.
+#must_use
+fn crop(buf, left, top, right, bottom, err_out) {
+    var rc = _tf_validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    var bw = pixel_buffer_width(buf);
+    var bh = pixel_buffer_height(buf);
+
+    var l = left;
+    if (l > bw) { l = bw; }
+    if (l < 0) { l = 0; }
+    var t = top;
+    if (t > bh) { t = bh; }
+    if (t < 0) { t = 0; }
+    var r = right;
+    if (r > bw) { r = bw; }
+    if (r < l) { r = l; }
+    var b = bottom;
+    if (b > bh) { b = bh; }
+    if (b < t) { b = t; }
+
+    var ow = r - l;
+    var oh = b - t;
+    if (ow == 0) { return pixel_buffer_zeroed(0, 0, PF_RGBA8, err_out); }
+    if (oh == 0) { return pixel_buffer_zeroed(0, 0, PF_RGBA8, err_out); }
+
+    var out = pixel_buffer_zeroed(ow, oh, PF_RGBA8, err_out);
+    if (out == 0) { return 0; }
+    var sp = pixel_buffer_data(buf);
+    var dp = pixel_buffer_data(out);
+    var srow = bw * 4;
+    var drow = ow * 4;
+    var y = 0;
+    while (y < oh) {
+        memcpy(dp + y * drow, sp + (t + y) * srow + l * 4, drow);
+        y = y + 1;
+    }
+    store64(err_out, RG_ERR_NONE);
+    return out;
+}
+
+# ── resize ────────
+#must_use
+fn resize(buf, new_w, new_h, filter, err_out) {
+    var rc = _tf_validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    if (scale_filter_is_valid(filter) == 0) {
+        store64(err_out, RG_ERR_INVALID_PARAMETER);
+        return 0;
+    }
+    var sw = pixel_buffer_width(buf);
+    var sh = pixel_buffer_height(buf);
+    # A zero in EITHER the source or the target yields an empty buffer, not an
+    # error. 1.0.0 added the source half of this guard: a 0-width source
+    # previously underflowed `sh - 1` as a usize and indexed wild.
+    if (new_w == 0) { return pixel_buffer_zeroed(0, 0, PF_RGBA8, err_out); }
+    if (new_h == 0) { return pixel_buffer_zeroed(0, 0, PF_RGBA8, err_out); }
+    if (sw == 0) { return pixel_buffer_zeroed(0, 0, PF_RGBA8, err_out); }
+    if (sh == 0) { return pixel_buffer_zeroed(0, 0, PF_RGBA8, err_out); }
+
+    var out = pixel_buffer_zeroed(new_w, new_h, PF_RGBA8, err_out);
+    if (out == 0) { return 0; }
+    var sp = pixel_buffer_data(buf);
+    var dp = pixel_buffer_data(out);
+
+    if (filter == SF_NEAREST) {
+        # Integer scaling, deliberately: Rust is `(dy * sh / dh).min(sh - 1)`.
+        var dy = 0;
+        while (dy < new_h) {
+            var sy = dy * sh / new_h;
+            if (sy > sh - 1) { sy = sh - 1; }
+            var dx = 0;
+            while (dx < new_w) {
+                var sx = dx * sw / new_w;
+                if (sx > sw - 1) { sx = sw - 1; }
+                memcpy(dp + (dy * new_w + dx) * 4, sp + (sy * sw + sx) * 4, 4);
+                dx = dx + 1;
+            }
+            dy = dy + 1;
+        }
+        store64(err_out, RG_ERR_NONE);
+        return out;
+    }
+
+    # Both interpolating filters map destination pixel CENTRES onto the source
+    # by (n-1)/(m-1), which puts the first and last destination pixels exactly
+    # on the first and last source pixels. A single-pixel output has no span, so
+    # the ratio is 0 rather than a division by zero.
+    var xr: f64 = 0.0;
+    var yr: f64 = 0.0;
+    if (new_w > 1) { xr = (f64_from(sw) - 1.0) / (f64_from(new_w) - 1.0); }
+    if (new_h > 1) { yr = (f64_from(sh) - 1.0) / (f64_from(new_h) - 1.0); }
+
+    if (filter == SF_BILINEAR) {
+        var dy2 = 0;
+        while (dy2 < new_h) {
+            var syf: f64 = f64_from(dy2) * yr;
+            var y0 = f64_to(f64_floor(syf));
+            var y1 = y0 + 1;
+            if (y1 > sh - 1) { y1 = sh - 1; }
+            var fy: f64 = syf - f64_from(y0);
+            var dx2 = 0;
+            while (dx2 < new_w) {
+                var sxf: f64 = f64_from(dx2) * xr;
+                var x0 = f64_to(f64_floor(sxf));
+                var x1 = x0 + 1;
+                if (x1 > sw - 1) { x1 = sw - 1; }
+                var fx: f64 = sxf - f64_from(x0);
+                var di = (dy2 * new_w + dx2) * 4;
+                var c = 0;
+                while (c < 4) {
+                    var c00: f64 = f64_from(load8(sp + (y0 * sw + x0) * 4 + c));
+                    var c10: f64 = f64_from(load8(sp + (y0 * sw + x1) * 4 + c));
+                    var c01: f64 = f64_from(load8(sp + (y1 * sw + x0) * 4 + c));
+                    var c11: f64 = f64_from(load8(sp + (y1 * sw + x1) * 4 + c));
+                    var top: f64 = c00 + fx * (c10 - c00);
+                    var bot: f64 = c01 + fx * (c11 - c01);
+                    store8(dp + di + c, _tf_f64_to_u8(top + fy * (bot - top)));
+                    c = c + 1;
+                }
+                dx2 = dx2 + 1;
+            }
+            dy2 = dy2 + 1;
+        }
+        store64(err_out, RG_ERR_NONE);
+        return out;
+    }
+
+    # Bicubic: 4x4 Catmull-Rom footprint, edge-clamped.
+    var dy3 = 0;
+    while (dy3 < new_h) {
+        var sy3: f64 = f64_from(dy3) * yr;
+        var iy = f64_to(f64_floor(sy3));
+        var fy3: f64 = sy3 - f64_floor(sy3);
+        var dx3 = 0;
+        while (dx3 < new_w) {
+            var sx3: f64 = f64_from(dx3) * xr;
+            var ix = f64_to(f64_floor(sx3));
+            var fx3: f64 = sx3 - f64_floor(sx3);
+            var di3 = (dy3 * new_w + dx3) * 4;
+            var c3 = 0;
+            while (c3 < 4) {
+                var acc: f64 = 0.0;
+                var j = 0 - 1;
+                while (j <= 2) {
+                    var wy: f64 = _tf_cubic_weight(fy3 - f64_from(j));
+                    var i = 0 - 1;
+                    while (i <= 2) {
+                        var wx: f64 = _tf_cubic_weight(fx3 - f64_from(i));
+                        var s: f64 = _tf_sample_clamped(sp, ix + i, iy + j, sw, sh, c3);
+                        acc = acc + wx * wy * s;
+                        i = i + 1;
+                    }
+                    j = j + 1;
+                }
+                store8(dp + di3 + c3, _tf_f64_to_u8(acc));
+                c3 = c3 + 1;
+            }
+            dx3 = dx3 + 1;
+        }
+        dy3 = dy3 + 1;
+    }
+    store64(err_out, RG_ERR_NONE);
+    return out;
+}
+
+# ── flips ────────
+#must_use
+fn flip_horizontal(buf, err_out) {
+    var rc = _tf_validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    var out = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    if (out == 0) { return 0; }
+    var sp = pixel_buffer_data(buf);
+    var dp = pixel_buffer_data(out);
+    var y = 0;
+    while (y < h) {
+        var x = 0;
+        while (x < w) {
+            memcpy(dp + (y * w + (w - 1 - x)) * 4, sp + (y * w + x) * 4, 4);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    store64(err_out, RG_ERR_NONE);
+    return out;
+}
+
+# Whole-row copies, not per-pixel — a vertical flip never reorders within a row.
+#must_use
+fn flip_vertical(buf, err_out) {
+    var rc = _tf_validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    var w = pixel_buffer_width(buf);
+    var h = pixel_buffer_height(buf);
+    var out = pixel_buffer_zeroed(w, h, PF_RGBA8, err_out);
+    if (out == 0) { return 0; }
+    var sp = pixel_buffer_data(buf);
+    var dp = pixel_buffer_data(out);
+    var stride = w * 4;
+    var y = 0;
+    while (y < h) {
+        memcpy(dp + (h - 1 - y) * stride, sp + y * stride, stride);
+        y = y + 1;
+    }
+    store64(err_out, RG_ERR_NONE);
+    return out;
+}
+
+# ── affine_transform ────────
+# Inverse mapping: for each DESTINATION pixel, find where it came from. Sampling
+# at (dx + 0.5, dy + 0.5) hits pixel centres.
+#
+# ⚠ The out-of-bounds test here is the POSITIVE form, deliberately, and differs
+# from perspective_transform's negated form. An affine inverse with a checked
+# determinant cannot produce NaN, so the positive test is safe and reads better;
+# a perspective divide CAN, and there the positive form would fail to skip.
+# Do not unify the two.
+#must_use
+fn affine_transform(buf, m, out_w, out_h, filter, err_out) {
+    var rc = _tf_validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    if (scale_filter_is_valid(filter) == 0) {
+        store64(err_out, RG_ERR_INVALID_PARAMETER);
+        return 0;
+    }
+    var inv = affine_inverse(m);
+    if (inv == 0) { store64(err_out, RG_ERR_INVALID_PARAMETER); return 0; }
+
+    var sw = pixel_buffer_width(buf);
+    var sh = pixel_buffer_height(buf);
+    var out = pixel_buffer_zeroed(out_w, out_h, PF_RGBA8, err_out);
+    if (out == 0) { affine_free(inv); return 0; }
+    var sp = pixel_buffer_data(buf);
+    var dp = pixel_buffer_data(out);
+    var pt = fl_alloc(16);
+    if (pt == 0) {
+        affine_free(inv);
+        pixel_buffer_free(out);
+        store64(err_out, RG_ERR_ALLOCATION);
+        return 0;
+    }
+
+    var dy = 0;
+    while (dy < out_h) {
+        var dx = 0;
+        while (dx < out_w) {
+            affine_apply(inv, f64_from(dx) + 0.5, f64_from(dy) + 0.5, pt);
+            var sx: f64 = load64(pt);
+            var sy: f64 = load64(pt + 8);
+            var di = (dy * out_w + dx) * 4;
+            var skip = 0;
+            if (sx < 0.0) { skip = 1; }
+            if (sy < 0.0) { skip = 1; }
+            if (sx >= f64_from(sw)) { skip = 1; }
+            if (sy >= f64_from(sh)) { skip = 1; }
+            if (skip == 0) {
+                _tf_sample_into(sp, sw, sh, sx, sy, filter, dp + di);
+            }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+    fl_free(pt);
+    affine_free(inv);
+    store64(err_out, RG_ERR_NONE);
+    return out;
+}
+
+# Shared sampler for affine_transform and perspective_transform. Writes 4 bytes.
+# Pixels outside the source are left untouched by the CALLER (transparent
+# black), so this is only ever entered with an in-bounds (sx, sy).
+fn _tf_sample_into(sp, sw, sh, sx: f64, sy: f64, filter, dst) {
+    if (filter == SF_NEAREST) {
+        var ix = f64_to(sx);
+        var iy = f64_to(sy);
+        memcpy(dst, sp + (iy * sw + ix) * 4, 4);
+        return RG_ERR_NONE;
+    }
+    if (filter == SF_BILINEAR) {
+        var x0 = f64_to(f64_floor(sx));
+        var y0 = f64_to(f64_floor(sy));
+        var x1 = x0 + 1;
+        var y1 = y0 + 1;
+        if (x1 > sw - 1) { x1 = sw - 1; }
+        if (y1 > sh - 1) { y1 = sh - 1; }
+        var fx: f64 = sx - f64_from(x0);
+        var fy: f64 = sy - f64_from(y0);
+        var c = 0;
+        while (c < 4) {
+            var c00: f64 = f64_from(load8(sp + (y0 * sw + x0) * 4 + c));
+            var c10: f64 = f64_from(load8(sp + (y0 * sw + x1) * 4 + c));
+            var c01: f64 = f64_from(load8(sp + (y1 * sw + x0) * 4 + c));
+            var c11: f64 = f64_from(load8(sp + (y1 * sw + x1) * 4 + c));
+            var top: f64 = c00 + fx * (c10 - c00);
+            var bot: f64 = c01 + fx * (c11 - c01);
+            store8(dst + c, _tf_f64_to_u8(top + fy * (bot - top)));
+            c = c + 1;
+        }
+        return RG_ERR_NONE;
+    }
+    var ix2 = f64_to(f64_floor(sx));
+    var iy2 = f64_to(f64_floor(sy));
+    var fx2: f64 = sx - f64_floor(sx);
+    var fy2: f64 = sy - f64_floor(sy);
+    var c2 = 0;
+    while (c2 < 4) {
+        var acc: f64 = 0.0;
+        var j = 0 - 1;
+        while (j <= 2) {
+            var wy: f64 = _tf_cubic_weight(fy2 - f64_from(j));
+            var i = 0 - 1;
+            while (i <= 2) {
+                var wx: f64 = _tf_cubic_weight(fx2 - f64_from(i));
+                var s: f64 = _tf_sample_clamped(sp, ix2 + i, iy2 + j, sw, sh, c2);
+                acc = acc + wx * wy * s;
+                i = i + 1;
+            }
+            j = j + 1;
+        }
+        store8(dst + c2, _tf_f64_to_u8(acc));
+        c2 = c2 + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+# ── Perspective ────────
+var _TF_PERSP_SIZE = 72;
+
+#must_use
+fn perspective_new(m00, m01, m02, m10, m11, m12, m20, m21, m22) {
+    var p = fl_alloc(_TF_PERSP_SIZE);
+    if (p == 0) { return 0; }
+    store64(p, m00);
+    store64(p + 8, m01);
+    store64(p + 16, m02);
+    store64(p + 24, m10);
+    store64(p + 32, m11);
+    store64(p + 40, m12);
+    store64(p + 48, m20);
+    store64(p + 56, m21);
+    store64(p + 64, m22);
+    return p;
+}
+
+# Element (r, c) of the 3x3, row-major.
+#must_use
+fn perspective_m(p, r, c) { return load64(p + (r * 3 + c) * 8); }
+fn perspective_free(p) { if (p != 0) { fl_free(p); } return RG_ERR_NONE; }
+
+#must_use
+fn perspective_identity() {
+    return perspective_new(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0);
+}
+
+# Project a point, writing (x, y) as two f64 to `out` (16 bytes).
+#
+# ⚠ Returns (NaN, NaN) when |w| < 1e-12 rather than an error code, because that
+# is what Rust does and because the caller's in-bounds test is what turns the
+# NaN into a skipped pixel. See the ⚠ on perspective_transform.
+fn perspective_apply(p, x, y, out) {
+    var px: f64 = x;
+    var py: f64 = y;
+    var m20: f64 = load64(p + 48);
+    var m21: f64 = load64(p + 56);
+    var m22: f64 = load64(p + 64);
+    var w: f64 = m20 * px + m21 * py + m22;
+    if (f64_lt(f64_abs(w), _TF_SINGULAR_EPS) == 1) {
+        store64(out, _RG_NAN);
+        store64(out + 8, _RG_NAN);
+        return RG_ERR_NONE;
+    }
+    var m00: f64 = load64(p);
+    var m01: f64 = load64(p + 8);
+    var m02: f64 = load64(p + 16);
+    var m10: f64 = load64(p + 24);
+    var m11: f64 = load64(p + 32);
+    var m12: f64 = load64(p + 40);
+    var qx: f64 = m00 * px + m01 * py + m02;
+    var qy: f64 = m10 * px + m11 * py + m12;
+    store64(out, qx / w);
+    store64(out + 8, qy / w);
+    return RG_ERR_NONE;
+}
+
+# Adjugate-over-determinant inverse. Returns 0 when singular (Rust's None).
+#must_use
+fn perspective_inverse(p) {
+    var a: f64 = load64(p);
+    var b: f64 = load64(p + 8);
+    var c: f64 = load64(p + 16);
+    var d: f64 = load64(p + 24);
+    var e: f64 = load64(p + 32);
+    var f: f64 = load64(p + 40);
+    var g: f64 = load64(p + 48);
+    var h: f64 = load64(p + 56);
+    var i: f64 = load64(p + 64);
+
+    var i00: f64 = e * i - f * h;
+    var i01: f64 = c * h - b * i;
+    var i02: f64 = b * f - c * e;
+    var i10: f64 = f * g - d * i;
+    var i11: f64 = a * i - c * g;
+    var i12: f64 = c * d - a * f;
+    var i20: f64 = d * h - e * g;
+    var i21: f64 = b * g - a * h;
+    var i22: f64 = a * e - b * d;
+
+    var det: f64 = a * i00 + b * i10 + c * i20;
+    if (f64_lt(f64_abs(det), _TF_SINGULAR_EPS) == 1) { return 0; }
+    var s: f64 = 1.0 / det;
+    return perspective_new(i00 * s, i01 * s, i02 * s,
+                           i10 * s, i11 * s, i12 * s,
+                           i20 * s, i21 * s, i22 * s);
+}
+
+# Solve an 8x8 system by Gaussian elimination with PARTIAL PIVOTING.
+# `a` is 64 f64 row-major, `b` is 8 f64, `x` receives 8 f64. Returns
+# RG_ERR_INVALID_PARAMETER if any pivot is degenerate (Rust's None).
+#
+# The pivoting is not optional: from_quad's matrix has structural zeros in its
+# first rows, so a naive no-pivot elimination divides by zero on ordinary input.
+fn _tf_solve_8x8(a, b, x) {
+    var col = 0;
+    while (col < 8) {
+        var max_row = col;
+        var max_val: f64 = f64_abs(load64(a + (col * 8 + col) * 8));
+        var row = col + 1;
+        while (row < 8) {
+            var v: f64 = f64_abs(load64(a + (row * 8 + col) * 8));
+            if (v > max_val) { max_val = v; max_row = row; }
+            row = row + 1;
+        }
+        if (f64_lt(max_val, _TF_SINGULAR_EPS) == 1) { return RG_ERR_INVALID_PARAMETER; }
+        if (max_row != col) {
+            var k = 0;
+            while (k < 8) {
+                var tmp = load64(a + (col * 8 + k) * 8);
+                store64(a + (col * 8 + k) * 8, load64(a + (max_row * 8 + k) * 8));
+                store64(a + (max_row * 8 + k) * 8, tmp);
+                k = k + 1;
+            }
+            var tb = load64(b + col * 8);
+            store64(b + col * 8, load64(b + max_row * 8));
+            store64(b + max_row * 8, tb);
+        }
+        var pivot: f64 = load64(a + (col * 8 + col) * 8);
+        var r2 = col + 1;
+        while (r2 < 8) {
+            # LEFT operand must be typed too — a bare load64 on the left of a
+            # f64 divide is treated as an integer and silently yields 0.
+            var arc: f64 = load64(a + (r2 * 8 + col) * 8);
+            var factor: f64 = arc / pivot;
+            var k2 = col;
+            while (k2 < 8) {
+                var cur: f64 = load64(a + (r2 * 8 + k2) * 8);
+                var above: f64 = load64(a + (col * 8 + k2) * 8);
+                store64(a + (r2 * 8 + k2) * 8, cur - factor * above);
+                k2 = k2 + 1;
+            }
+            var bcur: f64 = load64(b + r2 * 8);
+            var babove: f64 = load64(b + col * 8);
+            store64(b + r2 * 8, bcur - factor * babove);
+            r2 = r2 + 1;
+        }
+        col = col + 1;
+    }
+    var c3 = 7;
+    while (c3 >= 0) {
+        var sum: f64 = load64(b + c3 * 8);
+        var k3 = c3 + 1;
+        while (k3 < 8) {
+            var acoef: f64 = load64(a + (c3 * 8 + k3) * 8);
+            var xk: f64 = load64(x + k3 * 8);
+            sum = sum - acoef * xk;
+            k3 = k3 + 1;
+        }
+        var diag: f64 = load64(a + (c3 * 8 + c3) * 8);
+        store64(x + c3 * 8, sum / diag);
+        c3 = c3 - 1;
+    }
+    return RG_ERR_NONE;
+}
+
+# Build the homography mapping four source corners onto four destination
+# corners. `src` and `dst` are each 8 f64 (x0,y0,x1,y1,x2,y2,x3,y3).
+# Returns 0 if the system is degenerate.
+#
+# Each corner contributes two rows of an 8x8 system; h22 is pinned to 1, which
+# is what makes 8 unknowns enough for a projective map.
+#must_use
+fn perspective_from_quad(src, dst) {
+    var a = fl_calloc(64 * 8);
+    if (a == 0) { return 0; }
+    var b = fl_calloc(8 * 8);
+    if (b == 0) { fl_free(a); return 0; }
+    var x = fl_calloc(8 * 8);
+    if (x == 0) { fl_free(a); fl_free(b); return 0; }
+
+    var i = 0;
+    while (i < 4) {
+        var sx: f64 = load64(src + i * 16);
+        var sy: f64 = load64(src + i * 16 + 8);
+        var dx: f64 = load64(dst + i * 16);
+        var dy: f64 = load64(dst + i * 16 + 8);
+        var r0 = i * 2;
+        store64(a + (r0 * 8 + 0) * 8, sx);
+        store64(a + (r0 * 8 + 1) * 8, sy);
+        store64(a + (r0 * 8 + 2) * 8, 1.0);
+        store64(a + (r0 * 8 + 6) * 8, f64_neg(dx * sx));
+        store64(a + (r0 * 8 + 7) * 8, f64_neg(dx * sy));
+        store64(b + r0 * 8, dx);
+        var r1 = r0 + 1;
+        store64(a + (r1 * 8 + 3) * 8, sx);
+        store64(a + (r1 * 8 + 4) * 8, sy);
+        store64(a + (r1 * 8 + 5) * 8, 1.0);
+        store64(a + (r1 * 8 + 6) * 8, f64_neg(dy * sx));
+        store64(a + (r1 * 8 + 7) * 8, f64_neg(dy * sy));
+        store64(b + r1 * 8, dy);
+        i = i + 1;
+    }
+
+    var rc = _tf_solve_8x8(a, b, x);
+    if (rc != RG_ERR_NONE) {
+        fl_free(a); fl_free(b); fl_free(x);
+        return 0;
+    }
+    var p = perspective_new(load64(x), load64(x + 8), load64(x + 16),
+                            load64(x + 24), load64(x + 32), load64(x + 40),
+                            load64(x + 48), load64(x + 56), 1.0);
+    fl_free(a); fl_free(b); fl_free(x);
+    return p;
+}
+
+# ── perspective_transform ────────
+# ⚠ The in-bounds test is the NEGATED form, and that is the whole point.
+# perspective_apply returns (NaN, NaN) for a degenerate projection, and NaN
+# fails EVERY comparison — so a positive out-of-bounds test (`sx < 0 || sy < 0 ||
+# sx >= sw || sy >= sh`) evaluates all four to false, does NOT skip, and then
+# indexes with a NaN-derived index. That was a real 1.0.0 bug. Testing for
+# in-bounds and negating means a NaN falls through to `skip`.
+# affine_transform deliberately uses the positive form; see the note there.
+#must_use
+fn perspective_transform(buf, p, out_w, out_h, filter, err_out) {
+    var rc = _tf_validate_rgba8(buf);
+    if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    if (scale_filter_is_valid(filter) == 0) {
+        store64(err_out, RG_ERR_INVALID_PARAMETER);
+        return 0;
+    }
+    var inv = perspective_inverse(p);
+    if (inv == 0) { store64(err_out, RG_ERR_INVALID_PARAMETER); return 0; }
+
+    var sw = pixel_buffer_width(buf);
+    var sh = pixel_buffer_height(buf);
+    var out = pixel_buffer_zeroed(out_w, out_h, PF_RGBA8, err_out);
+    if (out == 0) { perspective_free(inv); return 0; }
+    var sp = pixel_buffer_data(buf);
+    var dp = pixel_buffer_data(out);
+    var pt = fl_alloc(16);
+    if (pt == 0) {
+        perspective_free(inv);
+        pixel_buffer_free(out);
+        store64(err_out, RG_ERR_ALLOCATION);
+        return 0;
+    }
+
+    var dy = 0;
+    while (dy < out_h) {
+        var dx = 0;
+        while (dx < out_w) {
+            perspective_apply(inv, f64_from(dx) + 0.5, f64_from(dy) + 0.5, pt);
+            var sx: f64 = load64(pt);
+            var sy: f64 = load64(pt + 8);
+            # in_bounds is 1 only if ALL FOUR hold. A NaN makes every one of
+            # them false, so in_bounds stays 0 and the pixel is skipped.
+            var in_bounds = 0;
+            if (sx >= 0.0) {
+                if (sy >= 0.0) {
+                    if (sx < f64_from(sw)) {
+                        if (sy < f64_from(sh)) { in_bounds = 1; }
+                    }
+                }
+            }
+            if (in_bounds == 1) {
+                _tf_sample_into(sp, sw, sh, sx, sy, filter, dp + (dy * out_w + dx) * 4);
+            }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+    fl_free(pt);
+    perspective_free(inv);
+    store64(err_out, RG_ERR_NONE);
+    return out;
+}

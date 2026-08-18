@@ -1,0 +1,551 @@
+# transform.tcyr — crop, resize, flips, affine and perspective
+# Ported from rust-old/src/transform.rs #[cfg(test)] and its doctests.
+# Expected values for the interpolating paths and for from_quad were produced by
+# a Python oracle replicating the Rust formulas exactly, not derived by hand —
+# see port-mechanics.md on choosing discriminating inputs.
+
+include "src/error.cyr"
+include "src/bytevec.cyr"
+include "src/pixel.cyr"
+include "src/transform.cyr"
+
+alloc_init();
+
+var err = fl_alloc(8);
+
+fn approx(a, b, eps) {
+    if (f64_lt(f64_abs(f64_sub(a, b)), eps) == 1) { return 1; }
+    return 0;
+}
+
+fn put(b, i, r, g, bl, a) {
+    var p = pixel_buffer_data(b) + i * 4;
+    store8(p, r); store8(p + 1, g); store8(p + 2, bl); store8(p + 3, a);
+    return 0;
+}
+
+fn chan(b, i, c) { return load8(pixel_buffer_data(b) + i * 4 + c); }
+
+# ================================================================
+# ScaleFilter
+# ================================================================
+test_group("scale filter");
+
+assert_streq(scale_filter_name(SF_NEAREST), "Nearest", "Display for Nearest");
+assert_streq(scale_filter_name(SF_BICUBIC), "Bicubic", "Display for Bicubic");
+assert_eq(scale_filter_is_valid(SF_BILINEAR), 1, "Bilinear is valid");
+assert_eq(scale_filter_is_valid(3), 0, "3 is not a filter");
+assert_eq(scale_filter_is_valid((0 - 1)), 0, "-1 is not a filter");
+
+# ================================================================
+# cubic_weight — Catmull-Rom, a = -0.5
+# ================================================================
+test_group("cubic weight");
+
+assert_eq(approx(_tf_cubic_weight(0.0), F64_ONE, 0.0000001), 1, "cw(0) == 1");
+assert_eq(approx(_tf_cubic_weight(0.5), 0.5625, 0.0000001), 1, "cw(0.5) == 0.5625");
+assert_eq(approx(_tf_cubic_weight(1.0), 0, 0.0000001), 1, "cw(1) == 0");
+assert_eq(approx(_tf_cubic_weight(2.0), 0, 0.0000001), 1, "cw(2) == 0");
+assert_eq(approx(_tf_cubic_weight(2.5), 0, 0.0000001), 1, "cw beyond 2 is 0");
+assert_eq(approx(_tf_cubic_weight(f64_neg(0.5)), 0.5625, 0.0000001), 1, "cw is even — cw(-0.5) == cw(0.5)");
+
+# Catmull-Rom OVERSHOOTS: cw(1.5) is NEGATIVE. That is why bicubic needs the
+# [0,255] clamp — a sharp edge produces out-of-range intermediates.
+assert_eq(approx(_tf_cubic_weight(1.5), f64_neg(0.0625), 0.0000001), 1, "cw(1.5) == -0.0625 (the overshoot)");
+assert_eq(f64_lt(_tf_cubic_weight(1.5), 0), 1, "the overshoot lobe really is negative");
+
+# Partition of unity: the four taps sum to exactly 1 at any offset. This one
+# identity pins all three branches and both coefficient sets at once — a
+# mistyped constant breaks it immediately.
+fn wsum(f) {
+    var s: f64 = 0.0;
+    var i = 0 - 1;
+    while (i <= 2) {
+        var w: f64 = _tf_cubic_weight(f64_sub(f, f64_from(i)));
+        s = s + w;
+        i = i + 1;
+    }
+    return s;
+}
+assert_eq(approx(wsum(0.0), F64_ONE, 0.0000000001), 1, "4 cubic weights sum to 1 at f=0");
+assert_eq(approx(wsum(0.25), F64_ONE, 0.0000000001), 1, "4 cubic weights sum to 1 at f=0.25");
+assert_eq(approx(wsum(0.5), F64_ONE, 0.0000000001), 1, "4 cubic weights sum to 1 at f=0.5");
+assert_eq(approx(wsum(0.75), F64_ONE, 0.0000000001), 1, "4 cubic weights sum to 1 at f=0.75");
+
+# ================================================================
+# Affine
+# ================================================================
+test_group("affine");
+
+var idm = affine_identity();
+assert_eq(affine_is_identity(idm), 1, "identity is identity");
+assert_eq(approx(affine_a(idm), F64_ONE, 0.0000001), 1, "identity a == 1");
+assert_eq(approx(affine_b(idm), 0, 0.0000001), 1, "identity b == 0");
+
+var pt = fl_alloc(16);
+var pt2 = fl_alloc(16);
+affine_apply(idm, 3.0, 4.0, pt);
+assert_eq(approx(load64(pt), 3.0, 0.0000001), 1, "identity maps x to x");
+assert_eq(approx(load64(pt + 8), 4.0, 0.0000001), 1, "identity maps y to y");
+
+var tr = affine_translate(10.0, 20.0);
+assert_eq(affine_is_identity(tr), 0, "a translation is not identity");
+affine_apply(tr, 1.0, 2.0, pt);
+assert_eq(approx(load64(pt), 11.0, 0.0000001), 1, "translate x");
+assert_eq(approx(load64(pt + 8), 22.0, 0.0000001), 1, "translate y");
+
+var sc = affine_scale(2.0, 3.0);
+affine_apply(sc, 4.0, 5.0, pt);
+assert_eq(approx(load64(pt), 8.0, 0.0000001), 1, "scale x");
+assert_eq(approx(load64(pt + 8), 15.0, 0.0000001), 1, "scale y");
+
+# A quarter turn sends (1,0) to (0,1). This pins the SIGN convention on b and c:
+# transposing them rotates the other way and would still look plausible.
+var rot = affine_rotate(f64_div(F64_PI, 2.0));
+affine_apply(rot, F64_ONE, 0.0, pt);
+assert_eq(approx(load64(pt), 0, 0.000001), 1, "rotate 90deg: x of (1,0) -> 0");
+assert_eq(approx(load64(pt + 8), F64_ONE, 0.000001), 1, "rotate 90deg: y of (1,0) -> 1");
+
+# A rotation has non-zero b AND c, and the two have OPPOSITE signs. Probing
+# only (1,0) exercises a and b; (0,1) is what pins c. Without this second probe,
+# flipping the sign of c — i.e. rotating the wrong way — passes.
+affine_apply(rot, 0.0, F64_ONE, pt);
+assert_eq(approx(load64(pt), f64_neg(F64_ONE), 0.000001), 1, "rotate 90deg: x of (0,1) -> -1 (pins the sign of c)");
+assert_eq(approx(load64(pt + 8), 0, 0.000001), 1, "rotate 90deg: y of (0,1) -> 0");
+
+# Inverse round-trip on a matrix with non-zero b and c. The earlier round-trip
+# used translate-then-scale, where b == c == 0, so the sign of the off-diagonal
+# terms in affine_inverse was never exercised — dropping the negation on b
+# passed the whole suite.
+var skew = affine_new(2.0, 0.5, f64_neg(0.25), 3.0, 7.0, f64_neg(2.0));
+var skinv = affine_inverse(skew);
+assert_eq(skinv != 0, 1, "a skewed affine inverts");
+affine_apply(skew, 1.5, f64_neg(2.5), pt);
+affine_apply(skinv, load64(pt), load64(pt + 8), pt2);
+assert_eq(approx(load64(pt2), 1.5, 0.000001), 1, "skew inverse recovers x (pins the sign of b)");
+assert_eq(approx(load64(pt2 + 8), f64_neg(2.5), 0.000001), 1, "skew inverse recovers y (pins the sign of c)");
+affine_free(skew); affine_free(skinv);
+
+# Composition order: `then` applies the OTHER first. scale-then-translate must
+# translate by the raw amount, not the scaled amount.
+var comp = affine_then(tr, sc);
+affine_apply(comp, 1.0, 1.0, pt);
+assert_eq(approx(load64(pt), 12.0, 0.0000001), 1, "then(): scale first, then translate -> x = 1*2+10");
+assert_eq(approx(load64(pt + 8), 23.0, 0.0000001), 1, "then(): y = 1*3+20");
+
+# Inverse round-trip on a non-trivial matrix.
+var inv = affine_inverse(comp);
+assert_eq(inv != 0, 1, "a non-singular affine inverts");
+affine_apply(inv, load64(pt), load64(pt + 8), pt2);
+assert_eq(approx(load64(pt2), F64_ONE, 0.000001), 1, "inverse recovers x");
+assert_eq(approx(load64(pt2 + 8), F64_ONE, 0.000001), 1, "inverse recovers y");
+
+# Singular matrices report failure rather than producing infinities.
+var sing = affine_new(1.0, 2.0, 2.0, 4.0, 0.0, 0.0);
+assert_eq(affine_inverse(sing), 0, "a singular affine returns 0 (Rust's None)");
+var zero = affine_new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+assert_eq(affine_inverse(zero), 0, "the zero matrix is singular");
+
+affine_free(idm); affine_free(tr); affine_free(sc); affine_free(rot);
+affine_free(comp); affine_free(inv); affine_free(sing); affine_free(zero);
+
+# ================================================================
+# crop
+# ================================================================
+test_group("crop");
+
+var src4 = pixel_buffer_zeroed(4, 4, PF_RGBA8, err);
+var i = 0;
+while (i < 16) { put(src4, i, i * 10, i, 255 - i, 200); i = i + 1; }
+
+var cr = crop(src4, 1, 1, 3, 3, err);
+assert_eq(load64(err), RG_ERR_NONE, "crop succeeds");
+assert_eq(pixel_buffer_width(cr), 2, "crop width");
+assert_eq(pixel_buffer_height(cr), 2, "crop height");
+# Source pixel (1,1) is linear index 5.
+assert_eq(chan(cr, 0, 0), 50, "crop copies from the right offset");
+assert_eq(chan(cr, 1, 0), 60, "crop second pixel of the first row");
+# Source (1,2) is index 9 — the crop's second row must skip the source stride.
+assert_eq(chan(cr, 2, 0), 90, "crop advances by the SOURCE stride, not the destination");
+assert_eq(chan(cr, 0, 3), 200, "crop preserves alpha");
+pixel_buffer_free(cr);
+
+# Clamping and degenerate rectangles.
+var cbig = crop(src4, 0, 0, 99, 99, err);
+assert_eq(pixel_buffer_width(cbig), 4, "crop clamps right to the buffer width");
+pixel_buffer_free(cbig);
+
+var cempty = crop(src4, 2, 2, 2, 2, err);
+assert_eq(pixel_buffer_width(cempty), 0, "a zero-area crop gives a 0-wide buffer");
+assert_eq(pixel_buffer_height(cempty), 0, "a zero-area crop gives a 0-high buffer");
+pixel_buffer_free(cempty);
+
+# An INVERTED rectangle must clamp to empty, not produce a negative stride.
+# An inverted rectangle clamps to empty. Asserting only the width is not enough:
+# without the ordering guard, ow goes NEGATIVE, crop returns 0, and reading a
+# width off a null pointer is undefined rather than 0. Assert the handle and the
+# error code, which is what actually distinguishes the two outcomes.
+var cinv = crop(src4, 3, 3, 1, 1, err);
+assert_eq(cinv != 0, 1, "an inverted crop still returns a real buffer, not 0");
+assert_eq(load64(err), RG_ERR_NONE, "an inverted crop is not an error");
+assert_eq(pixel_buffer_width(cinv), 0, "an inverted crop rectangle yields empty");
+assert_eq(pixel_buffer_height(cinv), 0, "an inverted crop yields 0 height too");
+pixel_buffer_free(cinv);
+
+# Invert ONE axis at a time. With both inverted, whichever guard still fires
+# collapses that dimension to 0 and short-circuits into the empty path, masking
+# the other — so the fully-inverted case above cannot distinguish them. Same
+# masking shape as the resize zero-dimension guards.
+var cinvx = crop(src4, 3, 1, 1, 3, err);
+assert_eq(cinvx != 0, 1, "an x-inverted crop returns a real buffer (pins the right/left guard)");
+assert_eq(load64(err), RG_ERR_NONE, "an x-inverted crop is not an error");
+assert_eq(pixel_buffer_width(cinvx), 0, "an x-inverted crop is 0 wide");
+assert_eq(pixel_buffer_height(cinvx), 0, "an x-inverted crop collapses to 0x0");
+pixel_buffer_free(cinvx);
+
+var cinvy = crop(src4, 1, 3, 3, 1, err);
+assert_eq(cinvy != 0, 1, "a y-inverted crop returns a real buffer (pins the bottom/top guard)");
+assert_eq(load64(err), RG_ERR_NONE, "a y-inverted crop is not an error");
+assert_eq(pixel_buffer_height(cinvy), 0, "a y-inverted crop is 0 high");
+pixel_buffer_free(cinvy);
+
+var argb = pixel_buffer_zeroed(2, 2, PF_ARGB8, err);
+assert_eq(crop(argb, 0, 0, 1, 1, err), 0, "crop rejects a non-Rgba8 buffer");
+assert_eq(load64(err), RG_ERR_INVALID_FORMAT, "crop reports INVALID_FORMAT");
+
+# ================================================================
+# resize
+# ================================================================
+test_group("resize");
+
+# Nearest on a 2x2 with distinct pixels. Rust's index is `dx * sw / dw`
+# (integer), so a 2x2 -> 4x4 maps dx 0,1 -> 0 and dx 2,3 -> 1.
+var s22 = pixel_buffer_zeroed(2, 2, PF_RGBA8, err);
+put(s22, 0, 0, 0, 0, 255);
+put(s22, 1, 100, 0, 0, 255);
+put(s22, 2, 200, 0, 0, 255);
+put(s22, 3, 255, 0, 0, 255);
+
+# (The `.min(sh - 1)` clamp inside the nearest path is UNREACHABLE for every
+# dimension pair: the index is (dy * sh) / new_h with dy <= new_h - 1, so it is
+# at most sh - sh/new_h, always below sh. Verified exhaustively over small
+# (sh, new_h) pairs. It is kept because Rust has it, and no assertion here can
+# exercise it — the same situation as histogram's .min(bins - 1).)
+var rn = resize(s22, 4, 4, SF_NEAREST, err);
+assert_eq(load64(err), RG_ERR_NONE, "nearest resize succeeds");
+assert_eq(pixel_buffer_width(rn), 4, "resize width");
+assert_eq(chan(rn, 0, 0), 0, "nearest (0,0) samples source (0,0)");
+assert_eq(chan(rn, 1, 0), 0, "nearest dx=1 still samples source x=0");
+assert_eq(chan(rn, 2, 0), 100, "nearest dx=2 samples source x=1");
+assert_eq(chan(rn, 3, 0), 100, "nearest dx=3 samples source x=1");
+pixel_buffer_free(rn);
+
+# Bilinear 2x2 -> 3x3, oracle-computed. Corners must reproduce the source
+# exactly, because the (n-1)/(m-1) ratio pins the endpoints.
+var rb = resize(s22, 3, 3, SF_BILINEAR, err);
+assert_eq(load64(err), RG_ERR_NONE, "bilinear resize succeeds");
+assert_eq(chan(rb, 0, 0), 0, "bilinear corner (0,0) is exact");
+assert_eq(chan(rb, 2, 0), 100, "bilinear corner (2,0) is exact");
+assert_eq(chan(rb, 6, 0), 200, "bilinear corner (0,2) is exact");
+assert_eq(chan(rb, 8, 0), 255, "bilinear corner (2,2) is exact");
+# Midpoints and centre, from the oracle: row0 = [0,50,100], row1 = [100,138,177].
+assert_eq(chan(rb, 1, 0), 50, "bilinear top midpoint is 50");
+assert_eq(chan(rb, 3, 0), 100, "bilinear left midpoint is 100");
+# The centre is 138.75 and `as u8` TRUNCATES — 138, not 139. A +0.5 rounding
+# term here would give 139, so this pins the truncation.
+assert_eq(chan(rb, 4, 0), 138, "bilinear centre truncates 138.75 to 138, not 139");
+pixel_buffer_free(rb);
+
+# A 1:1 resize is the identity for every filter — an identity assertion that
+# catches a mis-scaled ratio, which a round-trip would not.
+var rid = resize(s22, 2, 2, SF_BILINEAR, err);
+assert_eq(chan(rid, 0, 0), 0, "1:1 bilinear preserves pixel 0");
+assert_eq(chan(rid, 1, 0), 100, "1:1 bilinear preserves pixel 1");
+assert_eq(chan(rid, 3, 0), 255, "1:1 bilinear preserves pixel 3");
+pixel_buffer_free(rid);
+
+var ridc = resize(s22, 2, 2, SF_BICUBIC, err);
+assert_eq(chan(ridc, 0, 0), 0, "1:1 bicubic preserves pixel 0");
+assert_eq(chan(ridc, 3, 0), 255, "1:1 bicubic preserves pixel 3");
+pixel_buffer_free(ridc);
+
+# A uniform image through bicubic: the corners come back exact, the interior
+# does NOT, and that is correct Rust behaviour rather than a defect.
+#
+# The four cubic weights sum to exactly 1.0 in isolation, so "a uniform image is
+# unchanged" looks like a safe identity — it is not. After sixteen
+# multiply-accumulates at the 3/7 ratios this resize produces, the interior
+# accumulator lands on 76.99999999999996, and `as u8` TRUNCATES it to 76. The
+# oracle confirms Rust produces exactly the same 76. Asserting 77 here would
+# have meant "fixing" correct code, so both values are pinned deliberately.
+var suni = pixel_buffer_zeroed(4, 4, PF_RGBA8, err);
+bv_fill(pixel_buffer_bv(suni), 77);
+var runi = resize(suni, 8, 8, SF_BICUBIC, err);
+assert_eq(chan(runi, 0, 0), 77, "bicubic corner is exact at 77 (accumulator lands on 77.0)");
+assert_eq(chan(runi, 27, 0), 76, "bicubic interior truncates 76.99999999999996 to 76, matching Rust");
+assert_eq(chan(runi, 63, 0), 77, "bicubic last pixel is exact at 77");
+pixel_buffer_free(runi);
+
+# Degenerate dimensions. 1.0.0 added the SOURCE half of this guard: a 0-width
+# source previously underflowed `sh - 1` as a usize and indexed wild.
+var rz = resize(s22, 0, 4, SF_BILINEAR, err);
+assert_eq(pixel_buffer_width(rz), 0, "a 0-width target gives a 0x0 buffer, not an error");
+assert_eq(load64(err), RG_ERR_NONE, "a 0-width target is not an error");
+pixel_buffer_free(rz);
+
+# Each zero guard needs its OWN case. A 0x0 source is caught by whichever guard
+# runs first, so removing the width guard alone still passed — the height guard
+# covered for it. A 0-wide-but-4-high source isolates the width guard, and vice
+# versa. This is the 1.0.0 usize-underflow fix.
+var s0w = pixel_buffer_zeroed(0, 4, PF_RGBA8, err);
+var rzw = resize(s0w, 4, 4, SF_BILINEAR, err);
+assert_eq(pixel_buffer_width(rzw), 0, "a 0-WIDTH source (height 4) gives a 0x0 buffer");
+pixel_buffer_free(rzw); pixel_buffer_free(s0w);
+
+var s0h = pixel_buffer_zeroed(4, 0, PF_RGBA8, err);
+var rzh = resize(s0h, 4, 4, SF_BILINEAR, err);
+assert_eq(pixel_buffer_width(rzh), 0, "a 0-HEIGHT source (width 4) gives a 0x0 buffer");
+pixel_buffer_free(rzh); pixel_buffer_free(s0h);
+
+var s0 = pixel_buffer_zeroed(0, 0, PF_RGBA8, err);
+var rz2 = resize(s0, 4, 4, SF_BILINEAR, err);
+assert_eq(pixel_buffer_width(rz2), 0, "a 0-dimension SOURCE gives a 0x0 buffer (1.0.0 fix)");
+assert_eq(load64(err), RG_ERR_NONE, "a 0-dimension source is not an error");
+pixel_buffer_free(rz2);
+pixel_buffer_free(s0);
+
+assert_eq(resize(s22, 2, 2, 99, err), 0, "resize rejects an invalid filter");
+assert_eq(load64(err), RG_ERR_INVALID_PARAMETER, "invalid filter is INVALID_PARAMETER");
+assert_eq(resize(argb, 2, 2, SF_NEAREST, err), 0, "resize rejects non-Rgba8");
+
+# ================================================================
+# flips
+# ================================================================
+test_group("flips");
+
+var fh = flip_horizontal(src4, err);
+assert_eq(load64(err), RG_ERR_NONE, "flip_horizontal succeeds");
+# Row 0 of src4 is indices 0..3 with r = 0,10,20,30.
+assert_eq(chan(fh, 0, 0), 30, "flip_h reverses within the row");
+assert_eq(chan(fh, 3, 0), 0, "flip_h moves the first pixel to the end");
+assert_eq(chan(fh, 4, 0), 70, "flip_h reverses the second row too");
+# A double flip is the identity — but only if the row is reversed, not the
+# whole buffer, so pair it with the assertions above.
+var fh2 = flip_horizontal(fh, err);
+var k = 0;
+var same = 1;
+while (k < 16) {
+    if (chan(fh2, k, 0) != chan(src4, k, 0)) { same = 0; }
+    k = k + 1;
+}
+assert_eq(same, 1, "flip_h twice is the identity");
+pixel_buffer_free(fh); pixel_buffer_free(fh2);
+
+var fv = flip_vertical(src4, err);
+assert_eq(load64(err), RG_ERR_NONE, "flip_vertical succeeds");
+# Row 3 (indices 12..15) becomes row 0, and the ROW ORDER within it is kept.
+assert_eq(chan(fv, 0, 0), 120, "flip_v moves the last row first");
+assert_eq(chan(fv, 1, 0), 130, "flip_v preserves left-to-right order within a row");
+assert_eq(chan(fv, 12, 0), 0, "flip_v moves the first row last");
+pixel_buffer_free(fv);
+
+assert_eq(flip_horizontal(argb, err), 0, "flip_h rejects non-Rgba8");
+assert_eq(flip_vertical(argb, err), 0, "flip_v rejects non-Rgba8");
+
+# ================================================================
+# affine_transform
+# ================================================================
+test_group("affine transform");
+
+var idt = affine_identity();
+var at = affine_transform(src4, idt, 4, 4, SF_NEAREST, err);
+assert_eq(load64(err), RG_ERR_NONE, "affine_transform succeeds");
+# Identity + centre sampling reproduces the source exactly.
+var m = 0;
+var idsame = 1;
+while (m < 16) {
+    if (chan(at, m, 0) != chan(src4, m, 0)) { idsame = 0; }
+    m = m + 1;
+}
+assert_eq(idsame, 1, "an identity affine reproduces the source pixel for pixel");
+pixel_buffer_free(at);
+
+# A translation by +1 pixel shifts content and leaves the exposed column at
+# transparent black, because out-of-source pixels are SKIPPED, not clamped.
+var tr1 = affine_translate(1.0, 0.0);
+var at2 = affine_transform(src4, tr1, 4, 4, SF_NEAREST, err);
+assert_eq(chan(at2, 1, 0), 0, "translate +1 moves source pixel 0 to index 1");
+assert_eq(chan(at2, 0, 3), 0, "the exposed column is transparent black (alpha 0)");
+pixel_buffer_free(at2);
+
+var singt = affine_new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+assert_eq(affine_transform(src4, singt, 4, 4, SF_NEAREST, err), 0, "a singular affine is rejected");
+assert_eq(load64(err), RG_ERR_INVALID_PARAMETER, "singular affine is INVALID_PARAMETER");
+affine_free(singt); affine_free(tr1); affine_free(idt);
+
+# ================================================================
+# Perspective
+# ================================================================
+test_group("perspective");
+
+var pid = perspective_identity();
+assert_eq(approx(perspective_m(pid, 0, 0), F64_ONE, 0.0000001), 1, "identity m00 == 1");
+assert_eq(approx(perspective_m(pid, 2, 2), F64_ONE, 0.0000001), 1, "identity m22 == 1");
+assert_eq(approx(perspective_m(pid, 0, 1), 0, 0.0000001), 1, "identity m01 == 0");
+
+perspective_apply(pid, 5.0, 7.0, pt);
+assert_eq(approx(load64(pt), 5.0, 0.0000001), 1, "identity projects x to x");
+assert_eq(approx(load64(pt + 8), 7.0, 0.0000001), 1, "identity projects y to y");
+
+# The w ~ 0 sentinel. m20 = 1 with m22 = 0 makes w = x, so x = 0 is degenerate.
+# Rust returns (NaN, NaN) here; the NaN is what the caller's in-bounds test
+# turns into a skipped pixel.
+var degen = perspective_new(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0);
+perspective_apply(degen, 0.0, 5.0, pt);
+assert_eq(f64_eq(load64(pt), load64(pt)), 0, "w ~ 0 yields NaN in x (NaN != NaN)");
+assert_eq(f64_eq(load64(pt + 8), load64(pt + 8)), 0, "w ~ 0 yields NaN in y");
+# Away from the singular line it projects normally: w = x = 2.
+perspective_apply(degen, 2.0, 4.0, pt);
+assert_eq(approx(load64(pt), F64_ONE, 0.0000001), 1, "off the singular line, x/w == 2/2 == 1");
+assert_eq(approx(load64(pt + 8), 2.0, 0.0000001), 1, "off the singular line, y/w == 4/2 == 2");
+
+var pinv = perspective_inverse(pid);
+assert_eq(pinv != 0, 1, "the identity perspective inverts");
+assert_eq(approx(perspective_m(pinv, 0, 0), F64_ONE, 0.0000001), 1, "identity inverse is identity");
+perspective_free(pinv);
+
+var psing = perspective_new(1.0, 2.0, 3.0, 2.0, 4.0, 6.0, 3.0, 6.0, 9.0);
+assert_eq(perspective_inverse(psing), 0, "a rank-deficient perspective returns 0");
+perspective_free(psing);
+
+# ── from_quad: the 8x8 Gaussian elimination ──
+test_group("perspective from_quad");
+
+var sq = fl_alloc(64);
+store64(sq, 0.0);      store64(sq + 8, 0.0);
+store64(sq + 16, F64_ONE); store64(sq + 24, 0.0);
+store64(sq + 32, F64_ONE); store64(sq + 40, F64_ONE);
+store64(sq + 48, 0.0);  store64(sq + 56, F64_ONE);
+
+# Identity quad -> identity homography.
+var qid = perspective_from_quad(sq, sq);
+assert_eq(qid != 0, 1, "from_quad solves the identity case");
+assert_eq(approx(perspective_m(qid, 0, 0), F64_ONE, 0.000001), 1, "identity quad gives m00 == 1");
+assert_eq(approx(perspective_m(qid, 1, 1), F64_ONE, 0.000001), 1, "identity quad gives m11 == 1");
+assert_eq(approx(perspective_m(qid, 0, 1), 0, 0.000001), 1, "identity quad gives m01 == 0");
+assert_eq(approx(perspective_m(qid, 2, 0), 0, 0.000001), 1, "identity quad has no projective term");
+perspective_free(qid);
+
+# A KEYSTONE — genuinely projective, not affine, so m20/m21 must be non-zero.
+# Oracle: h = [4, 2, 0, 0, 8, 0, 0, 1]. The exact integers make this a sharp
+# test of the pivoting and back-substitution.
+var kq = fl_alloc(64);
+store64(kq, 0.0);       store64(kq + 8, 0.0);
+store64(kq + 16, 4.0);  store64(kq + 24, 0.0);
+store64(kq + 32, 3.0);  store64(kq + 40, 4.0);
+store64(kq + 48, F64_ONE); store64(kq + 56, 4.0);
+
+var kh = perspective_from_quad(sq, kq);
+assert_eq(kh != 0, 1, "from_quad solves the keystone case");
+assert_eq(approx(perspective_m(kh, 0, 0), 4.0, 0.000001), 1, "keystone m00 == 4");
+assert_eq(approx(perspective_m(kh, 0, 1), 2.0, 0.000001), 1, "keystone m01 == 2");
+assert_eq(approx(perspective_m(kh, 1, 1), 8.0, 0.000001), 1, "keystone m11 == 8");
+assert_eq(approx(perspective_m(kh, 2, 1), F64_ONE, 0.000001), 1, "keystone m21 == 1 (genuinely projective)");
+assert_eq(approx(perspective_m(kh, 2, 2), F64_ONE, 0.000001), 1, "m22 is pinned to 1");
+
+# The real test of a homography: it must map each source corner onto its
+# destination corner. Checking the matrix entries alone would not catch a
+# transposed row.
+var ci = 0;
+var corners_ok = 1;
+while (ci < 4) {
+    perspective_apply(kh, load64(sq + ci * 16), load64(sq + ci * 16 + 8), pt);
+    if (approx(load64(pt), load64(kq + ci * 16), 0.000001) == 0) { corners_ok = 0; }
+    if (approx(load64(pt + 8), load64(kq + ci * 16 + 8), 0.000001) == 0) { corners_ok = 0; }
+    ci = ci + 1;
+}
+assert_eq(corners_ok, 1, "from_quad maps all four source corners onto their destinations");
+perspective_free(kh);
+
+# A degenerate quad (three collinear points) has no solution.
+var badq = fl_alloc(64);
+store64(badq, 0.0);     store64(badq + 8, 0.0);
+store64(badq + 16, 0.0); store64(badq + 24, 0.0);
+store64(badq + 32, 0.0); store64(badq + 40, 0.0);
+store64(badq + 48, 0.0); store64(badq + 56, 0.0);
+assert_eq(perspective_from_quad(sq, badq), 0, "an all-zero destination quad is degenerate");
+
+# ================================================================
+# perspective_transform — the NaN skip
+# ================================================================
+test_group("perspective transform");
+
+var pt_id = perspective_identity();
+var ptr = perspective_transform(src4, pt_id, 4, 4, SF_NEAREST, err);
+assert_eq(load64(err), RG_ERR_NONE, "perspective_transform succeeds");
+var n = 0;
+var psame = 1;
+while (n < 16) {
+    if (chan(ptr, n, 0) != chan(src4, n, 0)) { psame = 0; }
+    n = n + 1;
+}
+assert_eq(psame, 1, "an identity perspective reproduces the source pixel for pixel");
+pixel_buffer_free(ptr);
+
+# THE 1.0.0 NaN FIX. This matrix is its own inverse's degenerate case: the
+# inverse sends a whole column to w ~ 0, so perspective_apply returns NaN
+# there. Those pixels must be SKIPPED (left transparent black).
+#
+# Written with a positive out-of-bounds test instead of the negated in-bounds
+# one, NaN would fail all four comparisons, the pixel would NOT be skipped, and
+# the sampler would index with a NaN-derived offset. The assertion below is that
+# the output is well-formed and the degenerate pixels are untouched — it fails
+# loudly if the negation is ever "simplified" away.
+# p is INVERTIBLE (det = -0.4), but its inverse is [[1,0,0],[0,1,0],[1,0,-2.5]],
+# whose w = x - 2.5 is exactly 0 at the sampled x = 2.5 — i.e. destination
+# column dx == 2 projects through a singular point. Chosen with an oracle: the
+# obvious hand-written attempt ([[1,0,0],[0,1,0],[1,0,0]]) has det == 0 and is
+# rejected up front, so it never reaches the NaN path at all.
+var pdeg = perspective_new(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.4, 0.0, f64_neg(0.4));
+var pdout = perspective_transform(src4, pdeg, 4, 4, SF_NEAREST, err);
+assert_eq(load64(err), RG_ERR_NONE, "a degenerate perspective still returns a buffer");
+assert_eq(pixel_buffer_width(pdout), 4, "the degenerate output has the requested size");
+# Every byte must be a legal byte — a NaN-indexed read would have written
+# garbage from outside the source, or trapped.
+var q = 0;
+var legal = 1;
+while (q < 64) {
+    var byte = load8(pixel_buffer_data(pdout) + q);
+    if (byte < 0) { legal = 0; }
+    if (byte > 255) { legal = 0; }
+    q = q + 1;
+}
+assert_eq(legal, 1, "no NaN-derived index corrupted the output (the 1.0.0 fix)");
+
+# The degenerate column really is skipped: pixel (2,0) is index 2 and must be
+# left at transparent black, while an in-bounds column beside it was written.
+assert_eq(chan(pdout, 2, 3), 0, "the w == 0 column is skipped, leaving alpha 0");
+assert_eq(chan(pdout, 3, 3), 200, "the neighbouring column was still sampled (alpha 200)");
+pixel_buffer_free(pdout);
+perspective_free(pdeg);
+
+var psing2 = perspective_new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+assert_eq(perspective_transform(src4, psing2, 4, 4, SF_NEAREST, err), 0, "a singular perspective is rejected");
+assert_eq(load64(err), RG_ERR_INVALID_PARAMETER, "singular perspective is INVALID_PARAMETER");
+perspective_free(psing2);
+
+assert_eq(perspective_transform(argb, pt_id, 2, 2, SF_NEAREST, err), 0, "perspective rejects non-Rgba8");
+assert_eq(perspective_transform(src4, pt_id, 2, 2, 99, err), 0, "perspective rejects an invalid filter");
+
+perspective_free(pt_id);
+perspective_free(pid);
+perspective_free(degen);
+pixel_buffer_free(src4);
+pixel_buffer_free(s22);
+pixel_buffer_free(suni);
+pixel_buffer_free(argb);
+fl_free(sq); fl_free(kq); fl_free(badq); fl_free(pt); fl_free(pt2); fl_free(err);
+
+var exit_code = assert_summary();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

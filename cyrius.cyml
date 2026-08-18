@@ -34,6 +34,7 @@ modules = [
     "src/color.cyr",
     "src/composite.cyr",
     "src/histogram.cyr",
+    "src/transform.cyr",
 ]
 
 # Kept deliberately minimal: add a module here only when a ported `src/*.cyr`
