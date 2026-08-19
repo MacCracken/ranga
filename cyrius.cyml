@@ -92,6 +92,7 @@ modules = [
     "src/convert.cyr",
     "src/icc.cyr",
     "src/gpu_spirv.cyr",
+    "src/gpu_kernels.cyr",
     "src/gpu_context.cyr",
     "src/gpu_buffer.cyr",
 ]

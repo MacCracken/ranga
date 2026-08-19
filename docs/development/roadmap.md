@@ -381,6 +381,48 @@ dropping its NUL padding word (`"main"` is TWO words, not one — four chars plu
 a mandatory terminator), and each of the four interning keys being ignored,
 which silently declares a duplicate type where SPIR-V demands exactly one.
 
+#### ✅ The five per-pixel kernels
+
+`src/gpu_kernels.cyr` (347 lines), `tests/gpu_kernels.tcyr` (26 assertions).
+`invert`, `grayscale`, `fade`, `brightness_contrast`, `saturation` — all five
+**HW-verified on AMD Cezanne against an f32 oracle, byte-exact on every pixel**.
+
+⚠ **THE BRANCH SHAPE IS NOT INTERCHANGEABLE, AND THE FAILURE IS SILENT.** The
+WGSL guard is `if idx >= count { return; }` followed by the body. Emitted that
+way — return inside the selection, body after the merge label — the module
+compiles to a **non-zero shader handle** and dispatches with **rc = 0**, and
+writes nothing whatsoever. There is no diagnostic anywhere. mabda's own
+`programs/native_spirv_divergent_if_e2e.cyr` is the reference shape: the body
+goes in the THEN block, that block ends with `OpBranch` to the merge, and the
+merge block holds the function's only `OpReturn`. So the guard is inverted to
+`if (count > idx) { body } return`. The comparison is `count > idx` rather than
+`idx < count` because mabda's binop map covers UGreaterThan and
+UGreaterThanEqual but **not ULessThan**.
+
+⚠ **No `OpBitcast` in the supported set.** A params word that must be read both
+as a `count` and as an f32 needs two differently-typed arrays over the *same*
+memory, so the params buffer is bound twice — three bindings, two buffers.
+
+⚠ **The oracle must be f32, not f64.** Computed in f64, the expected values
+agree on most inputs and then disagree on the ones near a rounding boundary —
+brightness/contrast on two of five pixels — which reads exactly like a kernel
+bug and is not one.
+
+⚠ **grayscale disagrees with ranga's CPU path, and did in Rust too.** The CPU
+uses BT.601 integer weights (77/150/29 >> 8); the GPU shader uses BT.709 floats
+(0.2126/0.7152/0.0722). On (200, 100, 50) that is 0x7C against 0x76. Both are
+preserved as-is — reconciling either side would change output the Rust line
+produced. The test asserts the gap explicitly so it reads as inherited rather
+than accidental.
+
+**Mutation testing: 15 mutants, 15 killed.** Three needed better inputs rather
+than better assertions: the clamps inside `pack_rgba` are unreachable from any
+kernel that clamps in its own maths, so `fade` at 2.0 (mid-grey lands on exactly
+256, whose low byte is 0 — the brightest input would come out BLACK) and at -1.0
+drive them; and the bounds guard's off-by-one is invisible without a sentinel
+element past `count`, since the buffer is 64 KiB-aligned and a one-past write
+lands in slack.
+
 ### M6 — GPU (original plan)
 
 `gpu_shaders`, `gpu_buffer`, `gpu_context`, `gpu_pipeline` against mabda's

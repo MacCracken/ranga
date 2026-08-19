@@ -586,3 +586,70 @@ fn spv_finish(s, out_ptr) {
     store64(out_ptr, out);
     return total * 4;
 }
+
+# ── GLSL.std.450 extended instructions ────────
+#
+# mabda's lowerer handles exactly five: Sqrt, Floor, FAbs, FMin, FMax. Anything
+# else in the extended set reaches GFX9 selection and fails there, so the
+# emitter deliberately exposes only these.
+
+#must_use
+fn spv_ext_unary(s, ty, glsl_op, x) {
+    var id = spv_id(s);
+    var ops[40];
+    store64(&ops, ty);
+    store64(&ops + 8, id);
+    store64(&ops + 16, load64(s + 56));
+    store64(&ops + 24, glsl_op);
+    store64(&ops + 32, x);
+    spv_emit(s, SPIRV_OP_EXT_INST, &ops, 5);
+    return id;
+}
+
+#must_use
+fn spv_ext_binary(s, ty, glsl_op, x, y) {
+    var id = spv_id(s);
+    var ops[48];
+    store64(&ops, ty);
+    store64(&ops + 8, id);
+    store64(&ops + 16, load64(s + 56));
+    store64(&ops + 24, glsl_op);
+    store64(&ops + 32, x);
+    store64(&ops + 40, y);
+    spv_emit(s, SPIRV_OP_EXT_INST, &ops, 6);
+    return id;
+}
+
+# ── Branching ────────
+
+fn spv_selection_merge(s, merge_label) {
+    var ops[16];
+    store64(&ops, merge_label);
+    store64(&ops + 8, 0);
+    return spv_emit(s, SPIRV_OP_SELECTION_MERGE, &ops, 2);
+}
+
+fn spv_branch_conditional(s, cond, t, f) {
+    var ops[24];
+    store64(&ops, cond);
+    store64(&ops + 8, t);
+    store64(&ops + 16, f);
+    return spv_emit(s, SPIRV_OP_BRANCH_CONDITIONAL, &ops, 3);
+}
+
+fn spv_label(s, id) {
+    var ops[8];
+    store64(&ops, id);
+    return spv_emit(s, SPIRV_OP_LABEL, &ops, 1);
+}
+
+fn spv_branch(s, target) {
+    var ops[8];
+    store64(&ops, target);
+    return spv_emit(s, SPIRV_OP_BRANCH, &ops, 1);
+}
+
+fn spv_return(s) {
+    var ops[8];
+    return spv_emit(s, SPIRV_OP_RETURN, &ops, 0);
+}

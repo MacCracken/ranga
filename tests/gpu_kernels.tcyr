@@ -1,0 +1,239 @@
+# gpu_kernels.tcyr — the per-pixel compute kernels, as SPIR-V, on real hardware
+# Ported from rust-old/src/gpu/shaders.rs.
+#
+# ⚠ THE ORACLE MUST BE f32, NOT f64. Every expected value below was computed in
+# Python with each intermediate rounded through a 32-bit float, because that is
+# what the GPU does. An f64 oracle agrees on most inputs and then disagrees on
+# the ones near a rounding boundary — brightness/contrast on two of these five
+# pixels — which reads exactly like a kernel bug and is not one.
+
+include "src/error.cyr"
+include "src/gpu_spirv.cyr"
+include "src/gpu_kernels.cyr"
+include "src/bytevec.cyr"
+include "src/pixel.cyr"
+include "src/gpu_context.cyr"
+include "src/gpu_buffer.cyr"
+
+alloc_init();
+
+var err = fl_alloc(8);
+var outp = fl_alloc(8);
+var NPX = 5;
+
+# Five pixels chosen to exercise the corners and the middle: opaque black,
+# opaque white, a dark asymmetric colour with partial alpha, a saturated colour,
+# and mid-grey at half alpha. Every channel differs from every other in at least
+# one of them, so a kernel that crosses two channels cannot pass.
+fn seed(host) {
+    store32(host + 0,  0xFF000000);
+    store32(host + 4,  0xFFFFFFFF);
+    store32(host + 8,  0x281E140A);
+    store32(host + 12, 0xFF3264C8);
+    store32(host + 16, 0x80808080);
+    return 0;
+}
+
+# Build, compile, dispatch, read back. Returns the result buffer, or 0.
+fn run_kernel(m, s, p1, p2) {
+    var n = spv_finish(s, outp);
+    if (n == 0) { return 0; }
+    var shmod = gpu_shader_module_create_spirv(m, load64(outp), n);
+    if (shmod == 0) { return 0; }
+
+    # NPX + 1 elements: the extra one is a SENTINEL past the range the kernel
+    # is told about. `count` stays NPX, so a correct guard never touches it and
+    # an off-by-one guard overwrites it. Without this the buffer is oversized by
+    # 64 KiB alignment and a one-past write is invisible.
+    var pbuf = gpu_buffer_create(m, (NPX + 1) * 4, 0x0080 | 0x0008 | 0x0004);
+    if (pbuf == 0) { return 0; }
+    var host = fl_alloc((NPX + 1) * 4);
+    seed(host);
+    store32(host + NPX * 4, 0x5A5A5A5A);
+    gpu_buffer_write(m, pbuf, 0, host, (NPX + 1) * 4);
+
+    var prm = gpu_buffer_create(m, 16, 0x0080 | 0x0008 | 0x0004);
+    var ph = fl_alloc(16);
+    store32(ph + 0, NPX);
+    store32(ph + 4, p1);
+    store32(ph + 8, p2);
+    store32(ph + 12, 0);
+    gpu_buffer_write(m, prm, 0, ph, 16);
+
+    # Three bindings, two buffers: the params VA is bound twice, once as the u32
+    # view and once as the f32 view. mabda's supported opcode set has no
+    # OpBitcast, so a word that must be read as both a count and a float needs
+    # two differently-typed arrays over the same memory.
+    var bp[56];
+    store64(&bp, 3);
+    native_buf_pair_write(&bp + 8,  load64(pbuf + NATIVE_BUF_FIELD_HANDLE), load64(pbuf + NATIVE_BUF_FIELD_VA));
+    native_buf_pair_write(&bp + 24, load64(prm + NATIVE_BUF_FIELD_HANDLE), load64(prm + NATIVE_BUF_FIELD_VA));
+    native_buf_pair_write(&bp + 40, load64(prm + NATIVE_BUF_FIELD_HANDLE), load64(prm + NATIVE_BUF_FIELD_VA));
+    if (gpu_compute_dispatch(m, shmod, 1, 1, 1, &bp) != 0) { return 0; }
+
+    var back = fl_alloc((NPX + 1) * 4);
+    if (gpu_buffer_read(m, pbuf, 0, back, (NPX + 1) * 4) != 0) { return 0; }
+    gpu_buffer_release(m, pbuf);
+    gpu_buffer_release(m, prm);
+    return back;
+}
+
+fn check(got, want, name) {
+    if (got == 0) { assert_eq(0, 1, name); return 1; }
+    var bad = 0;
+    var i = 0;
+    while (i < NPX) {
+        if (load32(got + i * 4) != load32(want + i * 4)) { bad = bad + 1; }
+        i = i + 1;
+    }
+    assert_eq(bad, 0, name);
+    return 0;
+}
+
+# ================================================================
+test_group("per-pixel kernels");
+
+var ctx = gpu_context_new_amd(err);
+if (ctx == 0) {
+    assert_eq(load64(err) < 0, 1, "with no GPU, context creation reports an error");
+}
+
+if (ctx != 0) {
+    var m = gpu_context_mabda(ctx);
+    var want = fl_alloc(NPX * 4);
+
+    # --- invert: 1.0 - c, alpha untouched ---
+    var s1 = spv_new();
+    gk_invert(s1);
+    var r1 = run_kernel(m, s1, 0, 0);
+    store32(want + 0, 0xFFFFFFFF);
+    store32(want + 4, 0xFF000000);
+    store32(want + 8, 0x28E1EBF5);
+    store32(want + 12, 0xFFCD9B37);
+    store32(want + 16, 0x807F7F7F);
+    check(r1, want, "invert matches the f32 oracle on all five pixels");
+    # Alpha must survive every kernel — it is the channel the maths never
+    # touches, so a packing bug shows up here first.
+    assert_eq((load32(r1 + 8) >> 24) & 255, 0x28, "invert preserves partial alpha");
+    assert_eq((load32(r1 + 16) >> 24) & 255, 0x80, "and half alpha");
+
+    # --- grayscale: BT.709 luminance into all three channels ---
+    var s2 = spv_new();
+    gk_grayscale(s2);
+    var r2 = run_kernel(m, s2, 0, 0);
+    store32(want + 0, 0xFF000000);
+    store32(want + 4, 0xFFFFFFFF);
+    store32(want + 8, 0x28131313);
+    store32(want + 12, 0xFF767676);
+    store32(want + 16, 0x80808080);
+    check(r2, want, "grayscale matches the f32 oracle");
+    # R, G and B must come out equal — that is what makes it grey, and it is
+    # independent of whether the coefficients are right.
+    assert_eq(load32(r2 + 12) & 255, (load32(r2 + 12) >> 8) & 255, "grayscale R equals G");
+    assert_eq(load32(r2 + 12) & 255, (load32(r2 + 12) >> 16) & 255, "and R equals B");
+
+    # ⚠ This deliberately does NOT match ranga's CPU grayscale. The CPU path
+    # uses BT.601 integer weights (77/150/29 >> 8); this uses BT.709 floats.
+    # They are different colour standards and they disagreed in Rust too. 0x64
+    # under BT.601 gives 0x69, under BT.709 gives 0x76 — a 13-count gap that is
+    # a real inherited wart, not a porting error.
+    assert_eq(load32(r2 + 12) & 255, 0x76, "the BT.709 result is 0x76");
+    # The CPU's BT.601 weights on the same pixel (200, 100, 50):
+    # (77*200 + 150*100 + 29*50) >> 8 = 31850 >> 8 = 124 = 0x7C.
+    var bt601 = (77 * 0xC8 + 150 * 0x64 + 29 * 0x32) >> 8;
+    assert_eq(bt601, 0x7C, "the CPU's BT.601 luma on the same pixel is 0x7C");
+    assert_eq(bt601 == 0x76, 0, "which is SIX COUNTS from the GPU's BT.709 result");
+
+    # --- fade: multiply RGB by 0.5 ---
+    var s3 = spv_new();
+    gk_fade(s3);
+    var r3 = run_kernel(m, s3, f64_to_f32(0.5) & 0xFFFFFFFF, 0);
+    store32(want + 0, 0xFF000000);
+    store32(want + 4, 0xFF808080);
+    store32(want + 8, 0x280F0A05);
+    store32(want + 12, 0xFF193264);
+    store32(want + 16, 0x80404040);
+    check(r3, want, "fade at 0.5 matches the f32 oracle");
+    assert_eq((load32(r3 + 16) >> 24) & 255, 0x80, "fade leaves alpha alone");
+
+    # --- brightness/contrast: (c + 0.1 - 0.5) * 1.5 + 0.5, clamped ---
+    # The two pixels an f64 oracle gets wrong are in here.
+    var s4 = spv_new();
+    gk_brightness_contrast(s4);
+    var r4 = run_kernel(m, s4, f64_to_f32(0.1) & 0xFFFFFFFF, f64_to_f32(1.5) & 0xFFFFFFFF);
+    store32(want + 0, 0xFF000000);
+    store32(want + 4, 0xFFFFFFFF);
+    store32(want + 8, 0x28140500);
+    store32(want + 12, 0xFF327DFF);
+    store32(want + 16, 0x80A7A7A7);
+    check(r4, want, "brightness/contrast matches the f32 oracle");
+    # The clamp is load-bearing at both ends: white saturates high, and the
+    # dark pixel's blue channel is driven below zero and pinned.
+    assert_eq(load32(r4 + 4), 0xFFFFFFFF, "white clamps at the top");
+    # Pixel 2 is 0x281E140A — red 0x0A. (10/255 + 0.1 - 0.5) * 1.5 + 0.5 is
+    # negative, so red is the channel the low clamp catches; blue at 0x1E stays
+    # in range and comes out 0x14.
+    assert_eq(load32(r4 + 8) & 255, 0x00, "and a negative channel clamps at zero");
+    assert_eq((load32(r4 + 8) >> 16) & 255, 0x14, "while an in-range channel is untouched by the clamp");
+
+    # --- saturation: lum + f * (c - lum), f = 2.0 ---
+    var s5 = spv_new();
+    gk_saturation(s5);
+    var r5 = run_kernel(m, s5, f64_to_f32(2.0) & 0xFFFFFFFF, 0);
+    store32(want + 0, 0xFF000000);
+    store32(want + 4, 0xFFFFFFFF);
+    store32(want + 8, 0x28291501);
+    store32(want + 12, 0xFF0052FF);
+    store32(want + 16, 0x80808080);
+    check(r5, want, "saturation at 2.0 matches the f32 oracle");
+    # Mid-grey has zero chroma, so pushing saturation cannot move it — the one
+    # input where the answer is knowable without the oracle.
+    assert_eq(load32(r5 + 16), 0x80808080, "grey is a fixed point of saturation");
+    # And the saturated colour pushes further apart, not together.
+    assert_eq(load32(r5 + 12) & 255, 0xFF, "the strongest channel saturates upward");
+    assert_eq((load32(r5 + 12) >> 16) & 255, 0x00, "and the weakest is driven to zero");
+
+    # --- clamping at both ends of pack_rgba ---
+    # Nothing above reaches the clamp INSIDE pack: brightness/contrast and
+    # saturation clamp in their own maths first, and invert/grayscale/fade at
+    # 0.5 never leave [0, 1]. Fade has no clamp of its own, so driving it past
+    # the ends is the only way to exercise pack's.
+    var s6 = spv_new();
+    gk_fade(s6);
+    var r6 = run_kernel(m, s6, f64_to_f32(2.0) & 0xFFFFFFFF, 0);
+    store32(want + 0, 0xFF000000);
+    store32(want + 4, 0xFFFFFFFF);
+    store32(want + 8, 0x283C2814);
+    store32(want + 12, 0xFF64C8FF);
+    store32(want + 16, 0x80FFFFFF);
+    check(r6, want, "fade at 2.0 saturates rather than wrapping");
+    # Mid-grey doubled lands on exactly 256 before the clamp. Without it the
+    # conversion keeps 256, whose low byte is 0 — the brightest possible input
+    # would come out BLACK.
+    assert_eq(load32(r6 + 16) & 255, 0xFF, "a channel that reaches 256 clamps to 255, not 0");
+
+    var s7 = spv_new();
+    gk_fade(s7);
+    var r7 = run_kernel(m, s7, f64_to_f32(0 - 1.0) & 0xFFFFFFFF, 0);
+    store32(want + 0, 0xFF000000);
+    store32(want + 4, 0xFF000000);
+    store32(want + 8, 0x28000000);
+    store32(want + 12, 0xFF000000);
+    store32(want + 16, 0x80000000);
+    check(r7, want, "a negative fade factor clamps to zero rather than wrapping");
+    assert_eq(load32(r7 + 4) & 255, 0x00, "white faded by -1 is black, not garbage");
+
+    # --- the bounds guard is off-by-one sensitive ---
+    # `count` was NPX on every dispatch above, so index NPX must never be
+    # written. The guard is `count > idx`; with `count >= idx` the sentinel is
+    # clobbered by the one invocation at idx == NPX.
+    assert_eq(load32(r1 + NPX * 4), 0x5A5A5A5A, "invert left the sentinel past `count` untouched");
+    assert_eq(load32(r4 + NPX * 4), 0x5A5A5A5A, "and so did brightness/contrast");
+    assert_eq(load32(r6 + NPX * 4), 0x5A5A5A5A, "and fade");
+
+    gpu_context_free(ctx);
+}
+
+var exit_code = assert_summary();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

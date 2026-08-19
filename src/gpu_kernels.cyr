@@ -1,0 +1,318 @@
+# gpu_kernels.cyr -- ranga's per-pixel compute kernels as SPIR-V
+# Ported from rust-old/src/gpu/shaders.rs. Private prefix: _gk_
+#
+# Each kernel here is the SPIR-V form of one WGSL shader from the Rust line.
+# The WGSL is preserved verbatim in gpu_shaders.cyr for the wgpu fallback; this
+# module is what the NATIVE backends consume, since mabda's AMD and NVIDIA paths
+# accept SPIR-V and nothing else.
+#
+# THE SHARED SHAPE. Every per-pixel shader in the Rust is the same program:
+#
+#     let idx = gid.x;
+#     if idx >= params.count { return; }
+#     let px = unpack_rgba(pixels[idx]);
+#     ... per-kernel math on px.r/g/b, alpha untouched ...
+#     pixels[idx] = pack_rgba(...);
+#
+# `_gk_prologue` emits everything up to and including the bounds check, and
+# `_gk_epilogue` packs and stores. A kernel is then just its middle.
+#
+# ⚠ PARAMS ARE A STORAGE BUFFER, NOT A UNIFORM. The WGSL declares
+# `@binding(1) var<uniform> params`. mabda's native dispatch takes a flat array
+# of (handle, VA) pairs with no descriptor-type distinction, and its SPIR-V
+# lowerer resolves bindings through the same path either way, so params ride in
+# a second SSBO. Semantically identical, and it keeps one binding mechanism
+# instead of two. The WGSL fallback keeps the uniform, because wgpu does care.
+#
+#   Params buffer, 4 words: [count, p0, p1, p2]
+#   p0/p1/p2 are f32 bit patterns or u32 depending on the kernel.
+
+# The workgroup size every per-pixel kernel uses. The Rust WGSL says 256; this
+# keeps that, so the dispatch arithmetic matches the Rust line exactly.
+var GK_WORKGROUP = 256;
+
+# Ids the prologue hands to the kernel body. A flat record rather than separate
+# out-pointers, because there are nine of them.
+#
+#   +0  u32 type    +8  f32 type    +16 int32 type   +24 bool type
+#   +32 merge label                 +40 pixels ssbo  +48 params ssbo
+#   +56 idx (the u32 invocation index)
+#   +64 pixel element pointer       +72 the four unpacked channels r,g,b,a
+var _GK_CTX = 104;
+
+#must_use
+fn _gk_ctx_u32(k)   { return load64(k); }
+#must_use
+fn _gk_ctx_f32(k)   { return load64(k + 8); }
+#must_use
+fn _gk_ctx_r(k)     { return load64(k + 72); }
+#must_use
+fn _gk_ctx_g(k)     { return load64(k + 80); }
+#must_use
+fn _gk_ctx_b(k)     { return load64(k + 88); }
+#must_use
+fn _gk_ctx_a(k)     { return load64(k + 96); }
+
+# Load params word `w` as a raw u32.
+#must_use
+fn _gk_param_u32(s, k, w) {
+    var pu = spv_type_ptr(s, SPIRV_SC_STORAGE_BUFFER, load64(k));
+    var zero = spv_const(s, load64(k + 16), 0);
+    var wi = spv_const(s, load64(k + 16), w);
+    return spv_load(s, load64(k), spv_access_chain2(s, pu, load64(k + 48), zero, wi));
+}
+
+# Load params word `w) and reinterpret it as f32. The buffer is declared as
+# u32, so this is a bitcast — but SPIR-V has no OpBitcast in mabda's supported
+# set, so the params array is declared as f32 instead and indexed directly.
+#must_use
+fn _gk_param_f32(s, k, w) {
+    var pf = spv_type_ptr(s, SPIRV_SC_STORAGE_BUFFER, load64(k + 8));
+    var zero = spv_const(s, load64(k + 16), 0);
+    var wi = spv_const(s, load64(k + 16), w);
+    return spv_load(s, load64(k + 8), spv_access_chain2(s, pf, load64(k + 104), zero, wi));
+}
+
+# Emit the common prologue and return the context record.
+#
+# Binding 0 is the pixel buffer (u32 array), binding 1 the params (u32 array),
+# binding 2 the SAME params reinterpreted as f32 — see _gk_param_f32. Three
+# bindings, but only two distinct buffers: the caller passes the params VA
+# twice. That is the cost of having no OpBitcast.
+#must_use
+fn _gk_prologue(s) {
+    var k = fl_calloc(_GK_CTX + 8);
+    if (k == 0) { return 0; }
+
+    var voidt = spv_type_void(s);
+    var fnt = spv_type_fn(s, voidt);
+    var u32t = spv_type_int(s, 32, 0);
+    var i32t = spv_type_int(s, 32, 1);
+    var f32t = spv_type_float(s, 32);
+    var boolt = spv_type_bool(s);
+    store64(k, u32t);
+    store64(k + 8, f32t);
+    store64(k + 16, i32t);
+    store64(k + 24, boolt);
+
+    var gid = spv_builtin_global_id(s);
+    var pixels = spv_ssbo(s, u32t, 4, 0, 0);
+    var params_u = spv_ssbo(s, u32t, 4, 1, 0);
+    var params_f = spv_ssbo(s, f32t, 4, 2, 0);
+    store64(k + 40, pixels);
+    store64(k + 48, params_u);
+    store64(k + 104, params_f);
+
+    var entry = spv_id(s);
+    var iface[32];
+    store64(&iface, gid);
+    store64(&iface + 8, pixels);
+    store64(&iface + 16, params_u);
+    store64(&iface + 24, params_f);
+    spv_preamble(s, "main", GK_WORKGROUP, 1, 1, entry, &iface, 4);
+    spv_fn_begin(s, entry, voidt, fnt);
+
+    var v3 = spv_type_vec(s, u32t, 3);
+    var idx = spv_composite_extract(s, u32t, spv_load(s, v3, gid), 0);
+    store64(k + 56, idx);
+
+    # The bounds guard, as `if (idx < count) { work } return` rather than the
+    # WGSL's `if (idx >= count) { return; } work`.
+    #
+    # ⚠ THE SHAPE IS NOT INTERCHANGEABLE. mabda's lowerer cannot handle an
+    # OpReturn inside a selection: a module written the WGSL way COMPILES to a
+    # non-zero shader module and DISPATCHES with rc=0, and writes nothing at
+    # all. mabda's own `programs/native_spirv_divergent_if_e2e.cyr` is the
+    # reference — work in the then-block, then-block ends with OpBranch to the
+    # merge, merge block holds the sole OpReturn. That is reproduced exactly.
+    #
+    # The comparison is `count > idx`, not `idx < count`: mabda's binop map
+    # covers UGreaterThan and UGreaterThanEqual but NOT ULessThan, so the
+    # operands are swapped rather than the opcode changed.
+    var count = _gk_param_u32(s, k, 0);
+    var inb = spv_binop(s, SPIRV_OP_UGREATERTHAN, boolt, count, idx);
+    var lwork = spv_id(s);
+    var lmerge = spv_id(s);
+    store64(k + 32, lmerge);
+    spv_selection_merge(s, lmerge);
+    spv_branch_conditional(s, inb, lwork, lmerge);
+    spv_label(s, lwork);
+
+    # px = unpack_rgba(pixels[idx])
+    var pu = spv_type_ptr(s, SPIRV_SC_STORAGE_BUFFER, u32t);
+    var zero = spv_const(s, i32t, 0);
+    var ep = spv_access_chain2(s, pu, pixels, zero, idx);
+    store64(k + 64, ep);
+    var packed = spv_load(s, u32t, ep);
+
+    var mask = spv_const(s, u32t, 255);
+    var inv255 = spv_const_f32(s, f32t, f64_div(F64_ONE, 255.0));
+    var sh = 0;
+    while (sh < 4) {
+        var chan = packed;
+        if (sh > 0) {
+            chan = spv_binop(s, SPIRV_OP_SHR_LOGICAL, u32t, packed,
+                             spv_const(s, u32t, sh * 8));
+        }
+        var byte = spv_binop(s, SPIRV_OP_BITWISE_AND, u32t, chan, mask);
+        var fl = spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t, byte);
+        store64(k + 72 + sh * 8, spv_binop(s, SPIRV_OP_FMUL, f32t, fl, inv255));
+        sh = sh + 1;
+    }
+    return k;
+}
+
+# pack_rgba: clamp(round(c * 255), 0, 255) per channel, then OR the bytes back
+# together and store.
+#
+# ⚠ `round` is emitted as `floor(x + 0.5)`. GLSL.std.450 has a Round, but
+# mabda's lowerer handles only Sqrt/Floor/FAbs/FMin/FMax — anything else reaches
+# GFX9 selection and fails. For the non-negative values reaching this point,
+# floor(x + 0.5) is exactly Rust's round-half-away-from-zero.
+fn _gk_epilogue(s, k, r, g, b, a) {
+    var u32t = load64(k);
+    var f32t = load64(k + 8);
+    var c255 = spv_const_f32(s, f32t, 255.0);
+    var chalf = spv_const_f32(s, f32t, 0.5);
+    var czero = spv_const_f32(s, f32t, 0);
+    var chan[32];
+    store64(&chan, r);
+    store64(&chan + 8, g);
+    store64(&chan + 16, b);
+    store64(&chan + 24, a);
+
+    var acc = 0;
+    var i = 0;
+    while (i < 4) {
+        var v = load64(&chan + i * 8);
+        var scaled = spv_binop(s, SPIRV_OP_FMUL, f32t, v, c255);
+        var biased = spv_binop(s, SPIRV_OP_FADD, f32t, scaled, chalf);
+        var rounded = spv_ext_unary(s, f32t, GLSL_STD450_FLOOR, biased);
+        var lo = spv_ext_binary(s, f32t, GLSL_STD450_FMAX, rounded, czero);
+        var hi = spv_ext_binary(s, f32t, GLSL_STD450_FMIN, lo, c255);
+        var byte = spv_unop(s, SPIRV_OP_CONVERT_F_TO_S, u32t, hi);
+        if (i > 0) {
+            byte = spv_binop(s, SPIRV_OP_SHL, u32t, byte, spv_const(s, u32t, i * 8));
+        }
+        if (i == 0) { acc = byte; }
+        if (i > 0) { acc = spv_binop(s, SPIRV_OP_BITWISE_OR, u32t, acc, byte); }
+        i = i + 1;
+    }
+    spv_store(s, load64(k + 64), acc);
+    # Close the selection: branch to the merge block, which holds the only
+    # OpReturn in the function.
+    spv_branch(s, load64(k + 32));
+    spv_label(s, load64(k + 32));
+    spv_fn_end(s);
+    fl_free(k);
+    return RG_ERR_NONE;
+}
+
+# ── The kernels ────────
+
+# INVERT: 1.0 - c, alpha preserved.
+fn gk_invert(s) {
+    var k = _gk_prologue(s);
+    if (k == 0) { return RG_ERR_ALLOCATION; }
+    var f32t = _gk_ctx_f32(k);
+    var one = spv_const_f32(s, f32t, F64_ONE);
+    var r = spv_binop(s, SPIRV_OP_FSUB, f32t, one, _gk_ctx_r(k));
+    var g = spv_binop(s, SPIRV_OP_FSUB, f32t, one, _gk_ctx_g(k));
+    var b = spv_binop(s, SPIRV_OP_FSUB, f32t, one, _gk_ctx_b(k));
+    return _gk_epilogue(s, k, r, g, b, _gk_ctx_a(k));
+}
+
+# GRAYSCALE: BT.709 luminance into all three channels.
+#
+# ⚠ THIS DISAGREES WITH ranga's CPU `grayscale`, AND IT DID IN RUST TOO. The
+# CPU path uses the BT.601 integer weights 77/150/29 (>> 8), the GPU shader uses
+# BT.709 floats 0.2126/0.7152/0.0722. Those are different colour standards, so
+# the same image grayscaled on CPU and GPU differs by a few counts per pixel.
+# Preserved rather than reconciled: silently switching the GPU to BT.601 would
+# change output the Rust line produced, and switching the CPU would change far
+# more. Flagged in the roadmap as a genuine parity wart inherited from Rust.
+fn gk_grayscale(s) {
+    var k = _gk_prologue(s);
+    if (k == 0) { return RG_ERR_ALLOCATION; }
+    var f32t = _gk_ctx_f32(k);
+    var lum = _gk_luma709(s, f32t, _gk_ctx_r(k), _gk_ctx_g(k), _gk_ctx_b(k));
+    return _gk_epilogue(s, k, lum, lum, lum, _gk_ctx_a(k));
+}
+
+#must_use
+fn _gk_luma709(s, f32t, r, g, b) {
+    var wr = spv_const_f32(s, f32t, 0.2126);
+    var wg = spv_const_f32(s, f32t, 0.7152);
+    var wb = spv_const_f32(s, f32t, 0.0722);
+    var t0 = spv_binop(s, SPIRV_OP_FMUL, f32t, r, wr);
+    var t1 = spv_binop(s, SPIRV_OP_FMUL, f32t, g, wg);
+    var t2 = spv_binop(s, SPIRV_OP_FMUL, f32t, b, wb);
+    return spv_binop(s, SPIRV_OP_FADD, f32t, spv_binop(s, SPIRV_OP_FADD, f32t, t0, t1), t2);
+}
+
+# FADE: multiply RGB by a factor, alpha preserved. params[1] = factor.
+fn gk_fade(s) {
+    var k = _gk_prologue(s);
+    if (k == 0) { return RG_ERR_ALLOCATION; }
+    var f32t = _gk_ctx_f32(k);
+    var f = _gk_param_f32(s, k, 1);
+    var r = spv_binop(s, SPIRV_OP_FMUL, f32t, _gk_ctx_r(k), f);
+    var g = spv_binop(s, SPIRV_OP_FMUL, f32t, _gk_ctx_g(k), f);
+    var b = spv_binop(s, SPIRV_OP_FMUL, f32t, _gk_ctx_b(k), f);
+    return _gk_epilogue(s, k, r, g, b, _gk_ctx_a(k));
+}
+
+# BRIGHTNESS/CONTRAST: clamp((c + brightness - 0.5) * contrast + 0.5, 0, 1).
+# params[1] = brightness, params[2] = contrast.
+#
+# The 0.5 pivot means contrast scales around mid-grey rather than around black,
+# so the order of operations matters: subtracting the pivot BEFORE the multiply
+# and adding it back after is not the same as scaling then offsetting.
+fn gk_brightness_contrast(s) {
+    var k = _gk_prologue(s);
+    if (k == 0) { return RG_ERR_ALLOCATION; }
+    var f32t = _gk_ctx_f32(k);
+    var br = _gk_param_f32(s, k, 1);
+    var co = _gk_param_f32(s, k, 2);
+    var r = _gk_bc_one(s, f32t, _gk_ctx_r(k), br, co);
+    var g = _gk_bc_one(s, f32t, _gk_ctx_g(k), br, co);
+    var b = _gk_bc_one(s, f32t, _gk_ctx_b(k), br, co);
+    return _gk_epilogue(s, k, r, g, b, _gk_ctx_a(k));
+}
+
+#must_use
+fn _gk_bc_one(s, f32t, c, br, co) {
+    var half = spv_const_f32(s, f32t, 0.5);
+    var zero = spv_const_f32(s, f32t, 0);
+    var one = spv_const_f32(s, f32t, F64_ONE);
+    var t = spv_binop(s, SPIRV_OP_FADD, f32t, c, br);
+    t = spv_binop(s, SPIRV_OP_FSUB, f32t, t, half);
+    t = spv_binop(s, SPIRV_OP_FMUL, f32t, t, co);
+    t = spv_binop(s, SPIRV_OP_FADD, f32t, t, half);
+    t = spv_ext_binary(s, f32t, GLSL_STD450_FMAX, t, zero);
+    return spv_ext_binary(s, f32t, GLSL_STD450_FMIN, t, one);
+}
+
+# SATURATION: mix between the BT.709 luminance and the original by `factor`,
+# clamped to [0, 1]. params[1] = factor.
+fn gk_saturation(s) {
+    var k = _gk_prologue(s);
+    if (k == 0) { return RG_ERR_ALLOCATION; }
+    var f32t = _gk_ctx_f32(k);
+    var f = _gk_param_f32(s, k, 1);
+    var lum = _gk_luma709(s, f32t, _gk_ctx_r(k), _gk_ctx_g(k), _gk_ctx_b(k));
+    var r = _gk_sat_one(s, f32t, _gk_ctx_r(k), lum, f);
+    var g = _gk_sat_one(s, f32t, _gk_ctx_g(k), lum, f);
+    var b = _gk_sat_one(s, f32t, _gk_ctx_b(k), lum, f);
+    return _gk_epilogue(s, k, r, g, b, _gk_ctx_a(k));
+}
+
+#must_use
+fn _gk_sat_one(s, f32t, c, lum, f) {
+    var zero = spv_const_f32(s, f32t, 0);
+    var one = spv_const_f32(s, f32t, F64_ONE);
+    var d = spv_binop(s, SPIRV_OP_FSUB, f32t, c, lum);
+    var t = spv_binop(s, SPIRV_OP_FADD, f32t, lum, spv_binop(s, SPIRV_OP_FMUL, f32t, d, f));
+    t = spv_ext_binary(s, f32t, GLSL_STD450_FMAX, t, zero);
+    return spv_ext_binary(s, f32t, GLSL_STD450_FMIN, t, one);
+}
