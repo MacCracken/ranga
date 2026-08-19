@@ -1,0 +1,133 @@
+# gpu_buffer.cyr -- GPU-side pixel buffers over mabda 4.0.9
+# Ported from rust-old/src/gpu/buffer.rs. Private prefix: _gb_
+#
+# A GpuBuffer is a storage buffer holding one image's pixel bytes, plus the
+# dimensions and format needed to rebuild a PixelBuffer on the way back. mabda
+# owns the GPU allocation; this struct owns only the handle and the metadata.
+#
+#   GpuBuffer 40 bytes
+#     +0 mabda buffer handle   +8 size (bytes)
+#     +16 width   +24 height   +32 format
+
+var _GB_SIZE = 40;
+
+#must_use
+fn gpu_buffer_handle(b) { return load64(b); }
+#must_use
+fn gpu_buffer_size(b) { return load64(b + 8); }
+#must_use
+fn gpu_buffer_width(b) { return load64(b + 16); }
+#must_use
+fn gpu_buffer_height(b) { return load64(b + 24); }
+#must_use
+fn gpu_buffer_format(b) { return load64(b + 32); }
+
+# Storage buffer that a compute shader reads and writes, and that we can copy
+# to and from the host. Same three flags Rust's create_storage_buffer set.
+var _GB_USAGE = 0x0080 | 0x0008 | 0x0004;
+
+# Upload a PixelBuffer to GPU storage. Rust's `GpuBuffer::upload`.
+#
+# ⚠ USES THE BACKEND-AGNOSTIC API, not mabda's `create_storage_buffer`. That
+# helper takes a `device` and calls `wgpu_device_create_buffer` DIRECTLY, so it
+# only works on the wgpu path. On a native context `gpu_ctx_device()` is not a
+# device at all — the native context reuses the same struct with different field
+# meanings, and offset +16 holds a GEM buffer-object handle where wgpu holds the
+# device. Passing that to the wgpu helper calls through an uninitialised
+# function table. `gpu_buffer_create`/`_write`/`_read` take the CONTEXT and
+# dispatch through the backend's slot table, which is what "the public API does
+# not change across backends" actually refers to.
+#
+# Returns 0 on failure, with a code through err_out.
+#must_use
+fn gpu_buffer_upload(ctx, pb, err_out) {
+    if (ctx == 0) { store64(err_out, RG_GPU_ERR_NO_ADAPTER); return 0; }
+    if (pb == 0) { store64(err_out, RG_GPU_ERR_BUFFER_OP); return 0; }
+
+    var mctx = gpu_context_mabda(ctx);
+    # ⚠ pixel_buffer_data returns the RAW BYTE POINTER (bv_data of the inner
+    # vec), not the bytevec — pixel_buffer_len is the length. Treating the
+    # return as a bytevec and calling bv_len on it reads a length field out of
+    # pixel data and yields 0, which then allocates a zero-byte GPU buffer.
+    var src = pixel_buffer_data(pb);
+    var size = pixel_buffer_len(pb);
+    if (size <= 0) { store64(err_out, RG_GPU_ERR_BUFFER_OP); return 0; }
+    var handle = gpu_buffer_create(mctx, size, _GB_USAGE);
+    if (handle == 0) { store64(err_out, RG_GPU_ERR_BUFFER_OP); return 0; }
+    if (gpu_buffer_write(mctx, handle, 0, src, size) != 0) {
+        gpu_buffer_release(mctx, handle);
+        store64(err_out, RG_GPU_ERR_BUFFER_OP);
+        return 0;
+    }
+
+    var b = fl_alloc(_GB_SIZE);
+    if (b == 0) { store64(err_out, RG_GPU_ERR_BUFFER_OP); return 0; }
+    store64(b, handle);
+    store64(b + 8, size);
+    store64(b + 16, pixel_buffer_width(pb));
+    store64(b + 24, pixel_buffer_height(pb));
+    store64(b + 32, pixel_buffer_format(pb));
+    store64(err_out, RG_GPU_ERR_NONE);
+    return b;
+}
+
+# Read the GPU buffer back into a new PixelBuffer. Rust's `GpuBuffer::download`.
+#
+# The caller owns the returned PixelBuffer. mabda's `read_buffer` does the
+# staging-buffer copy and the synchronous map internally and hands back a
+# pointer to `size` bytes.
+#must_use
+fn gpu_buffer_download(b, ctx, err_out) {
+    if (b == 0) { store64(err_out, RG_GPU_ERR_BUFFER_OP); return 0; }
+    if (ctx == 0) { store64(err_out, RG_GPU_ERR_NO_ADAPTER); return 0; }
+
+    var size = load64(b + 8);
+    # bv_uninit, not bv_zeroed: gpu_buffer_read fills every byte, so the zero
+    # fill would be pure waste on a full frame.
+    var bv = bv_uninit(size);
+    if (bv == 0) { store64(err_out, RG_GPU_ERR_BUFFER_OP); return 0; }
+    if (gpu_buffer_read(gpu_context_mabda(ctx), load64(b), 0, bv_data(bv), size) != 0) {
+        bv_free(bv);
+        store64(err_out, RG_GPU_ERR_BUFFER_OP);
+        return 0;
+    }
+
+    # pixel_buffer_new re-derives the expected byte count from the format and
+    # dimensions and REFUSES a mismatch, which is the check that catches a
+    # readback of the wrong length. On success it takes ownership of bv; on
+    # failure bv is still ours to release.
+    var perr = fl_alloc(8);
+    if (perr == 0) { bv_free(bv); store64(err_out, RG_GPU_ERR_BUFFER_OP); return 0; }
+    var pb = pixel_buffer_new(bv, load64(b + 16), load64(b + 24), load64(b + 32), perr);
+    var prc = load64(perr);
+    fl_free(perr);
+    if (pb == 0) {
+        bv_free(bv);
+        store64(err_out, RG_GPU_ERR_BUFFER_OP);
+        return 0;
+    }
+    if (prc != RG_ERR_NONE) {
+        pixel_buffer_free(pb);
+        store64(err_out, RG_GPU_ERR_BUFFER_OP);
+        return 0;
+    }
+    store64(err_out, RG_GPU_ERR_NONE);
+    return pb;
+}
+
+# Release the GPU allocation and the wrapper.
+#
+# NOT PORTED: Rust's `download_async`, which spawned a thread, hand-rolled the
+# staging buffer and mapped it through an mpsc channel because
+# `mabda::PendingReadback::finish()` needs a `&Device` that is not `Send`. That
+# constraint is a Rust borrow-checker artifact with no Cyrius analogue, and the
+# Cyrius mabda exposes no async readback to build on. The synchronous
+# `gpu_buffer_download` is the whole surface until mabda grows one.
+# Takes the context because the release goes through the backend slot table.
+fn gpu_buffer_free(ctx, b) {
+    if (b == 0) { return RG_ERR_NONE; }
+    var h = load64(b);
+    if (h != 0 && ctx != 0) { gpu_buffer_release(gpu_context_mabda(ctx), h); }
+    fl_free(b);
+    return RG_ERR_NONE;
+}

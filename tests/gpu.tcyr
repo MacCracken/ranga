@@ -1,0 +1,153 @@
+# gpu.tcyr — GPU context and buffers over mabda 4.0.9
+# Ported from rust-old/src/gpu/context.rs and buffer.rs #[cfg(test)].
+#
+# ⚠ HARDWARE-GATED, NOT HARDWARE-DEPENDENT. Everything that can be checked
+# without a GPU runs unconditionally; the upload/download tests run only if a
+# context actually opens, and report as skipped otherwise. A machine with no
+# AMD GPU must still see this suite pass — the Rust suite had the same problem
+# and solved it by asserting nothing at all, which is not a solution.
+
+include "src/error.cyr"
+include "src/bytevec.cyr"
+include "src/pixel.cyr"
+include "src/gpu_context.cyr"
+include "src/gpu_buffer.cyr"
+
+alloc_init();
+
+var err = fl_alloc(8);
+var perr = fl_alloc(8);
+
+# ================================================================
+test_group("gpu errors");
+
+# Rust's own four context tests are all about the error type, and they port
+# directly because none of them touch hardware.
+assert_eq(RG_GPU_ERR_NONE, 0, "NONE is zero");
+assert_eq(RG_GPU_ERR_NO_ADAPTER < 0, 1, "NoAdapter is an error code");
+assert_eq(RG_GPU_ERR_DEVICE_REQUEST < 0, 1, "DeviceRequest is an error code");
+assert_eq(RG_GPU_ERR_BUFFER_OP < 0, 1, "BufferOp is an error code");
+
+# ⚠ The codes must not collide with mabda's. mabda defines GPU_ERR_NONE = 0 and
+# GPU_ERR_DEVICE_REQUEST = +2 in the same flat namespace; ranga's is -2. If the
+# RG_ prefix were ever dropped, last-definition-wins would silently give every
+# ranga call site mabda's positive value and flip the sign of every comparison.
+assert_eq(RG_GPU_ERR_DEVICE_REQUEST == GPU_ERR_DEVICE_REQUEST, 0,
+          "ranga's DeviceRequest is NOT mabda's — the RG_ prefix keeps them apart");
+assert_eq(GPU_ERR_DEVICE_REQUEST > 0, 1, "mabda's is positive");
+assert_eq(RG_GPU_ERR_DEVICE_REQUEST < 0, 1, "ranga's is negative");
+
+# Rust asserted on the Display strings; these are the same messages.
+assert_eq(streq(gpu_error_message(RG_GPU_ERR_NO_ADAPTER), "no suitable GPU adapter found"), 1,
+          "NoAdapter carries Rust's message");
+assert_eq(streq(gpu_error_message(RG_GPU_ERR_DEVICE_REQUEST), "failed to request GPU device"), 1,
+          "DeviceRequest carries Rust's message");
+assert_eq(streq(gpu_error_message(RG_GPU_ERR_BUFFER_OP), "GPU buffer operation failed"), 1,
+          "BufferOp carries Rust's message");
+
+# Rust's `mabda_error_converts_to_gpu_error`.
+assert_eq(gpu_error_from_mabda(GPU_ERR_ADAPTER_NOT_FOUND), RG_GPU_ERR_NO_ADAPTER,
+          "mabda AdapterNotFound maps to NoAdapter");
+assert_eq(gpu_error_from_mabda(GPU_ERR_DEVICE_REQUEST), RG_GPU_ERR_DEVICE_REQUEST,
+          "mabda DeviceRequest maps to DeviceRequest");
+assert_eq(gpu_error_from_mabda(0), RG_GPU_ERR_NONE, "mabda success maps to NONE");
+# The catch-all arm: Rust folded EVERY other mabda variant into BufferOp, so a
+# shader compile failure surfaces as "buffer operation failed". Preserved.
+assert_eq(gpu_error_from_mabda(GPU_ERR_SHADER), RG_GPU_ERR_BUFFER_OP,
+          "an unrelated mabda error still collapses to BufferOp, as in Rust");
+assert_eq(gpu_error_from_mabda(GPU_ERR_TEXTURE), RG_GPU_ERR_BUFFER_OP,
+          "and so does every other variant");
+
+# Rust's `gpu_error_converts_to_ranga_error` — all three collapse to Other.
+assert_eq(gpu_error_to_ranga(RG_GPU_ERR_NO_ADAPTER), RG_ERR_OTHER, "NoAdapter becomes RangaError::Other");
+assert_eq(gpu_error_to_ranga(RG_GPU_ERR_BUFFER_OP), RG_ERR_OTHER, "so does BufferOp");
+assert_eq(gpu_error_to_ranga(RG_GPU_ERR_NONE), RG_ERR_NONE, "success stays success");
+
+# Null contexts are refused rather than dereferenced.
+assert_eq(gpu_buffer_upload(0, 0, err), 0, "uploading with a null context fails");
+assert_eq(load64(err), RG_GPU_ERR_NO_ADAPTER, "and reports NoAdapter");
+assert_eq(gpu_buffer_download(0, 0, err), 0, "downloading a null buffer fails");
+assert_eq(gpu_context_free(0), RG_ERR_NONE, "freeing a null context is a no-op");
+assert_eq(gpu_buffer_free(0, 0), RG_ERR_NONE, "freeing a null buffer is a no-op");
+
+# ================================================================
+test_group("gpu hardware");
+
+# The native AMD path needs no C launcher, which is why the tests use it. The
+# wgpu path would require this binary to be compiled in `object;` mode and
+# entered from a launcher that builds a wgpu function table — a structure a
+# test suite cannot impose.
+var ctx = gpu_context_new_amd(err);
+
+if (ctx == 0) {
+    # No AMD GPU here. Record why, and assert the failure was reported properly
+    # rather than silently swallowed — that much IS testable without hardware.
+    assert_eq(load64(err) < 0, 1, "with no GPU, context creation reports an error code");
+}
+
+if (ctx != 0) {
+    assert_eq(streq(gpu_context_backend_name(ctx), "native-amd"), 1,
+              "the native AMD backend reports itself as native-amd");
+    # ⚠ This is the assertion that catches an unwrapped Result. Every mabda
+    # context constructor returns a TAGGED RESULT, and dereferencing it as a
+    # context does not fault — it returns plausible garbage, and the backend
+    # name comes back "unknown" while everything looks fine. That is exactly
+    # what happened during the port, and it segfaulted only on the NEXT run.
+    assert_eq(streq(gpu_context_backend_name(ctx), "unknown"), 0,
+              "a backend of 'unknown' means the context Result was never unwrapped");
+    assert_eq(gpu_context_mabda(ctx) != 0, 1, "the unwrapped mabda context is non-null");
+
+    # A full round trip through GPU memory. The pattern is i*7 mod 256 so a
+    # byte landing at the wrong offset shows up as a mismatch rather than
+    # coinciding with its neighbour.
+    var pb = pixel_buffer_zeroed(16, 16, PF_RGBA8, perr);
+    assert_eq(load64(perr), RG_ERR_NONE, "a 16x16 RGBA8 source buffer allocates");
+    var raw = pixel_buffer_data(pb);
+    var i = 0;
+    while (i < 1024) { store8(raw + i, (i * 7) & 255); i = i + 1; }
+
+    var gb = gpu_buffer_upload(ctx, pb, err);
+    assert_eq(gb != 0, 1, "the pixel buffer uploads to the GPU");
+    assert_eq(load64(err), RG_GPU_ERR_NONE, "with no error reported");
+    # 16 * 16 * 4 — the size must come from the pixel buffer's LENGTH, not from
+    # bv_len of its data pointer, which reads pixel bytes as a length and gives 0.
+    assert_eq(gpu_buffer_size(gb), 1024, "the GPU buffer is 1024 bytes");
+    assert_eq(gpu_buffer_width(gb), 16, "width is carried across");
+    assert_eq(gpu_buffer_height(gb), 16, "height is carried across");
+    assert_eq(gpu_buffer_format(gb), PF_RGBA8, "and so is the format");
+
+    var back = gpu_buffer_download(gb, ctx, err);
+    assert_eq(back != 0, 1, "the buffer downloads back to a PixelBuffer");
+    assert_eq(load64(err), RG_GPU_ERR_NONE, "with no error reported");
+    assert_eq(pixel_buffer_width(back), 16, "the downloaded buffer is 16 wide");
+    assert_eq(pixel_buffer_height(back), 16, "and 16 high");
+    assert_eq(pixel_buffer_len(back), 1024, "and holds 1024 bytes");
+    assert_eq(pixel_buffer_format(back), PF_RGBA8, "and keeps the format");
+
+    var braw = pixel_buffer_data(back);
+    var bad = 0;
+    i = 0;
+    while (i < 1024) {
+        if (load8(braw + i) != ((i * 7) & 255)) { bad = bad + 1; }
+        i = i + 1;
+    }
+    assert_eq(bad, 0, "every one of the 1024 bytes survives the round trip");
+
+    # A second buffer from the same context — the VA allocator must hand out a
+    # distinct region rather than reusing the live one.
+    var gb2 = gpu_buffer_upload(ctx, pb, err);
+    assert_eq(gb2 != 0, 1, "a second buffer uploads from the same context");
+    assert_eq(gpu_buffer_handle(gb2) != gpu_buffer_handle(gb), 1,
+              "and gets a distinct GPU allocation");
+
+    gpu_buffer_free(ctx, gb2);
+    gpu_buffer_free(ctx, gb);
+    pixel_buffer_free(back);
+    pixel_buffer_free(pb);
+    gpu_context_free(ctx);
+    assert_eq(1, 1, "context and buffers release without faulting");
+}
+
+var exit_code = assert_summary();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

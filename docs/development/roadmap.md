@@ -258,7 +258,101 @@ project following the documented "source files only need project includes"
 convention — the include-scan has nothing to find. `dist/ranga.deps` is
 authoritative for all three bundles.
 
-### M6 — GPU
+### M6 — GPU (foundation landed; compute path blocked on a decision)
+
+`src/gpu_context.cyr` + `src/gpu_buffer.cyr` (43 assertions, **round-trip
+HW-verified on AMD Cezanne**). `gpu_shaders` and `gpu_pipeline` — the 14
+operations and `GpuChain` — are NOT started; see the shader-format fork below.
+
+**mabda is at 4.0.9, not the 1.0.0 the plan assumed.** Three backends behind one
+public API: native AMD (amdgpu/GFX9), native NVIDIA (nouveau/SM75), and wgpu.
+
+⚠ **"The public API does not change across backends" applies to a NARROWER set
+of entry points than it sounds.** The `gpu_ctx_device`/`gpu_ctx_queue`
+accessors, and every helper taking a `device` — `create_storage_buffer`,
+`read_buffer`, `compute_pipeline_new` — are **wgpu-path only**. The native
+context reuses the same struct with different field meanings: offset +16 holds a
+GEM buffer-object handle where wgpu holds the device. The backend-agnostic
+surface is the one taking the CONTEXT — `gpu_buffer_create`/`_write`/`_read`/
+`_release`, `gpu_compute_dispatch` — which dispatches through the backend's slot
+table. The first draft of this module used the wgpu helpers and would have
+called through an uninitialised function table on native hardware.
+
+⚠ **Every mabda context constructor returns a TAGGED RESULT.** Dereferencing it
+as a context does not fault — it yields plausible garbage. The first version
+reported a context created successfully with `backend=unknown`, and segfaulted
+only on the *next* run. `payload()` after `is_err_result()` is mandatory, and
+the test suite asserts the backend name is not "unknown" specifically to catch
+a regression here.
+
+⚠ **mabda's `compute_pipeline_new` does not fit ranga's layouts** — it builds a
+fixed BGL (read-write at 0, read-only at 1..N, no uniform) where all three of
+ranga's end in a uniform and two want read-only first. Rust used
+`ComputePipeline::with_layout`; the Cyrius port has no equivalent, so
+`_gc_pipeline_with_layout` assembles one from mabda's public `bglb_*` builder.
+
+**THE FORK — shader format.** `_backend_native_shader_module_create` accepts
+**only SPIR-V**; WGSL and even pre-compiled GFX9 return 0. `gpu_shader_module_create`
+forwards GFX9 for native AMD, which that handler then rejects. So:
+
+- **wgpu** takes ranga's 1,047 lines of WGSL as-is, but requires the consumer to
+  compile in `object;` mode and be entered from a C launcher building a wgpu
+  function table. mabda deprecated AMD-on-wgpu at v4.0.1.
+- **native** works on this hardware (mabda's own e2e programs are HW-verified on
+  Cezanne) but needs SPIR-V, and **there is no WGSL→SPIR-V compiler anywhere in
+  the stack** — mabda's e2e programs hand-emit SPIR-V word by word in Cyrius.
+
+**DECIDED: native via mabda, wgpu as the automatic fallback.** wgpu is a
+backend *inside* mabda, not an alternative to it — ranga targets mabda's API and
+mabda picks the backend. So the shader layer must carry BOTH forms, selected on
+`backend_kind` at runtime: SPIR-V for the native backends, WGSL for the wgpu
+fallback. The WGSL half is a near-verbatim transcription of the Rust; the
+SPIR-V half is new work, specified below.
+
+#### What the native lowerer accepts — the binding constraint
+
+ranga can only emit SPIR-V that `_spirv_lower_one_instr` turns into GFX9.
+Enumerated from the dispatch, this is the whole set:
+
+- **arithmetic** IAdd, FAdd, ISub, FSub, IMul, FMul, UDiv, SDiv, FDiv, UMod,
+  SRem, SMod
+- **bitwise** And, Or, Xor, shifts
+- **compare** FOrd{Equal,NotEqual,LessThan,GreaterThan,…}, ULessThan, SLessThan
+- **convert** ConvertSToF, ConvertUToF, ConvertFToS, FConvert
+- **memory** Load, Store, AccessChain
+- **composite** CompositeConstruct, CompositeExtract
+- **control** Label, Branch, BranchConditional, SelectionMerge, Select, Return
+- **ExtInst** GLSL450 (sqrt, floor, …)
+
+⚠ **`OpLoopMerge` and `OpPhi` both return `LOWER_ERR_CONTROL_FLOW`.** Straight-line
+code and if/else only — **no loops**. Thirteen of ranga's fourteen operations are
+per-pixel and fit; `gpu_gaussian_blur` convolves over a dynamic radius and does
+not. Blur either unrolls to a fixed set of radii, or takes the wgpu fallback,
+or stays on the CPU — that is a smaller decision to make when it is reached,
+not a blocker for the other thirteen.
+
+⚠ **f64 is gated off on native** (`MABDA_NATIVE_F64 = 0` until mabda's F.7): a
+SPIR-V module using f64 is rejected up front. ranga's GPU kernels are f32
+throughout, so this costs nothing today — but it rules out reusing the f64
+colour paths from `color.cyr` verbatim.
+
+#### Emitter design
+
+Hand-writing SPIR-V per kernel is not viable: mabda's own e2e example spends
+**125 lines of raw `store32`** on `data[id.x] = id.x`, the simplest kernel there
+is. ranga needs `src/gpu_spirv.cyr` — a builder that owns a word buffer and an
+id counter and exposes `spv_type_int` / `spv_type_vec` / `spv_constant` (all
+interned), `spv_emit(op, …)`, and the standard compute preamble
+(OpCapability Shader, OpMemoryModel Logical GLSL450, OpEntryPoint GLCompute,
+OpExecutionMode LocalSize, the Block/ArrayStride/Binding/DescriptorSet
+decorations `_spirv_check_array_strides` requires). Each kernel is then a
+function against that builder rather than a wall of offsets.
+
+`spirv_validate_stream` and `spirv_find_entry_point` are already in mabda's
+surface and give the emitter a free self-check: every kernel can assert its own
+module parses before it is ever handed to the GPU.
+
+### M6 — GPU (original plan)
 
 `gpu_shaders`, `gpu_buffer`, `gpu_context`, `gpu_pipeline` against mabda's
 **native** backends; wgpu is the fallback and leaves mabda's tree at v5.1.

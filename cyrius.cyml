@@ -76,6 +76,25 @@ modules = [
     "src/spectral.cyr",
 ]
 
+[lib.gpu]
+modules = [
+    "src/error.cyr",
+    "src/bytevec.cyr",
+    "src/simd_u8.cyr",
+    "src/pixel.cyr",
+    "src/color.cyr",
+    "src/composite.cyr",
+    "src/histogram.cyr",
+    "src/transform.cyr",
+    "src/filter_point.cyr",
+    "src/filter_kernel.cyr",
+    "src/blend.cyr",
+    "src/convert.cyr",
+    "src/icc.cyr",
+    "src/gpu_context.cyr",
+    "src/gpu_buffer.cyr",
+]
+
 [lib.hwaccel]
 modules = [
     "src/error.cyr",
@@ -104,6 +123,7 @@ modules = [
 default = []
 spectral = ["prakash"]
 hwaccel = ["ai-hwaccel"]
+gpu = ["mabda"]
 
 # Kept deliberately minimal: add a module here only when a ported `src/*.cyr`
 # actually calls into it, so the dependency surface stays legible and DCE has
@@ -120,7 +140,7 @@ hwaccel = ["ai-hwaccel"]
 # Not yet listed, added when their modules land: simd (blend/convert kernels),
 # mabda (gpu_* bundle).
 #
-# The last ten entries are NOT used by any core module. They are the leaves the
+# The last thirteen entries are NOT used by any core module. They are the leaves the
 # two optional libraries need — result/simd/fnptr/callback/bayan/sakshi for
 # prakash, fs/process/thread/hashmap for ai-hwaccel — and they are listed here
 # because that is where the resolver looks; a leaf that is only named in a
@@ -157,6 +177,10 @@ stdlib = [
     "process",
     "thread",
     "hashmap",
+    "mmap",
+    "dynlib",
+    "sankoch",
+    "thread_local",
 ]
 
 # Both libraries are pinned by tag and marked optional, so `cyrius deps`
@@ -173,4 +197,10 @@ optional = true
 git = "https://github.com/MacCracken/ai-hwaccel.git"
 tag = "2.3.17"
 modules = ["dist/ai-hwaccel.cyr"]
+optional = true
+
+[deps.mabda]
+git = "https://github.com/MacCracken/mabda.git"
+tag = "4.0.9"
+modules = ["dist/mabda.cyr"]
 optional = true

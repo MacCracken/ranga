@@ -25,3 +25,7 @@ fs
 process
 thread
 hashmap
+mmap
+dynlib
+sankoch
+thread_local

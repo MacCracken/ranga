@@ -1,0 +1,349 @@
+# gpu_context.cyr -- GPU device/queue management over mabda 4.0.9
+# Ported from rust-old/src/gpu/context.rs. Private prefix: _gc_
+#
+# OPTIONAL. Not in the core `[lib]` bundle — this was the `gpu` cargo feature
+# in the Rust line, and it stays optional here via the `[lib.gpu]` profile.
+#
+# BACKENDS. mabda has three behind ONE public API, selected at COMPILE time via
+# `-D MABDA_BACKEND_KIND` (default wgpu). ranga does not choose — it calls the
+# entry point matching whatever mabda was built with, and mabda's roadmap
+# guarantees "the public API does not change across backends; consumer code
+# stays byte-identical".
+#
+#   native AMD     `gpu_context_new_native()`         amdgpu DRM / GFX9
+#   native NVIDIA  `gpu_context_new_native_nvidia()`  nouveau DRM / SM75
+#   wgpu           `gpu_context_from_preinit(p)`      needs a C launcher
+#
+# ⚠ THE WGPU PATH IS STRUCTURALLY DIFFERENT, not just a different backend. It
+# requires the consumer to compile in `object;` mode and be entered from a C
+# launcher that builds a wgpu function table and calls `mabda_main(table,
+# preinit)`. A library cannot do that to its callers, so `gpu_context_new`
+# takes the preinit pointer the launcher already produced rather than trying to
+# initialise wgpu itself. The native paths need no launcher, which is why
+# ranga's tests use them. mabda deprecated AMD-on-wgpu at v4.0.1 and recommends
+# the native AMD backend for amdgpu hardware.
+#
+# ⚠ mabda's `compute_pipeline_new` does NOT fit ranga's layouts. It builds a
+# fixed bind group layout — read-write storage at binding 0, read-only storage
+# at 1..N, and NO UNIFORM BUFFER. All three of ranga's layouts end in a uniform,
+# and two of them want read-only FIRST. Rust used `ComputePipeline::with_layout`
+# with explicit entries; the Cyrius mabda has no such entry point, so this
+# module assembles the pipeline from mabda's public `bglb_*` builder and the
+# wgpu primitives instead. See `_gc_pipeline_with_layout`.
+#
+#   GpuContext 56 bytes
+#     +0  mabda ctx   +8  device      +16 queue
+#     +24 cache (pipeline cache)      +32 adapter name (cstr)
+#     +40 backend name (cstr)         +48 owns_ctx (1 if we must release it)
+
+# The dep bundle. Stripped by `cyrius distlib`, as in spectral.cyr — a consumer
+# of dist/ranga-gpu.cyr declares mabda in its own manifest.
+include "lib/mabda.cyr"
+
+# ── GpuError ────────
+#
+# Rust's three-variant `GpuError`. Kept as distinct codes rather than folded
+# into RG_ERR_* because the Rust enum is `#[non_exhaustive]` public API and
+# callers match on which one they got.
+# ⚠ PREFIXED. mabda's bundle already defines GPU_ERR_NONE, GPU_ERR_DEVICE_REQUEST
+# and fifteen more in the same flat namespace, and its GPU_ERR_DEVICE_REQUEST is
+# +2 where ranga's is -2. Cyrius resolves duplicates as last-definition-wins, so
+# an unprefixed name here would silently take mabda's value at every ranga call
+# site — a sign flip that every `if (code == ...)` would then get wrong. The
+# RG_ prefix is load-bearing, not decoration.
+var RG_GPU_ERR_NONE          = 0;
+var RG_GPU_ERR_NO_ADAPTER    = 0 - 1;
+var RG_GPU_ERR_DEVICE_REQUEST = 0 - 2;
+var RG_GPU_ERR_BUFFER_OP     = 0 - 3;
+
+# Rust's `impl std::error::Error` messages, which its own tests assert on.
+#must_use
+fn gpu_error_message(code) {
+    if (code == RG_GPU_ERR_NO_ADAPTER) { return "no suitable GPU adapter found"; }
+    if (code == RG_GPU_ERR_DEVICE_REQUEST) { return "failed to request GPU device"; }
+    if (code == RG_GPU_ERR_BUFFER_OP) { return "GPU buffer operation failed"; }
+    return "no error";
+}
+
+# Rust's `impl From<GpuError> for RangaError`, which mapped every variant onto
+# the catch-all `RangaError::Other` — so all three collapse to RG_ERR_OTHER,
+# and the specific code is only available before the conversion.
+#must_use
+fn gpu_error_to_ranga(code) {
+    if (code == RG_GPU_ERR_NONE) { return RG_ERR_NONE; }
+    return RG_ERR_OTHER;
+}
+
+# Rust's `impl From<mabda::GpuError> for GpuError`: AdapterNotFound maps to
+# NoAdapter, DeviceRequest to DeviceRequest, and EVERYTHING ELSE collapses to
+# BufferOp. That last arm is a catch-all over mabda's whole error enum, so a
+# mabda error meaning something quite different still surfaces as "buffer
+# operation failed" — preserved because callers may match on it.
+#must_use
+fn gpu_error_from_mabda(mabda_code) {
+    if (mabda_code == 0) { return RG_GPU_ERR_NONE; }
+    if (mabda_code == GPU_ERR_ADAPTER_NOT_FOUND) { return RG_GPU_ERR_NO_ADAPTER; }
+    if (mabda_code == GPU_ERR_DEVICE_REQUEST) { return RG_GPU_ERR_DEVICE_REQUEST; }
+    return RG_GPU_ERR_BUFFER_OP;
+}
+
+# ── GpuContext ────────
+var _GC_SIZE = 56;
+
+#must_use
+fn gpu_context_mabda(c) { return load64(c); }
+#must_use
+fn gpu_context_device(c) { return load64(c + 8); }
+#must_use
+fn gpu_context_queue(c) { return load64(c + 16); }
+#must_use
+fn gpu_context_cache(c) { return load64(c + 24); }
+#must_use
+fn gpu_context_adapter_name(c) { return load64(c + 32); }
+#must_use
+fn gpu_context_backend_name(c) { return load64(c + 40); }
+
+# Wrap a mabda context RESULT. `owns` decides whether gpu_context_free releases
+# the mabda context too — a context handed in by a launcher belongs to the
+# launcher.
+#
+# ⚠ THE ARGUMENT IS A TAGGED RESULT, NOT A CONTEXT. Every mabda context
+# constructor returns `gpu_ok(ctx)` / `gpu_err_result(code)`, and the payload
+# must be unwrapped before use. Passing the result straight to `gpu_ctx_device`
+# dereferences the Result header as if it were a context: it does not fault
+# immediately, it returns plausible garbage — the first version of this module
+# reported a context created successfully with `backend=unknown`, then
+# segfaulted on the next run. A wrong answer that looks right is the failure
+# mode this whole port is built to avoid.
+#must_use
+fn _gc_wrap(res, owns, err_out) {
+    if (res == 0) { store64(err_out, RG_GPU_ERR_NO_ADAPTER); return 0; }
+    if (is_err_result(res) == 1) {
+        store64(err_out, gpu_error_from_mabda(gpu_err_code(payload(res))));
+        return 0;
+    }
+    var mctx = payload(res);
+    if (mctx == 0) { store64(err_out, RG_GPU_ERR_NO_ADAPTER); return 0; }
+    var c = fl_calloc(_GC_SIZE);
+    if (c == 0) { store64(err_out, RG_GPU_ERR_DEVICE_REQUEST); return 0; }
+    store64(c, mctx);
+    # ⚠ device/queue are cached ONLY for the wgpu path. On a native context
+    # these offsets hold a GEM handle and a fixed VA, not a device and queue —
+    # the native backend reuses the same struct with different field meanings.
+    # Nothing in ranga may pass them to a wgpu helper; the backend-agnostic
+    # gpu_buffer_*/gpu_compute_* entry points take the CONTEXT instead.
+    store64(c + 8, gpu_ctx_device(mctx));
+    store64(c + 16, gpu_ctx_queue(mctx));
+    store64(c + 24, _gc_cache_new());
+    store64(c + 32, "unknown");
+    store64(c + 40, _gc_backend_label(backend_kind(gpu_ctx_backend(mctx))));
+    store64(c + 48, owns);
+    store64(err_out, RG_GPU_ERR_NONE);
+    return c;
+}
+
+# Rust formatted `{:?}` on wgpu's Backend enum.
+#
+# ⚠ `gpu_ctx_backend(ctx)` returns the backend OBJECT, not a kind — the kind is
+# a field inside it, read with `backend_kind`. Passing the object straight to
+# this function compares a pointer against 1/2/3 and always falls through to
+# "unknown", which is exactly what the first version of this module did.
+#must_use
+fn _gc_backend_label(kind) {
+    if (kind == BACKEND_KIND_WGPU) { return "wgpu"; }
+    if (kind == BACKEND_KIND_AMD) { return "native-amd"; }
+    if (kind == BACKEND_KIND_NVIDIA) { return "native-nvidia"; }
+    return "unknown";
+}
+
+# Create a context on the native AMD backend (amdgpu DRM / GFX9).
+#must_use
+fn gpu_context_new_amd(err_out) {
+    return _gc_wrap(gpu_context_new_native(), 1, err_out);
+}
+
+# Create a context on the native NVIDIA backend (nouveau DRM / SM75).
+#must_use
+fn gpu_context_new_nvidia(err_out) {
+    return _gc_wrap(gpu_context_new_native_nvidia(), 1, err_out);
+}
+
+# Adopt the context a C launcher pre-initialised on the wgpu path. The launcher
+# owns the underlying mabda context, so this one does not release it.
+#must_use
+fn gpu_context_from_launcher(preinit_ptr, err_out) {
+    if (preinit_ptr == 0) { store64(err_out, RG_GPU_ERR_NO_ADAPTER); return 0; }
+    return _gc_wrap(gpu_context_from_preinit(preinit_ptr), 0, err_out);
+}
+
+fn gpu_context_free(c) {
+    if (c == 0) { return RG_ERR_NONE; }
+    _gc_cache_free(load64(c + 24));
+    if (load64(c + 48) == 1) { gpu_context_release(load64(c)); }
+    fl_free(c);
+    return RG_ERR_NONE;
+}
+
+# ── Pipeline cache ────────
+#
+# Rust hashed a `&'static str` name with DefaultHasher and keyed a
+# `mabda::PipelineCache`. The names are a fixed, small set known at compile
+# time, so a linear scan over a vec of (name, pipeline) pairs is both simpler
+# and faster than hashing — there are at most fourteen entries and lookup
+# happens once per operation, not per pixel. The hash existed in Rust to fit
+# mabda's u64-keyed cache API, not because the lookup was hot.
+var _GC_CACHE_STRIDE = 16;
+
+#must_use
+fn _gc_cache_new() { return vec_new(); }
+
+fn _gc_cache_free(cache) {
+    if (cache == 0) { return RG_ERR_NONE; }
+    var i = 0;
+    while (i < vec_len(cache)) {
+        var e = vec_get(cache, i);
+        compute_pipeline_release(load64(e + 8));
+        fl_free(e);
+        i = i + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+#must_use
+fn _gc_cache_get(cache, name) {
+    var i = 0;
+    while (i < vec_len(cache)) {
+        var e = vec_get(cache, i);
+        if (streq(load64(e), name) == 1) { return load64(e + 8); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _gc_cache_put(cache, name, pipeline) {
+    var e = fl_alloc(_GC_CACHE_STRIDE);
+    if (e == 0) { return RG_ERR_ALLOCATION; }
+    store64(e, name);
+    store64(e + 8, pipeline);
+    vec_push(cache, e);
+    return RG_ERR_NONE;
+}
+
+# ── Pipeline construction ────────
+#
+# The `with_layout` that mabda's Cyrius surface does not provide. `layout` is a
+# built bind group layout from the bglb_* builder; everything downstream mirrors
+# `compute_pipeline_new` so the returned handle is the same 24-byte
+# ComputePipeline struct that `compute_dispatch` and `compute_pipeline_release`
+# already understand.
+#must_use
+fn _gc_pipeline_with_layout(device, wgsl, entry, bglb) {
+    var entries = bglb_build_entries(bglb);
+    var count = bglb_entry_count(bglb);
+    var bgl_desc = wgpu_bind_group_layout_descriptor("ranga_bgl", entries, count);
+    var bgl = wgpu_device_create_bind_group_layout(device, bgl_desc);
+    if (bgl == 0) { return 0; }
+
+    var layouts[8];
+    store64(&layouts, bgl);
+    var pl_desc = wgpu_pipeline_layout_descriptor("ranga_pl", &layouts, 1);
+    var pl = wgpu_device_create_pipeline_layout(device, pl_desc);
+    if (pl == 0) {
+        wgpu_bind_group_layout_release(bgl);
+        return 0;
+    }
+
+    var src = wgpu_shader_source_wgsl(wgsl);
+    var sm_desc = wgpu_shader_module_descriptor("ranga_shader", src);
+    var shader = wgpu_device_create_shader_module(device, sm_desc);
+    if (shader == 0) {
+        wgpu_pipeline_layout_release(pl);
+        wgpu_bind_group_layout_release(bgl);
+        return 0;
+    }
+
+    var cp_desc = wgpu_compute_pipeline_descriptor("ranga_pipeline", pl, shader, entry);
+    var pipeline = wgpu_device_create_compute_pipeline(device, cp_desc);
+    wgpu_shader_module_release(shader);
+    if (pipeline == 0) {
+        wgpu_pipeline_layout_release(pl);
+        wgpu_bind_group_layout_release(bgl);
+        return 0;
+    }
+
+    var cp = fl_alloc(24);
+    if (cp == 0) { return 0; }
+    store64(cp, pipeline);
+    store64(cp + 8, bgl);
+    store64(cp + 16, pl);
+    return cp;
+}
+
+# The three layouts, exactly as Rust declared them. The ORDER of the bglb_*
+# calls is the binding order — bglb_ assigns each entry the next index — so
+# these must not be reordered for tidiness.
+
+# binding 0: storage read-write, binding 1: uniform.
+#must_use
+fn _gc_bglb_1buf() {
+    var b = bglb_new();
+    bglb_storage_buffer(b, WGPU_SHADER_STAGE_COMPUTE);
+    bglb_uniform_buffer(b, WGPU_SHADER_STAGE_COMPUTE);
+    return b;
+}
+
+# binding 0: storage READ-ONLY, 1: storage read-write, 2: uniform.
+#must_use
+fn _gc_bglb_3buf() {
+    var b = bglb_new();
+    bglb_storage_buffer_readonly(b, WGPU_SHADER_STAGE_COMPUTE);
+    bglb_storage_buffer(b, WGPU_SHADER_STAGE_COMPUTE);
+    bglb_uniform_buffer(b, WGPU_SHADER_STAGE_COMPUTE);
+    return b;
+}
+
+# binding 0: input (ro), 1: output (rw), 2: kernel (ro), 3: params (uniform).
+#must_use
+fn _gc_bglb_4buf() {
+    var b = bglb_new();
+    bglb_storage_buffer_readonly(b, WGPU_SHADER_STAGE_COMPUTE);
+    bglb_storage_buffer(b, WGPU_SHADER_STAGE_COMPUTE);
+    bglb_storage_buffer_readonly(b, WGPU_SHADER_STAGE_COMPUTE);
+    bglb_uniform_buffer(b, WGPU_SHADER_STAGE_COMPUTE);
+    return b;
+}
+
+# Rust's `get_or_create_pipeline_1buf` / `_3buf` / `_4buf`. `name` is the cache
+# key and must be a stable string constant, as in Rust.
+#must_use
+fn gpu_context_pipeline_1buf(c, name, wgsl, err_out) {
+    return _gc_get_or_create(c, name, wgsl, 1, err_out);
+}
+#must_use
+fn gpu_context_pipeline_3buf(c, name, wgsl, err_out) {
+    return _gc_get_or_create(c, name, wgsl, 3, err_out);
+}
+#must_use
+fn gpu_context_pipeline_4buf(c, name, wgsl, err_out) {
+    return _gc_get_or_create(c, name, wgsl, 4, err_out);
+}
+
+#must_use
+fn _gc_get_or_create(c, name, wgsl, kind, err_out) {
+    if (c == 0) { store64(err_out, RG_GPU_ERR_NO_ADAPTER); return 0; }
+    var cache = load64(c + 24);
+    var hit = _gc_cache_get(cache, name);
+    if (hit != 0) { store64(err_out, RG_GPU_ERR_NONE); return hit; }
+
+    var bglb = 0;
+    if (kind == 1) { bglb = _gc_bglb_1buf(); }
+    if (kind == 3) { bglb = _gc_bglb_3buf(); }
+    if (kind == 4) { bglb = _gc_bglb_4buf(); }
+    if (bglb == 0) { store64(err_out, RG_GPU_ERR_DEVICE_REQUEST); return 0; }
+
+    var cp = _gc_pipeline_with_layout(load64(c + 8), wgsl, "main", bglb);
+    if (cp == 0) { store64(err_out, RG_GPU_ERR_DEVICE_REQUEST); return 0; }
+    _gc_cache_put(cache, name, cp);
+    store64(err_out, RG_GPU_ERR_NONE);
+    return cp;
+}

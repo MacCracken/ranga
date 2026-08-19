@@ -38,6 +38,8 @@ Cyrius port: **7,639 lines** across 14 modules, bundled to
 | `icc.cyr` | 1,018 | `icc.rs` |
 | `spectral.cyr` | 137 | `spectral.rs` (optional) |
 | `hwaccel.cyr` | 209 | `hwaccel.rs` (optional) |
+| `gpu_context.cyr` | 289 | `gpu/context.rs` (optional) |
+| `gpu_buffer.cyr` | 112 | `gpu/buffer.rs` (optional) |
 | `main.cyr` | 15 | — |
 
 **Not yet ported** — the five `gpu/` modules (4,047 lines). See
@@ -50,18 +52,20 @@ Cyrius port: **7,639 lines** across 14 modules, bundled to
 | `dist/ranga.cyr` | 7,624 | core, no external deps |
 | `dist/ranga-spectral.cyr` | 7,769 | core + `spectral.cyr` (needs prakash) |
 | `dist/ranga-hwaccel.cyr` | 7,835 | core + `hwaccel.cyr` (needs ai-hwaccel) |
+| `dist/ranga-gpu.cyr` | 8,106 | core + gpu context/buffer (needs mabda 4.0.9) |
 
 ⚠ The two profile `.deps` sidecars are written empty by cycc 6.5.27 and must not
 be trusted; `dist/ranga.deps` is authoritative for all three. Filed upstream.
 
 ## Tests
 
-**1,517 assertions, 0 failures. 0 lint warnings, 0 untracked deferrals.**
+**1,561 assertions, 0 failures. 0 lint warnings, 0 untracked deferrals.**
 
 | Suite | Assertions |
 | --- | ---: |
 | `icc.tcyr` | 169 |
 | `spectral.tcyr` | 58 |
+| `gpu.tcyr` | 43 |
 | `hwaccel.tcyr` | 48 |
 | `composite.tcyr` | 159 |
 | `filter_point.tcyr` | 150 |
