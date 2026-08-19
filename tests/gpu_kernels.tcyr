@@ -399,6 +399,83 @@ if (ctx != 0) {
     gk_crop(cr2);
     eq6(run2(cr2, src, dst, pr), 5, 6, 100, 100, 100, 100, "and follows src_y down a row");
 
+    # --- resize nearest: 2x2 -> 4x4 ---
+    # Every source pixel becomes a 2x2 block. Nearest-neighbour has no
+    # interpolation, so the output must consist only of values that appear in
+    # the input — any blending would show up as a value that is in neither.
+    var rsrc = fl_alloc(16);
+    store32(rsrc + 0, 11);
+    store32(rsrc + 4, 22);
+    store32(rsrc + 8, 33);
+    store32(rsrc + 12, 44);
+    var rp = fl_alloc(32);
+    var jr = 0;
+    while (jr < 32) { store8(rp + jr, 0); jr = jr + 1; }
+    store32(rp + 0, 16);
+    store32(rp + 4, 2);
+    store32(rp + 8, 2);
+    store32(rp + 12, 4);
+    store32(rp + 16, 4);
+    var rn = spv_new();
+    gk_resize_nearest(rn);
+    var rnl = spv_finish(rn, outp);
+    var rnsh = gpu_shader_module_create_spirv(m, load64(outp), rnl);
+    assert_eq(rnsh != 0, 1, "resize_nearest compiles to GFX9");
+    if (rnsh != 0) {
+        var rsb = gpu_buffer_create(m, 16, U);
+        var rdb = gpu_buffer_create(m, 64, U);
+        var rpb = gpu_buffer_create(m, 32, U);
+        gpu_buffer_write(m, rsb, 0, rsrc, 16);
+        gpu_buffer_write(m, rpb, 0, rp, 32);
+        var rbp[72];
+        store64(&rbp, 4);
+        native_buf_pair_write(&rbp + 8,  load64(rsb + NATIVE_BUF_FIELD_HANDLE), load64(rsb + NATIVE_BUF_FIELD_VA));
+        native_buf_pair_write(&rbp + 24, load64(rdb + NATIVE_BUF_FIELD_HANDLE), load64(rdb + NATIVE_BUF_FIELD_VA));
+        native_buf_pair_write(&rbp + 40, load64(rpb + NATIVE_BUF_FIELD_HANDLE), load64(rpb + NATIVE_BUF_FIELD_VA));
+        native_buf_pair_write(&rbp + 56, load64(rpb + NATIVE_BUF_FIELD_HANDLE), load64(rpb + NATIVE_BUF_FIELD_VA));
+        assert_eq(gpu_compute_dispatch(m, rnsh, 1, 1, 1, &rbp), 0, "and dispatches");
+        var rb = fl_alloc(64);
+        gpu_buffer_read(m, rdb, 0, rb, 64);
+        # Row 0 of the output samples row 0 of the source: 11 11 22 22.
+        assert_eq(load32(rb + 0), 11, "output (0,0) samples source (0,0)");
+        assert_eq(load32(rb + 4), 11, "and (1,0) still samples (0,0)");
+        assert_eq(load32(rb + 8), 22, "while (2,0) crosses to source (1,0)");
+        assert_eq(load32(rb + 12), 22, "and (3,0) stays there");
+        # Row 2 crosses into source row 1: 33 33 44 44.
+        assert_eq(load32(rb + 32), 33, "output row 2 crosses to source row 1");
+        assert_eq(load32(rb + 44), 44, "and reaches the far corner");
+        # The last output pixel must be the last source pixel — the case an
+        # off-by-one in the scaling would miss.
+        assert_eq(load32(rb + 60), 44, "the final output pixel is the final source pixel");
+        gpu_buffer_release(m, rsb);
+        gpu_buffer_release(m, rdb);
+        gpu_buffer_release(m, rpb);
+    }
+
+    # --- resize bilinear: emits a valid module that mabda cannot yet compile ---
+    #
+    # ⚠ NOT A DEFECT IN THE EMITTER. `spirv_validate_stream` accepts the module
+    # and every table rebuilds from it, but `gpu_shader_module_create_spirv`
+    # returns 0. It is not the 256-id cap: this module is 201 ids, and a
+    # deliberately-grown kernel compiles at 229 and fails at 254. Nor is it any
+    # single construct — FDiv was one cause and is gone, and the index maths,
+    # ext-inst calls and computed-index loads all compile in isolation. What is
+    # left is live-value pressure from four independent texel addresses, which
+    # restructuring to hold packed words did not lower enough.
+    #
+    # This assertion PINS THE CURRENT STATE so the suite tells us the day mabda
+    # can take it, rather than leaving a silently-dead kernel in the tree.
+    var bl = spv_new();
+    gk_resize_bilinear(bl);
+    var bll = spv_finish(bl, outp);
+    assert_eq(spirv_validate_stream(load64(outp), bll), 0,
+              "resize_bilinear emits a structurally valid SPIR-V module");
+    assert_eq(spirv_find_entry_point(load64(outp), bll) > 0, 1, "with a findable entry point");
+    assert_eq(spirv_hdr_id_bound(load64(outp)) < 256, 1,
+              "and it is UNDER the 256-id cap, so size is not what stops it");
+    assert_eq(gpu_shader_module_create_spirv(m, load64(outp), bll), 0,
+              "but mabda cannot yet lower it to GFX9 — flip this when it can");
+
     gpu_context_free(ctx);
 }
 

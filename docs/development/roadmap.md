@@ -450,6 +450,38 @@ slack unless an explicit sentinel sits past `count`. And the sentinel has to
 differ between source and destination: with the same value in both, a one-past
 *copy* writes an identical word and stays invisible.
 
+#### ✅ resize_nearest — and where the native path runs out
+
+**Eleven of fourteen operations run on the native backend**, all HW-verified.
+The remaining three are blocked by concrete mabda limits, now filed upstream as
+`cyrius/docs/development/issues/2026-08-19-mabda-native-spirv-compile-limits.md`.
+
+`resize_nearest` landed. The WGSL clamps with `min(gx * src_w / dst_w, src_w - 1u)`;
+that min is **provably redundant** once the bounds guard has run, since
+`gx <= dst_w - 1` forces the integer division below `src_w`. Dropped rather than
+reproduced, because there is no unsigned min in the ext-inst set and faking one
+through floats would add rounding to an exact integer path.
+
+⚠ **`OpFDiv` does not compile.** Integer `UDiv`/`UMod` are fine. Isolated by
+bisection: a kernel doing nothing but one float division returns 0, while the
+same kernel with four texel loads, twelve lerps and a full unpack/pack round
+trip compiles. Both reciprocals are now computed host-side and passed as params.
+
+⚠ **`resize_bilinear` emits a valid module that mabda cannot lower.** This is
+NOT an emitter defect and the test suite says so explicitly:
+`spirv_validate_stream` accepts it, every table rebuilds, the id bound is 201 —
+and a deliberately-grown kernel compiles at **229 ids** and fails at **254**, so
+size is not the obstacle. Every individual construct compiles in isolation. What
+is left is live-value pressure from four independent texel addresses; holding
+the texels packed and extracting one channel at a time (peak liveness ~20 → ~12)
+did not lower it enough. The test pins the current state — valid module, under
+the cap, does not compile — so the suite reports the day mabda can take it
+rather than leaving a silently dead kernel in the tree.
+
+**Still blocked, and why:** `resize_bilinear` and `blend` (13 modes, larger
+still) on register pressure; `gaussian_blur` separately on `OpLoopMerge` and
+`OpPhi` being rejected outright.
+
 #### Per-pixel kernels
 
 **Mutation testing: 15 mutants, 15 killed.** Three needed better inputs rather

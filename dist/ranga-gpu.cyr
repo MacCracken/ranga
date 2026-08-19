@@ -8980,6 +8980,241 @@ fn gk_flip_vertical(s) {
     return RG_ERR_NONE;
 }
 
+# ── Shared unpack/pack for the copy-context kernels ────────
+
+# Unpack one packed RGBA word into four f32 ids in 0..255 — NOT normalised.
+#
+# ⚠ DELIBERATELY UNNORMALISED, unlike the per-pixel kernels. Interpolation is
+# linear, so lerping in 0..255 and packing directly gives the same answer as
+# lerping in 0..1 and re-scaling, while dropping one multiply per channel on the
+# way in and one on the way out. That matters here because the native shader
+# compiler has a HARD CAP of 256 ids and 256 selected instructions
+# (NATIVE_SHADER_CAP_IDS, CMP_ISEL_CAP), and bilinear with four texels is the
+# first kernel big enough to run into it. It also removes two roundings from
+# every channel.
+fn _gk_unpack4(s, k, word, out4) {
+    var u32t = load64(k);
+    var f32t = load64(k + 24);
+    var mask = spv_const(s, u32t, 255);
+    var i = 0;
+    while (i < 4) {
+        var chan = word;
+        if (i > 0) {
+            chan = spv_binop(s, SPIRV_OP_SHR_LOGICAL, u32t, word, spv_const(s, u32t, i * 8));
+        }
+        var byte = spv_binop(s, SPIRV_OP_BITWISE_AND, u32t, chan, mask);
+        store64(out4 + i * 8, spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t, byte));
+        i = i + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+# Pack four 0..255 f32 ids back into one word: clamp(floor(c + 0.5), 0, 255).
+# The `* 255` the normalised form needs is absent because the inputs are already
+# in 0..255 — see the note on _gk_unpack4.
+#must_use
+fn _gk_pack4(s, k, in4) {
+    var u32t = load64(k);
+    var f32t = load64(k + 24);
+    var c255 = spv_const_f32(s, f32t, 255.0);
+    var chalf = spv_const_f32(s, f32t, 0.5);
+    var czero = spv_const_f32(s, f32t, 0);
+    var acc = 0;
+    var i = 0;
+    while (i < 4) {
+        var scaled = spv_binop(s, SPIRV_OP_FADD, f32t, load64(in4 + i * 8), chalf);
+        var rounded = spv_ext_unary(s, f32t, GLSL_STD450_FLOOR, scaled);
+        var lo = spv_ext_binary(s, f32t, GLSL_STD450_FMAX, rounded, czero);
+        var hi = spv_ext_binary(s, f32t, GLSL_STD450_FMIN, lo, c255);
+        var byte = spv_unop(s, SPIRV_OP_CONVERT_F_TO_S, u32t, hi);
+        if (i > 0) { byte = spv_binop(s, SPIRV_OP_SHL, u32t, byte, spv_const(s, u32t, i * 8)); }
+        if (i == 0) { acc = byte; }
+        if (i > 0) { acc = spv_binop(s, SPIRV_OP_BITWISE_OR, u32t, acc, byte); }
+        i = i + 1;
+    }
+    return acc;
+}
+
+# Read input[idx] and unpack it.
+fn _gk_load_unpack(s, k, idx, out4) {
+    var u32t = load64(k);
+    var pu = spv_type_ptr(s, SPIRV_SC_STORAGE_BUFFER, u32t);
+    var zero = spv_const(s, load64(k + 8), 0);
+    var w = spv_load(s, u32t, spv_access_chain2(s, pu, load64(k + 32), zero, idx));
+    return _gk_unpack4(s, k, w, out4);
+}
+
+# Extract channel `i` of a packed word as an f32 in 0..255.
+#must_use
+fn _gk_byte_f32(s, k, word, i, mask) {
+    var u32t = load64(k);
+    var chan = word;
+    if (i > 0) {
+        chan = spv_binop(s, SPIRV_OP_SHR_LOGICAL, u32t, word, spv_const(s, u32t, i * 8));
+    }
+    return spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, load64(k + 24),
+             spv_binop(s, SPIRV_OP_BITWISE_AND, u32t, chan, mask));
+}
+
+# a + t * (b - a), the scalar form of WGSL's mix().
+#must_use
+fn _gk_lerp(s, f32t, a, b, t) {
+    return spv_binop(s, SPIRV_OP_FADD, f32t, a,
+             spv_binop(s, SPIRV_OP_FMUL, f32t,
+               spv_binop(s, SPIRV_OP_FSUB, f32t, b, a), t));
+}
+
+# ── RESIZE NEAREST ────────
+#
+# output[gy*dst_w + gx] = input[sy*src_w + sx], sx/sy scaled by integer ratio.
+# params: [count, src_width, src_height, dst_width, dst_height].
+#
+# ⚠ The WGSL clamps with `min(gx * src_w / dst_w, src_w - 1u)`. That min is
+# PROVABLY REDUNDANT once the bounds guard has run: gx <= dst_w - 1, so
+# gx * src_w < dst_w * src_w and the integer division is always <= src_w - 1.
+# It is dropped rather than reproduced because there is no unsigned min in
+# mabda's ext-inst set — only FMin and FMax — and reintroducing one through
+# floats would add rounding to an exact integer path.
+fn gk_resize_nearest(s) {
+    var k = _gk_copy_begin(s, 0);
+    if (k == 0) { return RG_ERR_ALLOCATION; }
+    var u32t = load64(k);
+    var idx = load64(k + 64);
+    var lm = _gk_guard_open(s, k, _gk_cpy_param_u32(s, k, 0), idx);
+
+    var src_w = _gk_cpy_param_u32(s, k, 1);
+    var src_h = _gk_cpy_param_u32(s, k, 2);
+    var dst_w = _gk_cpy_param_u32(s, k, 3);
+    var dst_h = _gk_cpy_param_u32(s, k, 4);
+    var gx = spv_binop(s, SPIRV_OP_UMOD, u32t, idx, dst_w);
+    var gy = spv_binop(s, SPIRV_OP_UDIV, u32t, idx, dst_w);
+    var sx = spv_binop(s, SPIRV_OP_UDIV, u32t,
+               spv_binop(s, SPIRV_OP_IMUL, u32t, gx, src_w), dst_w);
+    var sy = spv_binop(s, SPIRV_OP_UDIV, u32t,
+               spv_binop(s, SPIRV_OP_IMUL, u32t, gy, src_h), dst_h);
+    var sidx = spv_binop(s, SPIRV_OP_IADD, u32t,
+                 spv_binop(s, SPIRV_OP_IMUL, u32t, sy, src_w), sx);
+    _gk_copy_word(s, k, sidx, idx);
+
+    _gk_guard_close(s, lm);
+    spv_fn_end(s);
+    fl_free(k);
+    return RG_ERR_NONE;
+}
+
+# ── RESIZE BILINEAR ────────
+#
+# params: [count, src_width, src_height, dst_width, dst_height,
+#          1/max(dst_width-1,1) as f32, 1/max(dst_height-1,1) as f32].
+#
+# ⚠ THREE WGSL CONSTRUCTS HAVE NO DIRECT FORM HERE.
+#
+# 1. **`OpFDiv` does not compile.** Isolated by bisection: a kernel doing
+#    nothing but one float division returns 0 from
+#    `gpu_shader_module_create_spirv`, while the same kernel with four texel
+#    loads, twelve lerps and a full unpack/pack round trip compiles fine.
+#    Integer UDiv is unaffected — `resize_nearest` uses it. So both reciprocals
+#    are computed on the HOST and passed in as params, and the shader multiplies.
+#    params[5] = 1/max(dst_width - 1, 1), params[6] = 1/max(dst_height - 1, 1).
+#
+# 2. That also disposes of the WGSL's value-producing branch
+#    (`if dst_width > 1u { sx = ... } else { sx = 0.0; }`), which would have
+#    needed OpPhi or a function-local variable — OpPhi being rejected outright.
+#    The host takes the max, and when dst_width is 1 the bounds guard has
+#    already forced gx to 0, so the numerator is 0 and the product is exactly
+#    the 0.0 the else-branch wanted.
+#
+# 3. `min(x0 + 1u, src_width - 1u)` is an UNSIGNED min, and mabda's ext-inst set
+#    has only FMin and FMax. Here — unlike resize_nearest — the clamp is real:
+#    x0 can be src_width - 1 and x0 + 1 would read past the row. So the clamp is
+#    done in f32 with FMin before the conversion to an index.
+fn gk_resize_bilinear(s) {
+    var k = _gk_copy_begin(s, 0);
+    if (k == 0) { return RG_ERR_ALLOCATION; }
+    var u32t = load64(k);
+    var f32t = load64(k + 24);
+    var idx = load64(k + 64);
+    var lm = _gk_guard_open(s, k, _gk_cpy_param_u32(s, k, 0), idx);
+
+    var src_w = _gk_cpy_param_u32(s, k, 1);
+    var src_h = _gk_cpy_param_u32(s, k, 2);
+    var dst_w = _gk_cpy_param_u32(s, k, 3);
+    var gx = spv_binop(s, SPIRV_OP_UMOD, u32t, idx, dst_w);
+    var gy = spv_binop(s, SPIRV_OP_UDIV, u32t, idx, dst_w);
+
+    var one = spv_const_f32(s, f32t, F64_ONE);
+    var sw = spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t, src_w);
+    var sh = spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t, src_h);
+    var swm1 = spv_binop(s, SPIRV_OP_FSUB, f32t, sw, one);
+    var shm1 = spv_binop(s, SPIRV_OP_FSUB, f32t, sh, one);
+    var inv_denx = _gk_cpy_param_f32(s, k, 5);
+    var inv_deny = _gk_cpy_param_f32(s, k, 6);
+    var sx = spv_binop(s, SPIRV_OP_FMUL, f32t,
+               spv_binop(s, SPIRV_OP_FMUL, f32t,
+                 spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t, gx), swm1), inv_denx);
+    var sy = spv_binop(s, SPIRV_OP_FMUL, f32t,
+               spv_binop(s, SPIRV_OP_FMUL, f32t,
+                 spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t, gy), shm1), inv_deny);
+
+    var fx0 = spv_ext_unary(s, f32t, GLSL_STD450_FLOOR, sx);
+    var fy0 = spv_ext_unary(s, f32t, GLSL_STD450_FLOOR, sy);
+    var x0 = spv_unop(s, SPIRV_OP_CONVERT_F_TO_S, u32t, fx0);
+    var y0 = spv_unop(s, SPIRV_OP_CONVERT_F_TO_S, u32t, fy0);
+    var x1 = spv_unop(s, SPIRV_OP_CONVERT_F_TO_S, u32t,
+               spv_ext_binary(s, f32t, GLSL_STD450_FMIN,
+                 spv_binop(s, SPIRV_OP_FADD, f32t, fx0, one), swm1));
+    var y1 = spv_unop(s, SPIRV_OP_CONVERT_F_TO_S, u32t,
+               spv_ext_binary(s, f32t, GLSL_STD450_FMIN,
+                 spv_binop(s, SPIRV_OP_FADD, f32t, fy0, one), shm1));
+    var fx = spv_binop(s, SPIRV_OP_FSUB, f32t, sx, fx0);
+    var fy = spv_binop(s, SPIRV_OP_FSUB, f32t, sy, fy0);
+
+    var r0 = spv_binop(s, SPIRV_OP_IMUL, u32t, y0, src_w);
+    var r1 = spv_binop(s, SPIRV_OP_IMUL, u32t, y1, src_w);
+
+    # ⚠ THE FOUR TEXELS ARE HELD PACKED, AND UNPACKED ONE CHANNEL AT A TIME.
+    # Unpacking all four up front leaves sixteen floats plus four addresses live
+    # across the whole interpolation, and mabda's GFX9 register allocator gives
+    # up: `gpu_shader_module_create_spirv` returns 0 even though the module is
+    # only 201 ids, well under the 256 cap, and a SIX-texel kernel that reuses
+    # one address compiles at 204. It is liveness, not size. Holding the packed
+    # words and extracting per channel keeps roughly twelve values live instead
+    # of twenty.
+    var pu2 = spv_type_ptr(s, SPIRV_SC_STORAGE_BUFFER, u32t);
+    var z0 = spv_const(s, load64(k + 8), 0);
+    var w00 = spv_load(s, u32t, spv_access_chain2(s, pu2, load64(k + 32), z0,
+                spv_binop(s, SPIRV_OP_IADD, u32t, r0, x0)));
+    var w10 = spv_load(s, u32t, spv_access_chain2(s, pu2, load64(k + 32), z0,
+                spv_binop(s, SPIRV_OP_IADD, u32t, r0, x1)));
+    var w01 = spv_load(s, u32t, spv_access_chain2(s, pu2, load64(k + 32), z0,
+                spv_binop(s, SPIRV_OP_IADD, u32t, r1, x0)));
+    var w11 = spv_load(s, u32t, spv_access_chain2(s, pu2, load64(k + 32), z0,
+                spv_binop(s, SPIRV_OP_IADD, u32t, r1, x1)));
+
+    var mask = spv_const(s, u32t, 255);
+    var out4[32];
+    var i = 0;
+    while (i < 4) {
+        var c00 = _gk_byte_f32(s, k, w00, i, mask);
+        var c10 = _gk_byte_f32(s, k, w10, i, mask);
+        var c01 = _gk_byte_f32(s, k, w01, i, mask);
+        var c11 = _gk_byte_f32(s, k, w11, i, mask);
+        var top = _gk_lerp(s, f32t, c00, c10, fx);
+        var bot = _gk_lerp(s, f32t, c01, c11, fx);
+        store64(&out4 + i * 8, _gk_lerp(s, f32t, top, bot, fy));
+        i = i + 1;
+    }
+    var packed = _gk_pack4(s, k, &out4);
+    var pu = spv_type_ptr(s, SPIRV_SC_STORAGE_BUFFER, u32t);
+    spv_store(s, spv_access_chain2(s, pu, load64(k + 40),
+                                   spv_const(s, load64(k + 8), 0), idx), packed);
+
+    _gk_guard_close(s, lm);
+    spv_fn_end(s);
+    fl_free(k);
+    return RG_ERR_NONE;
+}
+
 # --- gpu_context.cyr ---
 
 # gpu_context.cyr -- GPU device/queue management over mabda 4.0.9
