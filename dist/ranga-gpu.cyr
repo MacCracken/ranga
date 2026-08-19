@@ -7667,6 +7667,597 @@ fn icc_lut_profile_apply(p, r, g, b, x_out, y_out, z_out) {
     return RG_ERR_NONE;
 }
 
+# --- gpu_spirv.cyr ---
+
+# gpu_spirv.cyr -- a SPIR-V emitter for ranga's compute kernels
+# Private prefix: _sv_
+#
+# WHY THIS EXISTS. mabda's native backends (AMD GFX9, NVIDIA SM75) accept
+# SPIR-V and nothing else — `_backend_native_shader_module_create` returns 0 for
+# WGSL and even for pre-compiled GFX9. Nothing in the stack translates WGSL, and
+# mabda's own end-to-end example spends **125 lines of raw `store32`** on
+# `data[id.x] = id.x`, the simplest kernel there is. Fourteen real image kernels
+# written that way would be unreadable and unreviewable. This module is the
+# builder that makes them ordinary code.
+#
+# ⚠ SECTION ORDER IS PART OF THE FORMAT. A SPIR-V module is not a flat
+# instruction stream: capabilities, then the memory model, then entry points,
+# then execution modes, then ALL decorations, then ALL types/constants/globals,
+# and only then function bodies. But a kernel discovers the types it needs while
+# emitting its body, so the builder keeps four independent buffers and
+# concatenates them at the end. Appending in call order instead would produce a
+# module that is byte-for-byte plausible and rejected by every consumer.
+#
+# WHAT THE TARGET ACCEPTS. ranga may only emit what mabda's `spirv_lower_module`
+# turns into GFX9. `OpLoopMerge` and `OpPhi` are rejected outright
+# (LOWER_ERR_CONTROL_FLOW), so kernels are straight-line code plus if/else —
+# there are no loops here, and none can be added. f64 is gated off on native
+# (MABDA_NATIVE_F64), so everything is f32 or u32.
+#
+#   Builder 72 bytes
+#     +0  preamble words   +8  annotations   +16 types/consts   +24 body
+#     +32 next id          +40 type cache    +48 const cache
+#     +56 glsl ext-inst set id               +64 error flag
+
+var _SV_MAGIC   = 0x07230203;
+var _SV_VERSION = 0x00010300;   # SPIR-V 1.3 — what mabda's parser expects
+var _SV_HDR_WORDS = 5;
+
+# Spec-fixed values mabda does not name. These come from the SPIR-V
+# specification, not from mabda, and are stable across versions.
+var _SV_OP_MEMBER_DECORATE = 72;
+var _SV_OP_FUNCTION_END    = 56;
+var _SV_CAP_SHADER         = 1;
+var _SV_ADDRESSING_LOGICAL = 0;
+var _SV_MEMORY_GLSL450     = 1;
+var _SV_FUNC_CONTROL_NONE  = 0;
+var _SV_DECO_BLOCK         = 2;
+var _SV_DECO_OFFSET        = 35;
+
+# ── Word buffers ────────
+#
+# A growable u32 buffer. Words, not bytes — every offset in SPIR-V is a word.
+
+#must_use
+fn _sv_buf_new() {
+    var b = fl_alloc(24);
+    if (b == 0) { return 0; }
+    var d = fl_alloc(256 * 4);
+    if (d == 0) { fl_free(b); return 0; }
+    store64(b, d);
+    store64(b + 8, 0);
+    store64(b + 16, 256);
+    return b;
+}
+
+fn _sv_buf_push(b, w) {
+    var len = load64(b + 8);
+    var cap = load64(b + 16);
+    if (len >= cap) {
+        var ncap = cap * 2;
+        var nd = fl_alloc(ncap * 4);
+        if (nd == 0) { return RG_ERR_ALLOCATION; }
+        memcpy(nd, load64(b), len * 4);
+        fl_free(load64(b));
+        store64(b, nd);
+        store64(b + 16, ncap);
+    }
+    store32(load64(b) + len * 4, w & 0xFFFFFFFF);
+    store64(b + 8, len + 1);
+    return RG_ERR_NONE;
+}
+
+#must_use
+fn _sv_buf_len(b) { return load64(b + 8); }
+#must_use
+fn _sv_buf_data(b) { return load64(b); }
+
+fn _sv_buf_free(b) {
+    if (b == 0) { return RG_ERR_NONE; }
+    if (load64(b) != 0) { fl_free(load64(b)); }
+    fl_free(b);
+    return RG_ERR_NONE;
+}
+
+# ── Builder ────────
+var _SV_SIZE = 72;
+
+#must_use
+fn spv_new() {
+    var s = fl_calloc(_SV_SIZE);
+    if (s == 0) { return 0; }
+    store64(s, _sv_buf_new());
+    store64(s + 8, _sv_buf_new());
+    store64(s + 16, _sv_buf_new());
+    store64(s + 24, _sv_buf_new());
+    # Ids start at 1 — 0 is reserved by the format as "no id".
+    store64(s + 32, 1);
+    store64(s + 40, vec_new());
+    store64(s + 48, vec_new());
+    return s;
+}
+
+fn spv_free(s) {
+    if (s == 0) { return RG_ERR_NONE; }
+    _sv_buf_free(load64(s));
+    _sv_buf_free(load64(s + 8));
+    _sv_buf_free(load64(s + 16));
+    _sv_buf_free(load64(s + 24));
+    var i = 0;
+    var tc = load64(s + 40);
+    while (i < vec_len(tc)) { fl_free(vec_get(tc, i)); i = i + 1; }
+    i = 0;
+    var cc = load64(s + 48);
+    while (i < vec_len(cc)) { fl_free(vec_get(cc, i)); i = i + 1; }
+    fl_free(s);
+    return RG_ERR_NONE;
+}
+
+# Allocate a fresh result id.
+fn spv_id(s) {
+    var n = load64(s + 32);
+    store64(s + 32, n + 1);
+    return n;
+}
+
+#must_use
+fn spv_failed(s) { return load64(s + 64); }
+
+# Emit one instruction into `buf`: the (wordcount << 16 | opcode) header
+# followed by `n` operand words read from `ops`. The wordcount INCLUDES the
+# header word, which is the single most common thing to get wrong — a header
+# claiming the wrong length silently reinterprets every following instruction.
+fn _sv_emit(s, buf, op, ops, n) {
+    if (_sv_buf_push(buf, ((n + 1) << 16) | op) != RG_ERR_NONE) {
+        store64(s + 64, 1);
+        return RG_ERR_ALLOCATION;
+    }
+    var i = 0;
+    while (i < n) {
+        if (_sv_buf_push(buf, load64(ops + i * 8)) != RG_ERR_NONE) {
+            store64(s + 64, 1);
+            return RG_ERR_ALLOCATION;
+        }
+        i = i + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+# Emit into the function body — the common case while writing a kernel.
+fn spv_emit(s, op, ops, n) { return _sv_emit(s, load64(s + 24), op, ops, n); }
+
+# ── Interning ────────
+#
+# A kernel asks for "u32" or "pointer to u32 in StorageBuffer" many times over.
+# SPIR-V requires each distinct type to be declared EXACTLY ONCE — a duplicate
+# OpTypeInt is not merely wasteful, it is invalid. The cache is a linear scan
+# over (kind, a, b, c) tuples; there are a few dozen entries at most, and this
+# runs once per kernel build, not per pixel.
+var _SV_CACHE_REC = 40;
+
+#must_use
+fn _sv_cache_find(cache, kind, a, b, c) {
+    var i = 0;
+    while (i < vec_len(cache)) {
+        var e = vec_get(cache, i);
+        if (load64(e) == kind) {
+            if (load64(e + 8) == a) {
+                if (load64(e + 16) == b) {
+                    if (load64(e + 24) == c) { return load64(e + 32); }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _sv_cache_put(cache, kind, a, b, c, id) {
+    var e = fl_alloc(_SV_CACHE_REC);
+    if (e == 0) { return RG_ERR_ALLOCATION; }
+    store64(e, kind);
+    store64(e + 8, a);
+    store64(e + 16, b);
+    store64(e + 24, c);
+    store64(e + 32, id);
+    vec_push(cache, e);
+    return RG_ERR_NONE;
+}
+
+# Emit a type/constant declaration into the types section and cache it.
+#must_use
+fn _sv_decl(s, kind, a, b, c, op, ops, n) {
+    var hit = _sv_cache_find(load64(s + 40), kind, a, b, c);
+    if (hit != 0) { return hit; }
+    var id = spv_id(s);
+    store64(ops, id);
+    _sv_emit(s, load64(s + 16), op, ops, n);
+    _sv_cache_put(load64(s + 40), kind, a, b, c, id);
+    return id;
+}
+
+# ── Types ────────
+
+#must_use
+fn spv_type_void(s) {
+    var ops[8];
+    return _sv_decl(s, 1, 0, 0, 0, SPIRV_OP_TYPE_VOID, &ops, 1);
+}
+
+# `width` bits, `signed` 0 or 1.
+#must_use
+fn spv_type_int(s, width, signedness) {
+    var ops[24];
+    store64(&ops + 8, width);
+    store64(&ops + 16, signedness);
+    return _sv_decl(s, 2, width, signedness, 0, SPIRV_OP_TYPE_INT, &ops, 3);
+}
+
+#must_use
+fn spv_type_float(s, width) {
+    var ops[16];
+    store64(&ops + 8, width);
+    return _sv_decl(s, 3, width, 0, 0, SPIRV_OP_TYPE_FLOAT, &ops, 2);
+}
+
+#must_use
+fn spv_type_bool(s) {
+    var ops[8];
+    return _sv_decl(s, 4, 0, 0, 0, SPIRV_OP_TYPE_BOOL, &ops, 1);
+}
+
+#must_use
+fn spv_type_vec(s, comp, count) {
+    var ops[24];
+    store64(&ops + 8, comp);
+    store64(&ops + 16, count);
+    return _sv_decl(s, 5, comp, count, 0, SPIRV_OP_TYPE_VECTOR, &ops, 3);
+}
+
+#must_use
+fn spv_type_ptr(s, storage_class, pointee) {
+    var ops[24];
+    store64(&ops + 8, storage_class);
+    store64(&ops + 16, pointee);
+    return _sv_decl(s, 6, storage_class, pointee, 0, SPIRV_OP_TYPE_POINTER, &ops, 3);
+}
+
+# An unsized array. `stride` is the std430 element stride and is decorated onto
+# the type — mabda's `_spirv_check_array_strides` VALIDATES it against std430
+# and rejects the module if it disagrees, so it is a required argument rather
+# than an optional nicety.
+#must_use
+fn spv_type_runtime_array(s, elem, stride) {
+    var hit = _sv_cache_find(load64(s + 40), 7, elem, stride, 0);
+    if (hit != 0) { return hit; }
+    var ops[16];
+    var id = spv_id(s);
+    store64(&ops, id);
+    store64(&ops + 8, elem);
+    _sv_emit(s, load64(s + 16), SPIRV_OP_TYPE_RUNTIME_ARRAY, &ops, 2);
+    var d[24];
+    store64(&d, id);
+    store64(&d + 8, SPIRV_DECO_ARRAY_STRIDE);
+    store64(&d + 16, stride);
+    _sv_emit(s, load64(s + 8), SPIRV_OP_DECORATE, &d, 3);
+    _sv_cache_put(load64(s + 40), 7, elem, stride, 0, id);
+    return id;
+}
+
+# A single-member struct wrapping `member` — the shape every SSBO takes. Carries
+# the Block decoration and the member's Offset 0, both of which the descriptor
+# machinery requires.
+#must_use
+fn spv_type_struct1(s, member) {
+    var hit = _sv_cache_find(load64(s + 40), 8, member, 0, 0);
+    if (hit != 0) { return hit; }
+    var ops[16];
+    var id = spv_id(s);
+    store64(&ops, id);
+    store64(&ops + 8, member);
+    _sv_emit(s, load64(s + 16), SPIRV_OP_TYPE_STRUCT, &ops, 2);
+    var d[16];
+    store64(&d, id);
+    store64(&d + 8, _SV_DECO_BLOCK);
+    _sv_emit(s, load64(s + 8), SPIRV_OP_DECORATE, &d, 2);
+    var md[32];
+    store64(&md, id);
+    store64(&md + 8, 0);
+    store64(&md + 16, _SV_DECO_OFFSET);
+    store64(&md + 24, 0);
+    _sv_emit(s, load64(s + 8), _SV_OP_MEMBER_DECORATE, &md, 4);
+    _sv_cache_put(load64(s + 40), 8, member, 0, 0, id);
+    return id;
+}
+
+# A function type taking no parameters.
+#must_use
+fn spv_type_fn(s, ret) {
+    var ops[16];
+    store64(&ops + 8, ret);
+    return _sv_decl(s, 9, ret, 0, 0, SPIRV_OP_TYPE_FUNCTION, &ops, 2);
+}
+
+# ── Constants ────────
+
+# A 32-bit constant of type `ty`. Interned on (type, value) — the same literal
+# under two different types is two different constants.
+#must_use
+fn spv_const(s, ty, value) {
+    var ops[24];
+    store64(&ops, ty);
+    store64(&ops + 16, value);
+    var hit = _sv_cache_find(load64(s + 48), 10, ty, value, 0);
+    if (hit != 0) { return hit; }
+    var id = spv_id(s);
+    store64(&ops + 8, id);
+    _sv_emit(s, load64(s + 16), SPIRV_OP_CONSTANT, &ops, 3);
+    _sv_cache_put(load64(s + 48), 10, ty, value, 0, id);
+    return id;
+}
+
+# An f32 constant from an f64 bit pattern. SPIR-V stores the raw 32-bit IEEE
+# pattern, so the double must be narrowed first — storing the f64 pattern's low
+# word would be a different number entirely.
+#must_use
+fn spv_const_f32(s, ty, f64bits) {
+    return spv_const(s, ty, f64_to_f32(f64bits) & 0xFFFFFFFF);
+}
+
+# ── Globals ────────
+
+# Declare a storage-buffer binding: an SSBO holding a runtime array of `elem`.
+# Returns the OpVariable id. `stride` is the std430 element stride.
+#must_use
+fn spv_ssbo(s, elem, stride, binding, set) {
+    var arr = spv_type_runtime_array(s, elem, stride);
+    var st = spv_type_struct1(s, arr);
+    var ptr = spv_type_ptr(s, SPIRV_SC_STORAGE_BUFFER, st);
+    var id = spv_id(s);
+    var ops[24];
+    store64(&ops, ptr);
+    store64(&ops + 8, id);
+    store64(&ops + 16, SPIRV_SC_STORAGE_BUFFER);
+    _sv_emit(s, load64(s + 16), SPIRV_OP_VARIABLE, &ops, 3);
+    var d[24];
+    store64(&d, id);
+    store64(&d + 8, SPIRV_DECO_BINDING);
+    store64(&d + 16, binding);
+    _sv_emit(s, load64(s + 8), SPIRV_OP_DECORATE, &d, 3);
+    store64(&d + 8, SPIRV_DECO_DESCRIPTOR_SET);
+    store64(&d + 16, set);
+    _sv_emit(s, load64(s + 8), SPIRV_OP_DECORATE, &d, 3);
+    return id;
+}
+
+# Declare the GlobalInvocationId builtin as an Input vec3<u32>.
+#must_use
+fn spv_builtin_global_id(s) {
+    var u32t = spv_type_int(s, 32, 0);
+    var v3 = spv_type_vec(s, u32t, 3);
+    var ptr = spv_type_ptr(s, SPIRV_SC_INPUT, v3);
+    var id = spv_id(s);
+    var ops[24];
+    store64(&ops, ptr);
+    store64(&ops + 8, id);
+    store64(&ops + 16, SPIRV_SC_INPUT);
+    _sv_emit(s, load64(s + 16), SPIRV_OP_VARIABLE, &ops, 3);
+    var d[24];
+    store64(&d, id);
+    store64(&d + 8, SPIRV_DECO_BUILTIN);
+    store64(&d + 16, SPIRV_BI_GLOBAL_INVOCATION_ID);
+    _sv_emit(s, load64(s + 8), SPIRV_OP_DECORATE, &d, 3);
+    return id;
+}
+
+# ── Module assembly ────────
+
+# Write the fixed preamble. Must be called BEFORE any body emission, because it
+# also records the entry point, whose interface list has to name every Input and
+# Output variable the kernel touches. `iface` points at `n_iface` ids.
+#
+# `name` is the entry point name, packed as NUL-terminated UTF-8 in little-endian
+# words with the final word zero-padded — SPIR-V literal-string encoding, which
+# is why "main" occupies two words (0x6E69616D then 0) and not one.
+fn spv_preamble(s, name, local_x, local_y, local_z, entry_fn, iface, n_iface) {
+    var pre = load64(s);
+    var ops[64];
+
+    store64(&ops, _SV_CAP_SHADER);
+    _sv_emit(s, pre, SPIRV_OP_CAPABILITY, &ops, 1);
+
+    # The GLSL450 extended instruction set, for sqrt/floor/min/max/clamp.
+    var glsl = spv_id(s);
+    store64(s + 56, glsl);
+    store64(&ops, glsl);
+    # The wordcount counts THIS instruction's string ("GLSL.std.450"), not the
+    # entry point's name — they are different strings of different lengths, and
+    # a wordcount taken from the wrong one silently reinterprets everything
+    # after it.
+    _sv_buf_push(pre, ((2 + _sv_str_words("GLSL.std.450")) << 16) | SPIRV_OP_EXT_INST_IMPORT);
+    _sv_buf_push(pre, glsl);
+    _sv_str_emit(pre, "GLSL.std.450");
+
+    store64(&ops, _SV_ADDRESSING_LOGICAL);
+    store64(&ops + 8, _SV_MEMORY_GLSL450);
+    _sv_emit(s, pre, SPIRV_OP_MEMORY_MODEL, &ops, 2);
+
+    # OpEntryPoint: model, function, name-literal, then the interface ids.
+    _sv_buf_push(pre, ((3 + _sv_str_words(name) + n_iface) << 16) | SPIRV_OP_ENTRY_POINT);
+    _sv_buf_push(pre, SPIRV_EXEC_MODEL_GLCOMPUTE);
+    _sv_buf_push(pre, entry_fn);
+    _sv_str_emit(pre, name);
+    var i = 0;
+    while (i < n_iface) {
+        _sv_buf_push(pre, load64(iface + i * 8));
+        i = i + 1;
+    }
+
+    store64(&ops, entry_fn);
+    store64(&ops + 8, SPIRV_EXEC_MODE_LOCAL_SIZE);
+    store64(&ops + 16, local_x);
+    store64(&ops + 24, local_y);
+    store64(&ops + 32, local_z);
+    _sv_emit(s, pre, SPIRV_OP_EXECUTION_MODE, &ops, 5);
+    return RG_ERR_NONE;
+}
+
+# Words a SPIR-V literal string occupies: the bytes plus a mandatory NUL,
+# rounded up to a word. A string whose length is already a multiple of 4 still
+# gains a whole padding word — "abcd" is two words, not one.
+#must_use
+fn _sv_str_words(str) { return (strlen(str) / 4) + 1; }
+
+fn _sv_str_emit(buf, str) {
+    var n = strlen(str);
+    var words = (n / 4) + 1;
+    var i = 0;
+    while (i < words) {
+        var w = 0;
+        var j = 0;
+        while (j < 4) {
+            var idx = i * 4 + j;
+            if (idx < n) { w = w | (load8(str + idx) << (j * 8)); }
+            j = j + 1;
+        }
+        _sv_buf_push(buf, w);
+        i = i + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+# Open the kernel function. Returns nothing; the caller already allocated
+# `entry_fn` so it could name it in the entry point.
+fn spv_fn_begin(s, entry_fn, void_t, fn_t) {
+    var ops[32];
+    store64(&ops, void_t);
+    store64(&ops + 8, entry_fn);
+    store64(&ops + 16, _SV_FUNC_CONTROL_NONE);
+    store64(&ops + 24, fn_t);
+    _sv_emit(s, load64(s + 24), SPIRV_OP_FUNCTION, &ops, 4);
+    var lbl[8];
+    store64(&lbl, spv_id(s));
+    _sv_emit(s, load64(s + 24), SPIRV_OP_LABEL, &lbl, 1);
+    return RG_ERR_NONE;
+}
+
+fn spv_fn_end(s) {
+    var ops[8];
+    _sv_emit(s, load64(s + 24), SPIRV_OP_RETURN, &ops, 0);
+    _sv_emit(s, load64(s + 24), _SV_OP_FUNCTION_END, &ops, 0);
+    return RG_ERR_NONE;
+}
+
+# ── Body helpers ────────
+
+#must_use
+fn spv_load(s, ty, ptr) {
+    var id = spv_id(s);
+    var ops[24];
+    store64(&ops, ty);
+    store64(&ops + 8, id);
+    store64(&ops + 16, ptr);
+    spv_emit(s, SPIRV_OP_LOAD, &ops, 3);
+    return id;
+}
+
+fn spv_store(s, ptr, value) {
+    var ops[16];
+    store64(&ops, ptr);
+    store64(&ops + 8, value);
+    return spv_emit(s, SPIRV_OP_STORE, &ops, 2);
+}
+
+# Two-index access chain — the SSBO shape: member 0 of the struct, then the
+# array element.
+#must_use
+fn spv_access_chain2(s, ptr_ty, base, i0, i1) {
+    var id = spv_id(s);
+    var ops[40];
+    store64(&ops, ptr_ty);
+    store64(&ops + 8, id);
+    store64(&ops + 16, base);
+    store64(&ops + 24, i0);
+    store64(&ops + 32, i1);
+    spv_emit(s, SPIRV_OP_ACCESS_CHAIN, &ops, 5);
+    return id;
+}
+
+#must_use
+fn spv_binop(s, op, ty, a, b) {
+    var id = spv_id(s);
+    var ops[32];
+    store64(&ops, ty);
+    store64(&ops + 8, id);
+    store64(&ops + 16, a);
+    store64(&ops + 24, b);
+    spv_emit(s, op, &ops, 4);
+    return id;
+}
+
+#must_use
+fn spv_unop(s, op, ty, a) {
+    var id = spv_id(s);
+    var ops[24];
+    store64(&ops, ty);
+    store64(&ops + 8, id);
+    store64(&ops + 16, a);
+    spv_emit(s, op, &ops, 3);
+    return id;
+}
+
+#must_use
+fn spv_composite_extract(s, ty, composite, index) {
+    var id = spv_id(s);
+    var ops[32];
+    store64(&ops, ty);
+    store64(&ops + 8, id);
+    store64(&ops + 16, composite);
+    store64(&ops + 24, index);
+    spv_emit(s, SPIRV_OP_COMPOSITE_EXTRACT, &ops, 4);
+    return id;
+}
+
+# ── Finish ────────
+#
+# Concatenate header + preamble + annotations + types + body into one stream.
+# The id bound is `next_id`, which must be STRICTLY GREATER than every id used;
+# emitting `next_id - 1` here makes the highest-numbered id look out of range
+# and every consumer reject the module.
+#
+# Returns the byte length and writes the buffer pointer through `out_ptr`. The
+# caller owns that buffer and frees it with fl_free.
+#must_use
+fn spv_finish(s, out_ptr) {
+    if (load64(s + 64) != 0) { return 0; }
+    var pre = load64(s);
+    var ann = load64(s + 8);
+    var ty = load64(s + 16);
+    var body = load64(s + 24);
+    var total = _SV_HDR_WORDS + _sv_buf_len(pre) + _sv_buf_len(ann)
+              + _sv_buf_len(ty) + _sv_buf_len(body);
+    var out = fl_alloc(total * 4);
+    if (out == 0) { return 0; }
+
+    store32(out + 0, _SV_MAGIC);
+    store32(out + 4, _SV_VERSION);
+    store32(out + 8, 0);
+    store32(out + 12, load64(s + 32));
+    store32(out + 16, 0);
+
+    var off = _SV_HDR_WORDS * 4;
+    memcpy(out + off, _sv_buf_data(pre), _sv_buf_len(pre) * 4);
+    off = off + _sv_buf_len(pre) * 4;
+    memcpy(out + off, _sv_buf_data(ann), _sv_buf_len(ann) * 4);
+    off = off + _sv_buf_len(ann) * 4;
+    memcpy(out + off, _sv_buf_data(ty), _sv_buf_len(ty) * 4);
+    off = off + _sv_buf_len(ty) * 4;
+    memcpy(out + off, _sv_buf_data(body), _sv_buf_len(body) * 4);
+
+    store64(out_ptr, out);
+    return total * 4;
+}
+
 # --- gpu_context.cyr ---
 
 # gpu_context.cyr -- GPU device/queue management over mabda 4.0.9

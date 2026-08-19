@@ -1,0 +1,265 @@
+# gpu_spirv.tcyr — the SPIR-V emitter
+#
+# This module has no Rust counterpart: the Rust GPU path wrote WGSL and let wgpu
+# compile it. mabda's native backends take SPIR-V and nothing else, so ranga
+# emits it directly.
+#
+# The emitter has an unusually good oracle available: mabda ships a SPIR-V
+# PARSER, so every module this builds can be fed straight back and checked —
+# header, instruction framing, entry point, LocalSize. A malformed module is
+# caught here rather than as a silent 0 from the shader compiler.
+
+include "src/error.cyr"
+include "src/gpu_spirv.cyr"
+include "src/bytevec.cyr"
+include "src/pixel.cyr"
+include "src/gpu_context.cyr"
+include "src/gpu_buffer.cyr"
+
+alloc_init();
+
+var err = fl_alloc(8);
+var outp = fl_alloc(8);
+
+# The invert kernel: data[gid.x] ^= 0x00FFFFFF. Built twice over, so the tests
+# can inspect a fresh module without one test's mutations reaching another.
+fn build_invert(s) {
+    var voidt = spv_type_void(s);
+    var fnt = spv_type_fn(s, voidt);
+    var u32t = spv_type_int(s, 32, 0);
+    var gid = spv_builtin_global_id(s);
+    var ssbo = spv_ssbo(s, u32t, 4, 0, 0);
+    var entry = spv_id(s);
+    var iface[16];
+    store64(&iface, gid);
+    store64(&iface + 8, ssbo);
+    spv_preamble(s, "main", 64, 1, 1, entry, &iface, 2);
+    spv_fn_begin(s, entry, voidt, fnt);
+    var v3 = spv_type_vec(s, u32t, 3);
+    var idv = spv_load(s, v3, gid);
+    var ix = spv_composite_extract(s, u32t, idv, 0);
+    var pu = spv_type_ptr(s, SPIRV_SC_STORAGE_BUFFER, u32t);
+    var zero = spv_const(s, spv_type_int(s, 32, 1), 0);
+    var ep = spv_access_chain2(s, pu, ssbo, zero, ix);
+    var val = spv_load(s, u32t, ep);
+    var mask = spv_const(s, u32t, 0x00FFFFFF);
+    var inv = spv_binop(s, SPIRV_OP_BITWISE_XOR, u32t, val, mask);
+    spv_store(s, ep, inv);
+    spv_fn_end(s);
+    return ssbo;
+}
+
+# ================================================================
+test_group("literal strings");
+
+# SPIR-V literal strings are NUL-terminated and word-padded, so a string whose
+# length is already a multiple of four still costs a whole extra word. Getting
+# this wrong shifts every subsequent word of the module.
+assert_eq(_sv_str_words(""), 1, "the empty string is one word (just the NUL)");
+assert_eq(_sv_str_words("a"), 1, "one char fits one word");
+assert_eq(_sv_str_words("abc"), 1, "three chars plus NUL fill one word exactly");
+assert_eq(_sv_str_words("main"), 2, "four chars need a SECOND word for the NUL");
+assert_eq(_sv_str_words("abcde"), 2, "five chars span two words");
+assert_eq(_sv_str_words("GLSL.std.450"), 4, "the ext-inst set name is twelve chars, four words");
+
+# The encoding itself: little-endian bytes packed into words.
+var sb = _sv_buf_new();
+_sv_str_emit(sb, "main");
+assert_eq(_sv_buf_len(sb), 2, "'main' emits two words");
+# 'm'=0x6D 'a'=0x61 'i'=0x69 'n'=0x6E, low byte first.
+assert_eq(load32(_sv_buf_data(sb)), 0x6E69616D, "packed little-endian");
+assert_eq(load32(_sv_buf_data(sb) + 4), 0, "and the NUL word is zero");
+_sv_buf_free(sb);
+
+# ================================================================
+test_group("interning");
+
+# SPIR-V requires each distinct type to be declared EXACTLY ONCE. A duplicate
+# OpTypeInt is not merely wasteful, it is an invalid module.
+var s1 = spv_new();
+var a = spv_type_int(s1, 32, 0);
+var b = spv_type_int(s1, 32, 0);
+assert_eq(a, b, "the same type requested twice returns the same id");
+var c = spv_type_int(s1, 32, 1);
+assert_eq(a == c, 0, "but signedness makes a DIFFERENT type");
+var d = spv_type_int(s1, 16, 0);
+assert_eq(a == d, 0, "and so does width");
+
+var f32t = spv_type_float(s1, 32);
+assert_eq(f32t == a, 0, "a float is not an int of the same width");
+assert_eq(spv_type_float(s1, 32), f32t, "floats intern too");
+
+var v3a = spv_type_vec(s1, a, 3);
+assert_eq(spv_type_vec(s1, a, 3), v3a, "vectors intern on component and count");
+assert_eq(spv_type_vec(s1, a, 4) == v3a, 0, "a different lane count is a different type");
+
+var pa = spv_type_ptr(s1, SPIRV_SC_STORAGE_BUFFER, a);
+assert_eq(spv_type_ptr(s1, SPIRV_SC_STORAGE_BUFFER, a), pa, "pointers intern");
+assert_eq(spv_type_ptr(s1, SPIRV_SC_INPUT, a) == pa, 0,
+          "the same pointee in a different storage class is a different type");
+
+# Constants intern on (type, value) — the same literal under two types is two
+# constants, because SPIR-V constants carry their type.
+var k1 = spv_const(s1, a, 7);
+assert_eq(spv_const(s1, a, 7), k1, "constants intern");
+assert_eq(spv_const(s1, a, 8) == k1, 0, "a different value is a different constant");
+assert_eq(spv_const(s1, c, 7) == k1, 0, "and so is the same value at a different type");
+
+# Ids are handed out from 1 — 0 is reserved by the format as "no id".
+var fresh = spv_id(s1);
+assert_eq(fresh > 0, 1, "ids are never zero");
+assert_eq(spv_id(s1), fresh + 1, "and increase monotonically");
+spv_free(s1);
+
+# ================================================================
+test_group("module structure");
+
+var s2 = spv_new();
+build_invert(s2);
+assert_eq(spv_failed(s2), 0, "the build reported no allocation failure");
+var n = spv_finish(s2, outp);
+var p = load64(outp);
+
+assert_eq(n > 0, 1, "the module has a non-zero length");
+assert_eq(n % 4, 0, "and is a whole number of words");
+assert_eq(spirv_hdr_magic(p), 0x07230203, "the magic number is SPIR-V's");
+assert_eq(spirv_hdr_version(p), 0x00010300, "the version is 1.3");
+assert_eq(spirv_hdr_schema(p), 0, "the schema word is zero");
+
+# ⚠ The id bound must be STRICTLY GREATER than every id used. Emitting
+# `next_id - 1` makes the highest-numbered id look out of range, and consumers
+# reject the module — or worse, index a table one short.
+assert_eq(spirv_hdr_id_bound(p) > 0, 1, "the id bound is set");
+var probe = spv_new();
+var pid = spv_id(probe);
+assert_eq(pid, 1, "the first id is 1");
+spv_free(probe);
+
+# mabda's own parser is the oracle: it walks every instruction header and
+# rejects a zero or overrunning word count. A wordcount that does not include
+# the header word — the single easiest mistake — fails here.
+assert_eq(spirv_validate_stream(p, n), 0, "mabda's parser accepts the module");
+assert_eq(spirv_find_entry_point(p, n) > 0, 1, "and finds the entry point");
+assert_eq(spirv_count_instructions(p, n) > 0, 1, "and counts its instructions");
+
+# LocalSize round-trips through OpExecutionMode.
+var lsz[24];
+store64(&lsz, 0); store64(&lsz + 8, 0); store64(&lsz + 16, 0);
+spirv_find_local_size(p, n, spirv_find_entry_point(p, n), &lsz);
+assert_eq(load64(&lsz), 64, "LocalSize x is 64");
+assert_eq(load64(&lsz + 8), 1, "LocalSize y is 1");
+assert_eq(load64(&lsz + 16), 1, "LocalSize z is 1");
+
+# ⚠ SECTION ORDER. A SPIR-V module is not a flat instruction stream: the spec
+# fixes the order as capabilities, memory model, entry points, execution modes,
+# then ALL annotations, then ALL types/constants/globals, then function bodies.
+# mabda's parser scans for opcodes and does NOT enforce this, so swapping the
+# annotation and type sections passes every check above and even runs correctly
+# on the GPU — the mutant for it survives an otherwise complete suite. It is
+# still an invalid module, and a stricter consumer (the wgpu fallback path) is
+# entitled to reject it. So the order is asserted directly here.
+fn first_op_word(ptr, byte_len, want) {
+    var total = byte_len / 4;
+    var off = 5;
+    while (off < total) {
+        var w0 = spirv_word(ptr, off);
+        if (spirv_op(w0) == want) { return off; }
+        var wc = spirv_op_wordcount(w0);
+        if (wc == 0) { return 0 - 1; }
+        off = off + wc;
+    }
+    return 0 - 1;
+}
+var at_entry = first_op_word(p, n, SPIRV_OP_ENTRY_POINT);
+var at_exec  = first_op_word(p, n, SPIRV_OP_EXECUTION_MODE);
+var at_deco  = first_op_word(p, n, SPIRV_OP_DECORATE);
+var at_type  = first_op_word(p, n, SPIRV_OP_TYPE_VOID);
+var at_fn    = first_op_word(p, n, SPIRV_OP_FUNCTION);
+assert_eq(at_entry > 0, 1, "the entry point is present");
+assert_eq(at_exec > at_entry, 1, "execution modes follow the entry point");
+assert_eq(at_deco > at_exec, 1, "annotations follow the execution modes");
+assert_eq(at_type > at_deco, 1, "types follow ALL annotations, as the spec requires");
+assert_eq(at_fn > at_type, 1, "and the function body comes last");
+
+# The type table has to be reconstructible — this is what the GFX9 lowerer does
+# first, and it is where a mis-declared type surfaces.
+var idb = spirv_hdr_id_bound(p);
+var types = fl_calloc(idb * SPIRV_TYPE_REC);
+assert_eq(spirv_build_type_table(p, n, idb, idb, types) >= 0, 1,
+          "the type table rebuilds from the emitted stream");
+var consts = fl_calloc(idb * SPIRV_CONST_REC);
+assert_eq(spirv_build_const_table(p, n, idb, idb, consts) >= 0, 1,
+          "and so does the constant table");
+var deco = fl_calloc(idb * SPIRV_DECO_REC);
+assert_eq(spirv_build_decoration_table(p, n, idb, idb, deco) >= 0, 1,
+          "and the decoration table");
+
+fl_free(p);
+spv_free(s2);
+
+# ================================================================
+test_group("spirv on hardware");
+
+var ctx = gpu_context_new_amd(err);
+if (ctx == 0) {
+    assert_eq(load64(err) < 0, 1, "with no GPU, context creation reports an error");
+}
+
+if (ctx != 0) {
+    var m = gpu_context_mabda(ctx);
+    var s3 = spv_new();
+    build_invert(s3);
+    var n3 = spv_finish(s3, outp);
+    var spv = load64(outp);
+
+    # THE assertion this whole module exists for: mabda compiles ranga's
+    # emitted SPIR-V all the way down to GFX9 machine code.
+    var shmod = gpu_shader_module_create_spirv(m, spv, n3);
+    assert_eq(shmod != 0, 1, "mabda compiles the emitted SPIR-V to GFX9");
+
+    if (shmod != 0) {
+        var N = 256;
+        var buf = gpu_buffer_create(m, N * 4, 0x0080 | 0x0008 | 0x0004);
+        assert_eq(buf != 0, 1, "a device buffer allocates");
+        var host = fl_alloc(N * 4);
+        var i = 0;
+        while (i < N) { store32(host + i * 4, 0x11223344); i = i + 1; }
+        assert_eq(gpu_buffer_write(m, buf, 0, host, N * 4), 0, "the input uploads");
+
+        # Bindings for the compiled path: count at +0, then (handle, VA) pairs.
+        # The count MUST match the kernel's own binding count or mabda reads
+        # USER_DATA from unrelated memory.
+        var bp[24];
+        store64(&bp, 1);
+        native_buf_pair_write(&bp + 8, load64(buf + NATIVE_BUF_FIELD_HANDLE),
+                                        load64(buf + NATIVE_BUF_FIELD_VA));
+        assert_eq(gpu_compute_dispatch(m, shmod, N / 64, 1, 1, &bp), 0,
+                  "the dispatch is accepted and submitted");
+
+        var back = fl_alloc(N * 4);
+        assert_eq(gpu_buffer_read(m, buf, 0, back, N * 4), 0, "the result reads back");
+
+        var want = 0x11223344 ^ 0x00FFFFFF;
+        var bad = 0;
+        i = 0;
+        while (i < N) {
+            if (load32(back + i * 4) != want) { bad = bad + 1; }
+            i = i + 1;
+        }
+        assert_eq(bad, 0, "every one of the 256 lanes ran the kernel correctly");
+        # Stated as a value too, so a failure shows WHAT the GPU computed rather
+        # than only that it disagreed.
+        assert_eq(load32(back), want, "lane 0 holds the XORed value");
+        # The dispatch really wrote — an all-zero or untouched buffer would also
+        # give a mismatch count, but this distinguishes "wrong" from "never ran".
+        assert_eq(load32(back) == 0x11223344, 0, "and the buffer is not still the input");
+
+        gpu_buffer_release(m, buf);
+    }
+    spv_free(s3);
+    gpu_context_free(ctx);
+}
+
+var exit_code = assert_summary();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

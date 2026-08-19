@@ -352,6 +352,35 @@ function against that builder rather than a wall of offsets.
 surface and give the emitter a free self-check: every kernel can assert its own
 module parses before it is ever handed to the GPU.
 
+#### ✅ The emitter landed — and the whole native path is proven end to end
+
+`src/gpu_spirv.cyr` (413 lines), `tests/gpu_spirv.tcyr` (53 assertions).
+**HW-verified on AMD Cezanne**: ranga emits a 560-byte SPIR-V module, mabda
+compiles it SPIR-V → GFX9, it dispatches, and all 256 lanes come back correct.
+The remaining thirteen kernels are now ordinary code against this builder rather
+than walls of `store32`.
+
+**Four buffers, concatenated at finish.** A SPIR-V module has a fixed section
+order — capabilities, memory model, entry point, execution modes, then ALL
+annotations, then ALL types/constants/globals, then function bodies. But a
+kernel discovers the types it needs *while* emitting its body, so the builder
+keeps the sections apart and joins them in `spv_finish`.
+
+⚠ **mabda's parser does not enforce section order.** Swapping the annotation and
+type sections passes `spirv_validate_stream`, rebuilds every table, compiles to
+GFX9, and *runs correctly on the GPU* — the mutation for it survived an
+otherwise complete suite. It is still an invalid module and a stricter consumer
+may reject it, so `tests/gpu_spirv.tcyr` walks the instruction stream itself and
+asserts the section boundaries directly rather than trusting the lenient parser.
+
+**Mutation testing: 12 mutants, 12 killed.** The ones worth naming, because each
+is a whole-module corruption that produces a *plausible* file: a wordcount that
+omits its own header word (every following instruction reinterpreted), an id
+bound off by one (the highest id reads as out of range), a literal string
+dropping its NUL padding word (`"main"` is TWO words, not one — four chars plus
+a mandatory terminator), and each of the four interning keys being ignored,
+which silently declares a duplicate type where SPIR-V demands exactly one.
+
 ### M6 — GPU (original plan)
 
 `gpu_shaders`, `gpu_buffer`, `gpu_context`, `gpu_pipeline` against mabda's

@@ -113,7 +113,7 @@ fn xxhash32(data, len): i64 {
         }
 
         h = (_xxh32_rotl(v1, 1) + _xxh32_rotl(v2, 7) +
-        _xxh32_rotl(v3, 12) + _xxh32_rotl(v4, 18)) & m;
+          _xxh32_rotl(v3, 12) + _xxh32_rotl(v4, 18)) & m;
     } else {
         h = XXH32_PRIME5;
     }
@@ -660,9 +660,9 @@ fn xxhash32_final(st): i64 {
     var h = 0;
     if (total >= 16) {
         h = (_xxh32_rotl(load64(st), 1) +
-        _xxh32_rotl(load64(st + 8), 7) +
-        _xxh32_rotl(load64(st + 16), 12) +
-        _xxh32_rotl(load64(st + 24), 18)) & m;
+          _xxh32_rotl(load64(st + 8), 7) +
+          _xxh32_rotl(load64(st + 16), 12) +
+          _xxh32_rotl(load64(st + 24), 18)) & m;
     } else {
         h = XXH32_PRIME5;
     }
@@ -1030,7 +1030,7 @@ fn _huff_build(lengths, num_symbols, out_codes, out_fast): i64 {
         var len = load64(lengths + i * 8);
         if (len > 0 && len <= HUFF_MAX_BITS) {
             store64(&bl_count + len * 8,
-            load64(&bl_count + len * 8) + 1);
+              load64(&bl_count + len * 8) + 1);
         }
         i = i + 1;
     }
@@ -1065,9 +1065,9 @@ fn _huff_build(lengths, num_symbols, out_codes, out_fast): i64 {
         var len = load64(lengths + i * 8);
         if (len > 0) {
             store64(out_codes + i * 8,
-            load64(&next_code + len * 8));
+              load64(&next_code + len * 8));
             store64(&next_code + len * 8,
-            load64(&next_code + len * 8) + 1);
+              load64(&next_code + len * 8) + 1);
         } else {
             store64(out_codes + i * 8, 0);
         }
@@ -1096,7 +1096,7 @@ fn _huff_build(lengths, num_symbols, out_codes, out_fast): i64 {
             var idx = rev;
             while (idx < HUFF_TABLE_SIZE) {
                 store64(out_fast + idx * 8,
-                (len << HUFF_FAST_SHIFT) | i);
+                  (len << HUFF_FAST_SHIFT) | i);
                 idx = idx + step;
             }
         }
@@ -1125,7 +1125,7 @@ fn huff_build_enc_codes(lengths, num_symbols, out_codes_rev): i64 {
         var len = load64(lengths + i * 8);
         if (len > 0 && len <= HUFF_MAX_BITS) {
             store64(&bl_count + len * 8,
-            load64(&bl_count + len * 8) + 1);
+              load64(&bl_count + len * 8) + 1);
         }
         i = i + 1;
     }
@@ -1223,19 +1223,19 @@ fn _huff_decode(br, fast, lengths, codes, num_symbols): i64 {
 # Decode one literal/length symbol from the bitstream.
 fn huff_decode_litlen(br): i64 {
     return _huff_decode(br, _huff_litlen_fast, _huff_litlen_lens,
-    _huff_litlen_codes, _huff_litlen_count);
+      _huff_litlen_codes, _huff_litlen_count);
 }
 
 # Decode one distance symbol from the bitstream.
 fn huff_decode_dist(br): i64 {
     return _huff_decode(br, _huff_dist_fast, _huff_dist_lens,
-    _huff_dist_codes, _huff_dist_count);
+      _huff_dist_codes, _huff_dist_count);
 }
 
 # Decode one code-length symbol from the bitstream.
 fn huff_decode_cl(br): i64 {
     return _huff_decode(br, _huff_cl_fast, _huff_cl_lens,
-    _huff_cl_codes, _huff_cl_count);
+      _huff_cl_codes, _huff_cl_count);
 }
 
 # Build the literal/length Huffman table from code lengths.
@@ -1247,11 +1247,11 @@ fn huff_build_litlen(lengths, count): i64 {
     var i = 0;
     while (i < count) {
         store64(_huff_litlen_lens + i * 8,
-        load64(lengths + i * 8));
+          load64(lengths + i * 8));
         i = i + 1;
     }
     return _huff_build(_huff_litlen_lens, count,
-    _huff_litlen_codes, _huff_litlen_fast);
+      _huff_litlen_codes, _huff_litlen_fast);
 }
 
 # Build the distance Huffman table from code lengths.
@@ -1261,11 +1261,11 @@ fn huff_build_dist(lengths, count): i64 {
     var i = 0;
     while (i < count) {
         store64(_huff_dist_lens + i * 8,
-        load64(lengths + i * 8));
+          load64(lengths + i * 8));
         i = i + 1;
     }
     return _huff_build(_huff_dist_lens, count,
-    _huff_dist_codes, _huff_dist_fast);
+      _huff_dist_codes, _huff_dist_fast);
 }
 
 # Build the code-length Huffman table from code lengths.
@@ -1275,11 +1275,11 @@ fn huff_build_cl(lengths, count): i64 {
     var i = 0;
     while (i < count) {
         store64(_huff_cl_lens + i * 8,
-        load64(lengths + i * 8));
+          load64(lengths + i * 8));
         i = i + 1;
     }
     return _huff_build(_huff_cl_lens, count,
-    _huff_cl_codes, _huff_cl_fast);
+      _huff_cl_codes, _huff_cl_fast);
 }
 
 # ================================================================
@@ -1423,9 +1423,9 @@ fn huff_compute_lengths(freqs, num_symbols, out_lens, min_codes, max_bits): i64 
         var j = i - 1;
         while (j >= 0 && load64(sorted_freq + j * 8) > key_f) {
             store64(sorted_freq + (j + 1) * 8,
-            load64(sorted_freq + j * 8));
+              load64(sorted_freq + j * 8));
             store64(sorted_sym + (j + 1) * 8,
-            load64(sorted_sym + j * 8));
+              load64(sorted_sym + j * 8));
             j = j - 1;
         }
         store64(sorted_freq + (j + 1) * 8, key_f);
@@ -1456,7 +1456,7 @@ fn huff_compute_lengths(freqs, num_symbols, out_lens, min_codes, max_bits): i64 
             if (q2a == 0) { pq1 = 1; }
             else {
                 if (load64(sorted_freq + q1_head * 8) <=
-                load64(q2_freq + q2_head * 8)) { pq1 = 1; }
+                  load64(q2_freq + q2_head * 8)) { pq1 = 1; }
             }
         }
         if (pq1 == 1) {
@@ -1479,7 +1479,7 @@ fn huff_compute_lengths(freqs, num_symbols, out_lens, min_codes, max_bits): i64 
             if (q2a == 0) { pq1 = 1; }
             else {
                 if (load64(sorted_freq + q1_head * 8) <=
-                load64(q2_freq + q2_head * 8)) { pq1 = 1; }
+                  load64(q2_freq + q2_head * 8)) { pq1 = 1; }
             }
         }
         if (pq1 == 1) {
@@ -1528,11 +1528,11 @@ fn huff_compute_lengths(freqs, num_symbols, out_lens, min_codes, max_bits): i64 
         } else {
             var idx = node - n;
             store64(stack_node + sp * 8,
-            load64(q2_left + idx * 8));
+              load64(q2_left + idx * 8));
             store64(stack_depth + sp * 8, depth + 1);
             sp = sp + 1;
             store64(stack_node + sp * 8,
-            load64(q2_right + idx * 8));
+              load64(q2_right + idx * 8));
             store64(stack_depth + sp * 8, depth + 1);
             sp = sp + 1;
         }
@@ -1569,7 +1569,7 @@ fn _huff_redistribute(out_lens, num_symbols, sorted_sym, n, max_bits): i64 {
         var v = load64(out_lens + i * 8);
         if (v > 0) {
             store64(&bl_count + v * 8,
-            load64(&bl_count + v * 8) + 1);
+              load64(&bl_count + v * 8) + 1);
             if (v > max_seen) { max_seen = v; }
         }
         i = i + 1;
@@ -1581,8 +1581,8 @@ fn _huff_redistribute(out_lens, num_symbols, sorted_sym, n, max_bits): i64 {
     L = max_bits + 1;
     while (L <= max_seen) {
         store64(&bl_count + max_bits * 8,
-        load64(&bl_count + max_bits * 8) +
-        load64(&bl_count + L * 8));
+          load64(&bl_count + max_bits * 8) +
+          load64(&bl_count + L * 8));
         store64(&bl_count + L * 8, 0);
         L = L + 1;
     }
@@ -1605,11 +1605,11 @@ fn _huff_redistribute(out_lens, num_symbols, sorted_sym, n, max_bits): i64 {
         }
         if (bits == 0) { break; }   # safety — shouldn't reach here for n>=2
         store64(&bl_count + bits * 8,
-        load64(&bl_count + bits * 8) - 1);
+          load64(&bl_count + bits * 8) - 1);
         store64(&bl_count + (bits + 1) * 8,
-        load64(&bl_count + (bits + 1) * 8) + 2);
+          load64(&bl_count + (bits + 1) * 8) + 2);
         store64(&bl_count + max_bits * 8,
-        load64(&bl_count + max_bits * 8) - 1);
+          load64(&bl_count + max_bits * 8) - 1);
         kraft = kraft - step;
     }
 
@@ -2663,7 +2663,7 @@ fn _ldec_emit_block(ctx): i64 {
         emitted = bsv;
     } else {
         var dlen = lz4_decompress(load64(ctx + 56), bsv,
-        dst_b + dp_b, dst_cap_b - dp_b);
+          dst_b + dp_b, dst_cap_b - dp_b);
         if (dlen < 0) { return _ldec_poison(ctx, dlen); }
         emitted = dlen;
     }
@@ -4006,7 +4006,7 @@ fn deflate_dec_write(ctx, input, in_len): i64 {
             # gracefully so we don't stall at the very end of a chunk.
             cp = _ddec_fill(ctx, input, cp, end, 9);
             var sym = _ddec_decode_huff(ctx, _huff_litlen_fast,
-            _huff_litlen_lens, _huff_litlen_codes, _huff_litlen_count);
+              _huff_litlen_lens, _huff_litlen_codes, _huff_litlen_count);
             if (sym == 0 - DDEC_NEED_MORE) { return cp; }
             if (sym < 0) { return _ddec_poison(ctx, sym); }
 
@@ -4039,9 +4039,9 @@ fn deflate_dec_write(ctx, input, in_len): i64 {
                     return _ddec_poison(ctx, 0 - ERR_CORRUPT_DATA);
                 }
                 store64(ctx + 88,
-                load64(&_deflate_len_base + len_idx * 8));
+                  load64(&_deflate_len_base + len_idx * 8));
                 store64(ctx + 104,
-                load64(&_deflate_len_extra + len_idx * 8));
+                  load64(&_deflate_len_extra + len_idx * 8));
                 store64(ctx + 24, DDEC_STATE_LEN_EXTRA);
             }
         } elif (state == DDEC_STATE_LEN_EXTRA) {
@@ -4059,16 +4059,16 @@ fn deflate_dec_write(ctx, input, in_len): i64 {
             # the bridge consume only what the fast table prescribes.
             cp = _ddec_fill(ctx, input, cp, end, 9);
             var dsym = _ddec_decode_huff(ctx, _huff_dist_fast,
-            _huff_dist_lens, _huff_dist_codes, _huff_dist_count);
+              _huff_dist_lens, _huff_dist_codes, _huff_dist_count);
             if (dsym == 0 - DDEC_NEED_MORE) { return cp; }
             if (dsym < 0) { return _ddec_poison(ctx, dsym); }
             if (dsym >= 30) {
                 return _ddec_poison(ctx, 0 - ERR_CORRUPT_DATA);
             }
             store64(ctx + 96,
-            load64(&_deflate_dist_base + dsym * 8));
+              load64(&_deflate_dist_base + dsym * 8));
             store64(ctx + 104,
-            load64(&_deflate_dist_extra + dsym * 8));
+              load64(&_deflate_dist_extra + dsym * 8));
             store64(ctx + 24, DDEC_STATE_DIST_EXTRA);
         } elif (state == DDEC_STATE_DIST_EXTRA) {
             var extra_dc = load64(ctx + 104);
@@ -4108,7 +4108,7 @@ fn deflate_dec_write(ctx, input, in_len): i64 {
                 # Fast path — no preset dict, source is always in dst.
                 while (i_match < length_v) {
                     store8(dst_match + dp_match + i_match,
-                    load8(dst_match + src_match + i_match));
+                      load8(dst_match + src_match + i_match));
                     i_match = i_match + 1;
                 }
             } else {
@@ -4197,12 +4197,12 @@ fn deflate_dec_write(ctx, input, in_len): i64 {
                 # tables and transition into the symbol-decode loop.
                 huff_build_litlen(_ddec_all_lens, load64(ctx + 112));
                 huff_build_dist(_ddec_all_lens
-                + load64(ctx + 112) * 8, load64(ctx + 120));
+                  + load64(ctx + 112) * 8, load64(ctx + 120));
                 store64(ctx + 24, DDEC_STATE_DECODE_SYM);
             } else {
                 cp = _ddec_fill(ctx, input, cp, end, 9);
                 var cl_sym = _ddec_decode_huff(ctx, _huff_cl_fast,
-                _huff_cl_lens, _huff_cl_codes, _huff_cl_count);
+                  _huff_cl_lens, _huff_cl_codes, _huff_cl_count);
                 if (cl_sym == 0 - DDEC_NEED_MORE) { return cp; }
                 if (cl_sym < 0) { return _ddec_poison(ctx, cl_sym); }
                 if (cl_sym <= 15) {
@@ -5054,7 +5054,7 @@ fn _dyn_collect_at(src, src_len, sp): i64 {
                 var lextra = load64(&_deflate_len_extra + li * 8);
                 var lbase = load64(&_deflate_len_base + li * 8);
                 store64(_dyn_sym_buf + _dyn_sym_count * 8,
-                _dyn_pack(lsym, lextra, mlen - lbase));
+                  _dyn_pack(lsym, lextra, mlen - lbase));
                 _dyn_sym_count = _dyn_sym_count + 1;
                 store64(_dyn_lit_freq + lsym * 8, load64(_dyn_lit_freq + lsym * 8) + 1);
 
@@ -5062,7 +5062,7 @@ fn _dyn_collect_at(src, src_len, sp): i64 {
                 var dextra = load64(&_deflate_dist_extra + di * 8);
                 var dbase = load64(&_deflate_dist_base + di * 8);
                 store64(_dyn_sym_buf + _dyn_sym_count * 8,
-                _dyn_pack(di, dextra, mdist - dbase));
+                  _dyn_pack(di, dextra, mdist - dbase));
                 _dyn_sym_count = _dyn_sym_count + 1;
                 store64(_dyn_dist_freq + di * 8, load64(_dyn_dist_freq + di * 8) + 1);
 
@@ -5127,11 +5127,11 @@ fn _dyn_flush_subblock(bw, bfinal): i64 {
     if (rc < 0) { return rc; }
 
     rc = _deflate_write_dynamic_header(bw, _dyn_opt_lit_lens, hlit,
-    _dyn_opt_dist_lens, hdist);
+      _dyn_opt_dist_lens, hdist);
     if (rc < 0) { return rc; }
 
     return _deflate_write_syms_dynamic(bw, _dyn_opt_lit_lens, _dyn_opt_lit_codes,
-    _dyn_opt_dist_lens, _dyn_opt_dist_codes);
+      _dyn_opt_dist_lens, _dyn_opt_dist_codes);
 }
 
 # Emit one or more dynamic Huffman sub-blocks covering src[sp_start..sp_end).
@@ -5938,7 +5938,7 @@ fn zlib_dec_write(ctx, input, in_len): i64 {
                 var dp_after = load64(inner + 8);
                 if (dp_after > dp_before) {
                     adler32_update(load64(ctx + 16),
-                    dst_p + dp_before, dp_after - dp_before);
+                      dst_p + dp_before, dp_after - dp_before);
                 }
                 cp = cp + rc;
                 if (load64(inner + 24) == DDEC_STATE_DONE) {
@@ -6195,7 +6195,7 @@ fn _gzip_decompress_inner(src, src_len, dst, dst_cap, ratio_max): i64 {
         }
 
         var dlen = _gzip_decompress_member(src + pos, src_len - pos,
-        dst + total, member_cap, member_ratio);
+          dst + total, member_cap, member_ratio);
         if (dlen < 0) {
             if (starved == 1 && dlen == 0 - ERR_BUFFER_TOO_SMALL) { return 0 - ERR_RATIO_LIMIT; }
             return dlen;
@@ -6543,7 +6543,7 @@ fn gzip_dec_write(ctx, input, in_len): i64 {
                 var dp_after = load64(inner + 8);
                 if (dp_after > dp_before) {
                     crc32_update(load64(ctx + 16),
-                    dst_p + dp_before, dp_after - dp_before);
+                      dst_p + dp_before, dp_after - dp_before);
                 }
                 cp = cp + rc;
                 if (load64(inner + 24) == DDEC_STATE_DONE) {
@@ -7097,7 +7097,7 @@ fn _xz_lzma2_run(): i64 {
             }
             if (_xz_in_pos + 2 > _xz_in_end) { return 0 - ERR_CORRUPT_DATA; }
             var usize = ((load8(_xz_in + _xz_in_pos) << 8)
-            | load8(_xz_in + _xz_in_pos + 1)) + 1;
+              | load8(_xz_in + _xz_in_pos + 1)) + 1;
             _xz_in_pos = _xz_in_pos + 2;
             if (_xz_in_pos + usize > _xz_in_end) { return 0 - ERR_CORRUPT_DATA; }
             var i = 0;
@@ -7118,10 +7118,10 @@ fn _xz_lzma2_run(): i64 {
         # LZMA chunk. ctrl bits: [7]=1, [6:5]=reset mode, [4:0]=usize hi.
         if (_xz_in_pos + 4 > _xz_in_end) { return 0 - ERR_CORRUPT_DATA; }
         var unpacked = (((ctrl & 31) << 16)
-        | (load8(_xz_in + _xz_in_pos) << 8)
-        | load8(_xz_in + _xz_in_pos + 1)) + 1;
+          | (load8(_xz_in + _xz_in_pos) << 8)
+          | load8(_xz_in + _xz_in_pos + 1)) + 1;
         var packed = ((load8(_xz_in + _xz_in_pos + 2) << 8)
-        | load8(_xz_in + _xz_in_pos + 3)) + 1;
+          | load8(_xz_in + _xz_in_pos + 3)) + 1;
         _xz_in_pos = _xz_in_pos + 4;
         var reset = (ctrl >> 5) & 3;
 
@@ -7293,8 +7293,8 @@ fn _xz_decode_stream(s): i64 {
 
     # Stream header: magic FD 37 7A 58 5A 00.
     if (load8(src + s) != 0xFD || load8(src + s + 1) != 0x37
-    || load8(src + s + 2) != 0x7A || load8(src + s + 3) != 0x58
-    || load8(src + s + 4) != 0x5A || load8(src + s + 5) != 0x00) {
+      || load8(src + s + 2) != 0x7A || load8(src + s + 3) != 0x58
+      || load8(src + s + 4) != 0x5A || load8(src + s + 5) != 0x00) {
         return 0 - ERR_CORRUPT_DATA;
     }
     # Stream flags: byte 6 reserved (0), byte 7 = check type.
@@ -8332,7 +8332,7 @@ fn _xze_dp_fill(src, src_len, base_pos, W): i64 {
                 # (pos+avail-1 = base_pos+W-1 < src_len; pos-cb+avail-1 in [pos-cb,
                 # base_pos+W-2]).
                 if (pos - cb >= 0
-                && load8(src + pos + avail - 1) == load8(src + pos - cb + avail - 1)) {
+                  && load8(src + pos + avail - 1) == load8(src + pos - cb + avail - 1)) {
                     var crl = 0;
                     while (crl < avail && load8(src + pos + crl) == load8(src + pos - cb + crl)) {
                         crl = crl + 1;
@@ -8538,7 +8538,7 @@ fn _xze_dp_emit(src, base_pos, W): i64 {
     while (i > 0) {
         i = i - 1;
         _xze_emit_op(src, load64(_xze_stk_kind + i * 8), load64(_xze_stk_len + i * 8),
-        load64(_xze_stk_dist + i * 8));
+          load64(_xze_stk_dist + i * 8));
     }
     return 0;
 }
@@ -8674,9 +8674,9 @@ fn _xz_compress_inner(src, src_len, dst, dst_cap): i64 {
         _xze_md = _sankoch_alloc((XZE_MATCH_MAX + 1) * 8);
         _xze_lpc = _sankoch_alloc(2 * 16 * 272 * 8);
         if (_xze_lpc == 0 || _xze_oc == 0 || _xze_os == 0 || _xze_o0 == 0 || _xze_o1 == 0
-        || _xze_o2 == 0 || _xze_o3 == 0 || _xze_olen == 0 || _xze_okind == 0
-        || _xze_odist == 0 || _xze_stk_len == 0 || _xze_stk_kind == 0
-        || _xze_stk_dist == 0 || _xze_ml == 0 || _xze_md == 0) {
+          || _xze_o2 == 0 || _xze_o3 == 0 || _xze_olen == 0 || _xze_okind == 0
+          || _xze_odist == 0 || _xze_stk_len == 0 || _xze_stk_kind == 0
+          || _xze_stk_dist == 0 || _xze_ml == 0 || _xze_md == 0) {
             return 0 - ERR_OOM;   # flag stays clear -> retry re-allocates cleanly
         }
         _xze_dp_ready = 1;
@@ -8925,7 +8925,7 @@ fn _bz_make_tables(t, min_len, max_len): i64 {
     i = 1;
     while (i < BZ_MAX_CODE_LEN) {
         store64(_bz_base + (lbase + i) * 8,
-        load64(_bz_base + (lbase + i) * 8) + load64(_bz_base + (lbase + i - 1) * 8));
+          load64(_bz_base + (lbase + i) * 8) + load64(_bz_base + (lbase + i - 1) * 8));
         i = i + 1;
     }
 
@@ -9223,9 +9223,9 @@ fn _bz_alloc_tables(): i64 {
     _bz_cftab = _sankoch_alloc(257 * 8);
     _bz_tt = _sankoch_alloc(BZ_MAX_BLOCK * 8);
     if (_bz_limit == 0 || _bz_base == 0 || _bz_perm == 0 || _bz_minlens == 0
-    || _bz_len == 0 || _bz_selector == 0 || _bz_selmtf == 0 || _bz_inuse == 0
-    || _bz_seq == 0 || _bz_mtf == 0 || _bz_unzftab == 0 || _bz_cftab == 0
-    || _bz_tt == 0) {
+      || _bz_len == 0 || _bz_selector == 0 || _bz_selmtf == 0 || _bz_inuse == 0
+      || _bz_seq == 0 || _bz_mtf == 0 || _bz_unzftab == 0 || _bz_cftab == 0
+      || _bz_tt == 0) {
         return 0 - ERR_OOM;   # flag stays clear -> a retry re-allocates cleanly
     }
     _bz_tables_ready = 1;
@@ -9257,7 +9257,7 @@ fn _bz2_decompress_inner(src, src_len, dst, dst_cap, ratio_max): i64 {
         var level = load8(src + off + 3) - 0x30;
         var valid = 1;
         if (load8(src + off) != 0x42 || load8(src + off + 1) != 0x5A
-        || load8(src + off + 2) != 0x68 || level < 1 || level > 9) {
+          || load8(src + off + 2) != 0x68 || level < 1 || level > 9) {
             valid = 0;
         }
         if (valid == 0) {
@@ -9405,11 +9405,11 @@ fn _bze_alloc(): i64 {
     _bze_hwt = _sankoch_alloc(600 * 8);
     _bze_hpar = _sankoch_alloc(600 * 8);
     if (_bze_rle == 0 || _bze_ptr == 0 || _bze_tmp == 0 || _bze_rank == 0
-    || _bze_nrank == 0 || _bze_cnt == 0 || _bze_lcol == 0 || _bze_mtfv == 0
-    || _bze_efreq == 0 || _bze_hlen == 0 || _bze_hcode == 0 || _bze_rfreq == 0
-    || _bze_sel == 0 || _bze_selmtf == 0 || _bze_yy == 0 || _bze_unseq == 0
-    || _bze_seq2 == 0 || _bze_inuse2 == 0 || _bze_heap == 0 || _bze_hwt == 0
-    || _bze_hpar == 0) {
+      || _bze_nrank == 0 || _bze_cnt == 0 || _bze_lcol == 0 || _bze_mtfv == 0
+      || _bze_efreq == 0 || _bze_hlen == 0 || _bze_hcode == 0 || _bze_rfreq == 0
+      || _bze_sel == 0 || _bze_selmtf == 0 || _bze_yy == 0 || _bze_unseq == 0
+      || _bze_seq2 == 0 || _bze_inuse2 == 0 || _bze_heap == 0 || _bze_hwt == 0
+      || _bze_hpar == 0) {
         return 0 - ERR_OOM;   # flag stays clear -> a retry re-allocates cleanly
     }
     _bze_ready = 1;
@@ -10534,7 +10534,7 @@ fn _z_huff_tree(p, end) {
         var wt = _z_pool_wtab;
         store64(wt + 24, wlog);
         if (_z_fse_build(wdist, wnum, wlog,
-        load64(wt + 0), load64(wt + 8), load64(wt + 16)) < 0) { return 0 - 60; }
+            load64(wt + 0), load64(wt + 8), load64(wt + 16)) < 0) { return 0 - 60; }
         # decode weights from the backward bitstream over p+1+nc .. p+1+hb
         var bstart = p + 1 + nc;
         var blen = hb - nc;
@@ -10908,7 +10908,7 @@ fn _z_seq_table(mode, pdist, numSym, plog, p, which, end) {
         if (t2 == 0) { return 0; }
         store64(t2 + 24, load64(log_out));   # the pooled arrays are max-sized; set the real log
         if (_z_fse_build(d, load64(nsym_out), load64(log_out),
-        load64(t2 + 0), load64(t2 + 8), load64(t2 + 16)) < 0) { return 0; }
+            load64(t2 + 0), load64(t2 + 8), load64(t2 + 16)) < 0) { return 0; }
         if (which == 0) { _z_fse_ll = t2; } elif (which == 1) { _z_fse_of = t2; } else { _z_fse_ml = t2; }
         return t2;
     }
@@ -11134,7 +11134,7 @@ fn zstd_content_size(src, src_len) {
 fn zstd_frame_content_size(src, src_len) {
     if (src_len < 5) { return 0 - 1; }
     if ((load8(src) & 0xFF) != 0x28 || (load8(src + 1) & 0xFF) != 0xB5
-    || (load8(src + 2) & 0xFF) != 0x2F || (load8(src + 3) & 0xFF) != 0xFD) { return 0 - 1; }
+      || (load8(src + 2) & 0xFF) != 0x2F || (load8(src + 3) & 0xFF) != 0xFD) { return 0 - 1; }
     var end = src + src_len;
     var fhd = load8(src + 4) & 0xFF;
     var fcs_flag = (fhd >> 6) & 3;
@@ -11247,8 +11247,8 @@ fn _ze_huff_alloc() {
     _ze_hw = _sankoch_alloc(512 * 8); _ze_hp = _sankoch_alloc(512 * 8);
     _ze_ha = _sankoch_alloc(512 * 8); _ze_hsym = _sankoch_alloc(256 * 8);
     if (_ze_cnt == 0 || _ze_nb == 0 || _ze_wt == 0 || _ze_code == 0 || _ze_tmp == 0
-    || _ze_tmp2 == 0
-    || _ze_hw == 0 || _ze_hp == 0 || _ze_ha == 0 || _ze_hsym == 0) {
+      || _ze_tmp2 == 0
+      || _ze_hw == 0 || _ze_hp == 0 || _ze_ha == 0 || _ze_hsym == 0) {
         _ze_oom = 1;
         return 0 - 1;
     }
@@ -11686,8 +11686,8 @@ fn _ze_lz_alloc() {
     _ze_prev = _sankoch_alloc(_ze_maxwin * 8);    # 2.7.4 frame-global chain (window*8 bytes)
     _ze_head_save = _sankoch_alloc((1 << 16) * 8); # best-of head shadow (512 KiB)
     if (_zs_ll == 0 || _zs_ml == 0 || _zs_off == 0 || _zs_ofv == 0 || _zs_llc == 0
-    || _zs_ofc == 0 || _zs_mlc == 0 || _zs_lit == 0 || _ze_head == 0 || _ze_prev == 0
-    || _ze_head_save == 0) {
+      || _zs_ofc == 0 || _zs_mlc == 0 || _zs_lit == 0 || _ze_head == 0 || _ze_prev == 0
+      || _ze_head_save == 0) {
         _ze_oom = 1;
         return 0 - 1;
     }
@@ -11723,7 +11723,7 @@ fn _ze_find(src, pos, n, chain_max) {
             # Quick reject: a candidate can only beat best_len if it matches at
             # index best_len — skip the full scan otherwise (keeps the chain cheap).
             if (best_len == 0 || (best_len < lim
-            && load8(src + cand + best_len) == load8(src + pos + best_len))) {
+                && load8(src + cand + best_len) == load8(src + pos + best_len))) {
                 var l = 0;
                 while (l < lim && load8(src + cand + l) == load8(src + pos + l)) { l = l + 1; }
                 if (l > best_len) { best_len = l; best_off = off; }
@@ -11890,9 +11890,9 @@ fn _ze_lz_parse(g, bstart, bend) {
         var use_rep = 0;
         if (_ze_lazy == 1) {
             if (_ze_replen >= 3
-            && (blen < 3
-            || _ze_mvalue(_ze_replen, _ze_pr_offval_peek(_ze_repoff, ll00))
-            >= _ze_mvalue(blen, _ze_pr_offval_peek(boff, ll00)))) {
+              && (blen < 3
+                || _ze_mvalue(_ze_replen, _ze_pr_offval_peek(_ze_repoff, ll00))
+                >= _ze_mvalue(blen, _ze_pr_offval_peek(boff, ll00)))) {
                 blen = _ze_replen; boff = _ze_repoff; use_rep = 1;
             }
         } elif (_ze_replen >= 3 && _ze_replen + 2 >= blen) {
@@ -11917,9 +11917,9 @@ fn _ze_lz_parse(g, bstart, bend) {
                 # that pays on record-structured data — was unreachable.
                 _ze_rep_search(g, pos + 1, bend, ll0 + 1);
                 if (_ze_replen >= 3
-                && (nlen < 3
-                || _ze_mvalue(_ze_replen, _ze_pr_offval_peek(_ze_repoff, ll0 + 1))
-                > _ze_mvalue(nlen, _ze_pr_offval_peek(noff, ll0 + 1)))) {
+                  && (nlen < 3
+                    || _ze_mvalue(_ze_replen, _ze_pr_offval_peek(_ze_repoff, ll0 + 1))
+                    > _ze_mvalue(nlen, _ze_pr_offval_peek(noff, ll0 + 1)))) {
                     nlen = _ze_replen; noff = _ze_repoff;
                 }
                 # Defer only when the later match is worth MORE than the current one
@@ -11928,8 +11928,8 @@ fn _ze_lz_parse(g, bstart, bend) {
                 var rep_locked = 0;
                 if (use_rep == 1 && _ze_pr_offval_peek(noff, ll0 + 1) > 3) { rep_locked = 1; }
                 if (rep_locked == 0 && nlen >= 3
-                && _ze_mvalue(nlen, _ze_pr_offval_peek(noff, ll0 + 1))
-                > _ze_mvalue(blen, _ze_pr_offval_peek(boff, ll0)) + 8) {
+                  && _ze_mvalue(nlen, _ze_pr_offval_peek(noff, ll0 + 1))
+                  > _ze_mvalue(blen, _ze_pr_offval_peek(boff, ll0)) + 8) {
                     _ze_insert(g, pos + 1, _ze_glen);   # defer -> pos+1 is the match position
                     pos = pos + 1;
                     blen = nlen; boff = noff;
@@ -12342,7 +12342,7 @@ fn _zo_lz_parse(src, bstart, bend) {
                     store64(_zo_price + cur * 8, lprice);
                     # (a2) with1literal rescue
                     if (_zo_optlevel >= 1 && pm_litlen == 0 && pm_mlen > 0
-                    && (_zo_ll_price(1) - _zo_ll_price(0)) < 0 && ip + cur < iend) {
+                      && (_zo_ll_price(1) - _zo_ll_price(0)) < 0 && ip + cur < iend) {
                         var nb = _zo_lit_price(load8(src + ip + cur) & 255);
                         var w1 = pm_price + nb + (_zo_ll_price(1) - _zo_ll_price(0));
                         var wm = lprice + nb + (_zo_ll_price(l + 1) - _zo_ll_price(l));
@@ -12350,7 +12350,7 @@ fn _zo_lz_parse(src, bstart, bend) {
                             var pv = cur - pm_mlen;
                             var pll0 = 0; if (load64(_zo_litlen + pv * 8) == 0) { pll0 = 1; }
                             _zo_newrep(load64(_zo_rep0 + pv * 8), load64(_zo_rep1 + pv * 8),
-                            load64(_zo_rep2 + pv * 8), pm_off, pll0);
+                              load64(_zo_rep2 + pv * 8), pm_off, pll0);
                             store64(_zo_mlen + (cur + 1) * 8, pm_mlen);
                             store64(_zo_off + (cur + 1) * 8, pm_off);
                             store64(_zo_bof + (cur + 1) * 8, pm_bof);
@@ -12368,7 +12368,7 @@ fn _zo_lz_parse(src, bstart, bend) {
                     var pv2 = cur - load64(_zo_mlen + cur * 8);
                     var p2ll0 = 0; if (load64(_zo_litlen + pv2 * 8) == 0) { p2ll0 = 1; }
                     _zo_newrep(load64(_zo_rep0 + pv2 * 8), load64(_zo_rep1 + pv2 * 8),
-                    load64(_zo_rep2 + pv2 * 8), load64(_zo_off + cur * 8), p2ll0);
+                      load64(_zo_rep2 + pv2 * 8), load64(_zo_off + cur * 8), p2ll0);
                     store64(_zo_rep0 + cur * 8, _zo_nr0);
                     store64(_zo_rep1 + cur * 8, _zo_nr1);
                     store64(_zo_rep2 + cur * 8, _zo_nr2);
@@ -12378,7 +12378,7 @@ fn _zo_lz_parse(src, bstart, bend) {
                 if (ip + cur > ilimit) { cur = cur + 1; continue; }
                 # (d) speed short-circuit
                 if (_zo_optlevel == 0
-                && load64(_zo_price + (cur + 1) * 8) <= load64(_zo_price + cur * 8) + 128) {
+                  && load64(_zo_price + (cur + 1) * 8) <= load64(_zo_price + cur * 8) + 128) {
                     cur = cur + 1; continue;
                 }
                 # (e) match candidates at cur
@@ -12392,7 +12392,7 @@ fn _zo_lz_parse(src, bstart, bend) {
                 if (nm2 == 0) { cur = cur + 1; continue; }
                 var longestML = load64(_zo_mt_len + (nm2 - 1) * 8);
                 if (longestML > _zo_suff || cur + longestML >= 4096
-                || ip + cur + longestML >= iend) {
+                  || ip + cur + longestML >= iend) {
                     ls_mlen = longestML; ls_off = load64(_zo_mt_ofb + (nm2 - 1) * 8);
                     ls_bof = load64(_zo_mt_boff + (nm2 - 1) * 8);
                     ls_litlen = 0;
@@ -12573,7 +12573,7 @@ fn _ze_fse_ctable(dist, numSym, log, slot) {
         dfs = load64(b + 24); cumul = load64(b + 32); dt = load64(b + 40);
         store64(dt + 24, log);
         if (_z_fse_build(dist, numSym, log,
-        load64(dt + 0), load64(dt + 8), load64(dt + 16)) < 0) { return 0; }
+            load64(dt + 0), load64(dt + 8), load64(dt + 16)) < 0) { return 0; }
     } else {
         dt = _z_fse_from_dist(dist, numSym, log);   # decode table; sym[] is the spread
         if (dt == 0) { return 0; }
@@ -12801,8 +12801,8 @@ fn _ze_seq_plan_alloc() {
     store64(_ze_pnorm + 16, _sankoch_alloc(64 * 8));
     _ze_ncbuf = _sankoch_alloc(512);
     if (_ze_pmode == 0 || _ze_pct == 0 || _ze_plog == 0 || _ze_pnorm == 0 || _ze_palpha == 0
-    || _ze_prle == 0 || _ze_phist == 0 || _ze_ncbuf == 0
-    || load64(_ze_pnorm + 0) == 0 || load64(_ze_pnorm + 8) == 0 || load64(_ze_pnorm + 16) == 0) {
+      || _ze_prle == 0 || _ze_phist == 0 || _ze_ncbuf == 0
+      || load64(_ze_pnorm + 0) == 0 || load64(_ze_pnorm + 8) == 0 || load64(_ze_pnorm + 16) == 0) {
         _ze_oom = 1;
         return 0 - 1;
     }
@@ -15156,7 +15156,7 @@ fn zip_enc_end(w) {
     pos = pos + 16;
 
     var rr = _zip_record(w, load64(w + 56), method, crc, csize, ulen, hdr,
-    load64(w + 112), load64(w + 120));
+      load64(w + 112), load64(w + 120));
     if (rr < 0) { return rr; }
     store64(w + 16, pos);
     store64(w + 56, 0);      # no member open
@@ -16008,7 +16008,7 @@ fn detect_format(src, src_len): i64 {
     if (b0 == 0xFD) {
         if (b1 == 0x37 && src_len >= 6) {
             if (load8(src + 2) == 0x7A && load8(src + 3) == 0x58
-            && load8(src + 4) == 0x5A && load8(src + 5) == 0x00) {
+              && load8(src + 4) == 0x5A && load8(src + 5) == 0x00) {
                 return FORMAT_XZ;
             }
         }
