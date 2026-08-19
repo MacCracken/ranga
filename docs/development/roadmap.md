@@ -580,7 +580,44 @@ Still open, in priority order:
    plus a vector div255, materially more complex than the luma kernel.
 4. Plan §3 item 4 (256-bit AVX2) sits behind all of the above.
 
-### M7 — Parity
+### M7 — Parity ✅
+
+Full surface audit against `rust-old/`, module by module, every claimed gap
+adversarially re-checked. Report:
+[`parity-rust-v-cyrius.md`](parity-rust-v-cyrius.md).
+
+**318 Rust public items: 222 ported, 22 deliberate omissions, 51 missing** — and
+**28 of the 51 are one file**, `gpu/pipeline.rs`. Everything underneath it is
+ported (context, buffers, SPIR-V emitter, eleven kernels, all twenty-one WGSL
+sources), so that gap is wiring rather than maths. Most of the rest is `#derive`
+with no Cyrius analogue and mostly no cost; the ones that do cost something are
+string-facing, chiefly the absent `FromStr` inverses.
+
+**The audit earned its keep on four defects in code that was already green:**
+
+1. **`pixel_view_new` accepted OVERSIZED buffers.** It tested `len < want`;
+   Rust tests `data.len() != expected`. The port had silently widened the
+   contract — passing a whole frame where a tile was meant produced a view
+   reading the wrong rows instead of a diagnostic. Fixed to exact equality,
+   error code corrected to `DimensionMismatch`, both directions now asserted.
+2. **`RangaError` had no Display surface at all** — eight opaque negative
+   integers, while `gpu_error_message` in the GPU module already had the idiom.
+   Added `ranga_error_message`, with a test that no two codes share a string.
+3. **`gpu_context_adapter_name` was a stub reporting itself as ported** — it
+   returns the literal `"unknown"` and nothing ever assigns the field, because
+   mabda exposes no live adapter query. Now documented, given a
+   `has_adapter_name` companion, and PINNED by a test asserting the stub state
+   so the suite fails the day mabda can report a real one.
+4. **Two comments asserted things that were false.** `pixel.cyr` claimed
+   Mut-only accessors that do not exist; `gpu_spirv.cyr` claimed mabda lowers
+   "exactly five" GLSL ops when it lowers eight — and one of the three unlisted
+   is `FClamp`, which several kernels here spell the long way.
+
+⚠ **A passing suite does not mean a faithful port.** Every one of those four was
+in code with green tests and clean lint. Three were found only by reading the
+Rust beside the Cyrius, and the fourth only because a verifier was told to
+assume the audit was lying.
+
 
 Surface count against `rust-old/`, full benchmark sweep on a quiesced machine,
 `benchmarks-rust-v-cyrius.md` filled in.

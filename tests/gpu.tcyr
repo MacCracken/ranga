@@ -97,6 +97,15 @@ if (ctx != 0) {
               "a backend of 'unknown' means the context Result was never unwrapped");
     assert_eq(gpu_context_mabda(ctx) != 0, 1, "the unwrapped mabda context is non-null");
 
+    # ⚠ adapter_name is a STUB, and this pins that rather than hiding it. Rust
+    # returned the real adapter string; mabda exposes no live adapter query, so
+    # the field holds a literal. Asserting the stub state means the day it
+    # becomes real, this test fails and someone updates the contract — instead
+    # of a consumer quietly branching on "unknown" forever.
+    assert_eq(gpu_context_has_adapter_name(ctx), 0,
+              "adapter_name is still a placeholder — flip this when mabda can report one");
+    assert_eq(streq(gpu_context_adapter_name(ctx), "unknown"), 1, "and reads 'unknown'");
+
     # A full round trip through GPU memory. The pattern is i*7 mod 256 so a
     # byte landing at the wrong offset shows up as a mismatch rather than
     # coinciding with its neighbour.

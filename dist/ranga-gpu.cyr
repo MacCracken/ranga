@@ -51,6 +51,31 @@ var RG_ERR_PARSE                  = (0 - 7);
 var RG_ERR_OTHER                  = (0 - 8);
 
 # 1 if `code` is an error (negative), else 0.
+# Rust's `thiserror` Display strings for RangaError. Without this the eight
+# RG_ERR_* codes are opaque negative integers at the API boundary: a consumer
+# can tell that something failed and nothing about what.
+#
+# The payloads Rust interpolated — `need`/`have` on BufferTooSmall,
+# `expected`/`actual` on DimensionMismatch, `from`/`to` on
+# UnsupportedConversion — are NOT recoverable here, because an i64 code carries
+# no payload. So these are the format strings with the placeholders removed
+# rather than the full Rust messages, and that loss is real: Rust's own tests
+# assert on the interpolated values. Recording it plainly beats a message that
+# implies detail it does not have.
+#must_use
+fn ranga_error_message(code) {
+    if (code == RG_ERR_NONE) { return "no error"; }
+    if (code == RG_ERR_INVALID_FORMAT) { return "invalid format"; }
+    if (code == RG_ERR_DIMENSION_MISMATCH) { return "dimension mismatch"; }
+    if (code == RG_ERR_BUFFER_TOO_SMALL) { return "buffer too small"; }
+    if (code == RG_ERR_UNSUPPORTED_CONVERSION) { return "unsupported conversion"; }
+    if (code == RG_ERR_INVALID_PARAMETER) { return "invalid parameter"; }
+    if (code == RG_ERR_ALLOCATION) { return "allocation failed"; }
+    if (code == RG_ERR_PARSE) { return "parse error"; }
+    if (code == RG_ERR_OTHER) { return "error"; }
+    return "unknown error code";
+}
+
 #must_use
 fn ranga_is_err(code) {
     if (code < 0) { return 1; }
@@ -824,9 +849,12 @@ fn _sx_blend_consts(opacity, raw_out) {
 #
 # Rust's PixelView<'a> / PixelViewMut<'a> differ only by borrow mutability,
 # which Cyrius has no way to express — they share one representation here, and
-# the split survives as naming plus the mutating accessors being defined only
-# for the Mut form. The lifetime is the caller's responsibility: a view does not
-# own its bytes and must not outlive the buffer it came from.
+# the split survives as NAMING ONLY. Nothing enforces it: there are no
+# Mut-specific accessors, and both forms read through pixel_view_data, which
+# hands back a writable raw pointer. Treat `pixel_view_new` as documentation of
+# intent, not as a guarantee. The lifetime is likewise the caller's
+# responsibility — a view does not own its bytes and must not outlive the
+# buffer it came from.
 
 # ── PixelFormat ────────
 # Rust's `enum PixelFormat` — discriminants are the declaration order, matching
@@ -1085,7 +1113,13 @@ var _PV_SIZE = 32;
 fn _pixel_view_make(data, width, height, format, len, err_out) {
     var want = pixel_format_checked_buffer_size(format, width, height);
     if (ranga_is_err(want) == 1) { store64(err_out, want); return 0; }
-    if (len < want) { store64(err_out, RG_ERR_BUFFER_TOO_SMALL); return 0; }
+    # ⚠ EXACT equality, not `len < want`. Rust's PixelView::new and
+    # PixelViewMut::new both test `data.len() != expected` and return
+    # DimensionMismatch, so an OVERSIZED slice is an error there. An earlier
+    # version of this check accepted anything large enough, which silently
+    # widened the contract: a caller passing a whole frame where a tile was
+    # meant got a view that read the wrong rows rather than a diagnostic.
+    if (len != want) { store64(err_out, RG_ERR_DIMENSION_MISMATCH); return 0; }
     var v = fl_alloc(_PV_SIZE);
     if (v == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
     store64(v, data);
@@ -8260,9 +8294,10 @@ fn spv_finish(s, out_ptr) {
 
 # ── GLSL.std.450 extended instructions ────────
 #
-# mabda's lowerer handles exactly five: Sqrt, Floor, FAbs, FMin, FMax. Anything
-# else in the extended set reaches GFX9 selection and fails there, so the
-# emitter deliberately exposes only these.
+# mabda's lowerer handles EIGHT of the extended set: Sqrt, Floor, FAbs, FMin,
+# FMax, plus FMA, FClamp and Ldexp. Anything else reaches GFX9 selection and
+# fails there. FClamp in particular is directly useful — several kernels here
+# spell a clamp as FMax-then-FMin and could use it instead.
 
 #must_use
 fn spv_ext_unary(s, ty, glsl_op, x) {
@@ -10197,8 +10232,30 @@ fn gpu_context_device(c) { return load64(c + 8); }
 fn gpu_context_queue(c) { return load64(c + 16); }
 #must_use
 fn gpu_context_cache(c) { return load64(c + 24); }
+# ⚠ ALWAYS RETURNS "unknown" TODAY — this is a stub, not an accessor, and the
+# M7 parity audit caught it reporting itself as ported.
+#
+# Rust returned the real adapter string (`info.name`, e.g. "NVIDIA GeForce RTX
+# 4090"). There is currently no source for it: mabda's vendored bundle has a
+# `gpu_caps` struct with an `adapter_name` slot and a `gpu_caps_set_adapter_name`
+# setter, but nothing in the bundle ever populates caps from a live adapter. So
+# the field is filled with a literal in `_gc_wrap` and never assigned elsewhere.
+#
+# Kept rather than deleted so the shape of the Rust API survives and one place
+# has to change when mabda grows an adapter query — but a consumer must NOT
+# branch on this value. Contrast `gpu_context_backend_name`, which is genuinely
+# populated from `backend_kind` and which the test suite asserts is not
+# "unknown" precisely because it CAN be.
 #must_use
 fn gpu_context_adapter_name(c) { return load64(c + 32); }
+
+# Whether the adapter name is a real reading. Always 0 today; exists so callers
+# can ask instead of string-comparing against "unknown".
+#must_use
+fn gpu_context_has_adapter_name(c) {
+    if (streq(load64(c + 32), "unknown") == 1) { return 0; }
+    return 1;
+}
 #must_use
 fn gpu_context_backend_name(c) { return load64(c + 40); }
 
@@ -10234,6 +10291,8 @@ fn _gc_wrap(res, owns, err_out) {
     store64(c + 8, gpu_ctx_device(mctx));
     store64(c + 16, gpu_ctx_queue(mctx));
     store64(c + 24, _gc_cache_new());
+    # See gpu_context_adapter_name: mabda exposes no live adapter query, so this
+    # is a placeholder rather than a reading.
     store64(c + 32, "unknown");
     store64(c + 40, _gc_backend_label(backend_kind(gpu_ctx_backend(mctx))));
     store64(c + 48, owns);

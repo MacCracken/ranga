@@ -15,9 +15,12 @@
 #
 # Rust's PixelView<'a> / PixelViewMut<'a> differ only by borrow mutability,
 # which Cyrius has no way to express — they share one representation here, and
-# the split survives as naming plus the mutating accessors being defined only
-# for the Mut form. The lifetime is the caller's responsibility: a view does not
-# own its bytes and must not outlive the buffer it came from.
+# the split survives as NAMING ONLY. Nothing enforces it: there are no
+# Mut-specific accessors, and both forms read through pixel_view_data, which
+# hands back a writable raw pointer. Treat `pixel_view_new` as documentation of
+# intent, not as a guarantee. The lifetime is likewise the caller's
+# responsibility — a view does not own its bytes and must not outlive the
+# buffer it came from.
 
 # ── PixelFormat ────────
 # Rust's `enum PixelFormat` — discriminants are the declaration order, matching
@@ -276,7 +279,13 @@ var _PV_SIZE = 32;
 fn _pixel_view_make(data, width, height, format, len, err_out) {
     var want = pixel_format_checked_buffer_size(format, width, height);
     if (ranga_is_err(want) == 1) { store64(err_out, want); return 0; }
-    if (len < want) { store64(err_out, RG_ERR_BUFFER_TOO_SMALL); return 0; }
+    # ⚠ EXACT equality, not `len < want`. Rust's PixelView::new and
+    # PixelViewMut::new both test `data.len() != expected` and return
+    # DimensionMismatch, so an OVERSIZED slice is an error there. An earlier
+    # version of this check accepted anything large enough, which silently
+    # widened the contract: a caller passing a whole frame where a tile was
+    # meant got a view that read the wrong rows rather than a diagnostic.
+    if (len != want) { store64(err_out, RG_ERR_DIMENSION_MISMATCH); return 0; }
     var v = fl_alloc(_PV_SIZE);
     if (v == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
     store64(v, data);

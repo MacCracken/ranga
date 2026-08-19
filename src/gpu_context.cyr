@@ -98,8 +98,30 @@ fn gpu_context_device(c) { return load64(c + 8); }
 fn gpu_context_queue(c) { return load64(c + 16); }
 #must_use
 fn gpu_context_cache(c) { return load64(c + 24); }
+# ⚠ ALWAYS RETURNS "unknown" TODAY — this is a stub, not an accessor, and the
+# M7 parity audit caught it reporting itself as ported.
+#
+# Rust returned the real adapter string (`info.name`, e.g. "NVIDIA GeForce RTX
+# 4090"). There is currently no source for it: mabda's vendored bundle has a
+# `gpu_caps` struct with an `adapter_name` slot and a `gpu_caps_set_adapter_name`
+# setter, but nothing in the bundle ever populates caps from a live adapter. So
+# the field is filled with a literal in `_gc_wrap` and never assigned elsewhere.
+#
+# Kept rather than deleted so the shape of the Rust API survives and one place
+# has to change when mabda grows an adapter query — but a consumer must NOT
+# branch on this value. Contrast `gpu_context_backend_name`, which is genuinely
+# populated from `backend_kind` and which the test suite asserts is not
+# "unknown" precisely because it CAN be.
 #must_use
 fn gpu_context_adapter_name(c) { return load64(c + 32); }
+
+# Whether the adapter name is a real reading. Always 0 today; exists so callers
+# can ask instead of string-comparing against "unknown".
+#must_use
+fn gpu_context_has_adapter_name(c) {
+    if (streq(load64(c + 32), "unknown") == 1) { return 0; }
+    return 1;
+}
 #must_use
 fn gpu_context_backend_name(c) { return load64(c + 40); }
 
@@ -135,6 +157,8 @@ fn _gc_wrap(res, owns, err_out) {
     store64(c + 8, gpu_ctx_device(mctx));
     store64(c + 16, gpu_ctx_queue(mctx));
     store64(c + 24, _gc_cache_new());
+    # See gpu_context_adapter_name: mabda exposes no live adapter query, so this
+    # is a placeholder rather than a reading.
     store64(c + 32, "unknown");
     store64(c + 40, _gc_backend_label(backend_kind(gpu_ctx_backend(mctx))));
     store64(c + 48, owns);

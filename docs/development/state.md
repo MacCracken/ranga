@@ -62,7 +62,7 @@ be trusted; `dist/ranga.deps` is authoritative for all three. Filed upstream.
 
 ## Tests
 
-**1,728 assertions, 0 failures. 0 lint warnings, 0 untracked deferrals.**
+**1,746 assertions, 0 failures. 0 lint warnings, 0 untracked deferrals.**
 
 | Suite | Assertions |
 | --- | ---: |
@@ -89,6 +89,12 @@ Every module is mutation-tested once it goes green; the discipline and its
 findings are in [`port-mechanics.md`](port-mechanics.md). Expected values come
 from Python oracles replicating the exact Rust formula, not from reading the
 Cyrius back.
+
+## Parity
+
+**318 Rust public items: 222 ported, 22 deliberate omissions, 51 missing.**
+28 of the 51 are `gpu/pipeline.rs`, which is unported in full. See
+[`parity-rust-v-cyrius.md`](parity-rust-v-cyrius.md).
 
 ## Performance
 

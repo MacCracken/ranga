@@ -189,12 +189,31 @@ assert_eq(load8(got), 255, "from_view copied the pixel");
 pixel_buffer_free(copied);
 pixel_view_free(view);
 
-# A view over too little memory is rejected rather than reading off the end.
+# A view's buffer must be EXACTLY the right size. Rust's PixelView::new and
+# PixelViewMut::new both test `data.len() != expected` and return
+# DimensionMismatch, so too-large is an error there just as much as too-small.
 var small = bv_zeroed(8);
 var badview = pixel_view_new(bv_data(small), bv_len(small), 4, 4, PF_RGBA8, err);
 assert_eq(badview, 0, "view rejects an undersized buffer");
-assert_eq(load64(err), RG_ERR_BUFFER_TOO_SMALL, "undersized view is BUFFER_TOO_SMALL");
+assert_eq(load64(err), RG_ERR_DIMENSION_MISMATCH, "and reports DimensionMismatch, as Rust does");
 bv_free(small);
+
+# ⚠ AND an OVERSIZED buffer is rejected too. An earlier version of this port
+# tested `len < want`, which silently widened the contract: a caller passing a
+# whole frame where a tile was meant got a view that read the wrong rows
+# instead of a diagnostic. Found by the M7 parity audit against rust-old.
+var big = bv_zeroed(4 * 4 * 4 + 64);
+var bigview = pixel_view_new(bv_data(big), bv_len(big), 4, 4, PF_RGBA8, err);
+assert_eq(bigview, 0, "view rejects an OVERSIZED buffer, as Rust does");
+assert_eq(load64(err), RG_ERR_DIMENSION_MISMATCH, "also DimensionMismatch");
+# The exact size still works, so the check is equality and not a blanket reject.
+var exact = bv_zeroed(4 * 4 * 4);
+var okview = pixel_view_new(bv_data(exact), bv_len(exact), 4, 4, PF_RGBA8, err);
+assert_eq(okview != 0, 1, "an exactly-sized buffer is accepted");
+assert_eq(load64(err), RG_ERR_NONE, "with no error");
+pixel_view_free(okview);
+bv_free(exact);
+bv_free(big);
 
 pixel_buffer_free(buf);
 

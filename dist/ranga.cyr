@@ -50,6 +50,31 @@ var RG_ERR_PARSE                  = (0 - 7);
 var RG_ERR_OTHER                  = (0 - 8);
 
 # 1 if `code` is an error (negative), else 0.
+# Rust's `thiserror` Display strings for RangaError. Without this the eight
+# RG_ERR_* codes are opaque negative integers at the API boundary: a consumer
+# can tell that something failed and nothing about what.
+#
+# The payloads Rust interpolated — `need`/`have` on BufferTooSmall,
+# `expected`/`actual` on DimensionMismatch, `from`/`to` on
+# UnsupportedConversion — are NOT recoverable here, because an i64 code carries
+# no payload. So these are the format strings with the placeholders removed
+# rather than the full Rust messages, and that loss is real: Rust's own tests
+# assert on the interpolated values. Recording it plainly beats a message that
+# implies detail it does not have.
+#must_use
+fn ranga_error_message(code) {
+    if (code == RG_ERR_NONE) { return "no error"; }
+    if (code == RG_ERR_INVALID_FORMAT) { return "invalid format"; }
+    if (code == RG_ERR_DIMENSION_MISMATCH) { return "dimension mismatch"; }
+    if (code == RG_ERR_BUFFER_TOO_SMALL) { return "buffer too small"; }
+    if (code == RG_ERR_UNSUPPORTED_CONVERSION) { return "unsupported conversion"; }
+    if (code == RG_ERR_INVALID_PARAMETER) { return "invalid parameter"; }
+    if (code == RG_ERR_ALLOCATION) { return "allocation failed"; }
+    if (code == RG_ERR_PARSE) { return "parse error"; }
+    if (code == RG_ERR_OTHER) { return "error"; }
+    return "unknown error code";
+}
+
 #must_use
 fn ranga_is_err(code) {
     if (code < 0) { return 1; }
@@ -823,9 +848,12 @@ fn _sx_blend_consts(opacity, raw_out) {
 #
 # Rust's PixelView<'a> / PixelViewMut<'a> differ only by borrow mutability,
 # which Cyrius has no way to express — they share one representation here, and
-# the split survives as naming plus the mutating accessors being defined only
-# for the Mut form. The lifetime is the caller's responsibility: a view does not
-# own its bytes and must not outlive the buffer it came from.
+# the split survives as NAMING ONLY. Nothing enforces it: there are no
+# Mut-specific accessors, and both forms read through pixel_view_data, which
+# hands back a writable raw pointer. Treat `pixel_view_new` as documentation of
+# intent, not as a guarantee. The lifetime is likewise the caller's
+# responsibility — a view does not own its bytes and must not outlive the
+# buffer it came from.
 
 # ── PixelFormat ────────
 # Rust's `enum PixelFormat` — discriminants are the declaration order, matching
@@ -1084,7 +1112,13 @@ var _PV_SIZE = 32;
 fn _pixel_view_make(data, width, height, format, len, err_out) {
     var want = pixel_format_checked_buffer_size(format, width, height);
     if (ranga_is_err(want) == 1) { store64(err_out, want); return 0; }
-    if (len < want) { store64(err_out, RG_ERR_BUFFER_TOO_SMALL); return 0; }
+    # ⚠ EXACT equality, not `len < want`. Rust's PixelView::new and
+    # PixelViewMut::new both test `data.len() != expected` and return
+    # DimensionMismatch, so an OVERSIZED slice is an error there. An earlier
+    # version of this check accepted anything large enough, which silently
+    # widened the contract: a caller passing a whole frame where a tile was
+    # meant got a view that read the wrong rows rather than a diagnostic.
+    if (len != want) { store64(err_out, RG_ERR_DIMENSION_MISMATCH); return 0; }
     var v = fl_alloc(_PV_SIZE);
     if (v == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
     store64(v, data);

@@ -589,9 +589,10 @@ fn spv_finish(s, out_ptr) {
 
 # ── GLSL.std.450 extended instructions ────────
 #
-# mabda's lowerer handles exactly five: Sqrt, Floor, FAbs, FMin, FMax. Anything
-# else in the extended set reaches GFX9 selection and fails there, so the
-# emitter deliberately exposes only these.
+# mabda's lowerer handles EIGHT of the extended set: Sqrt, Floor, FAbs, FMin,
+# FMax, plus FMA, FClamp and Ldexp. Anything else reaches GFX9 selection and
+# fails there. FClamp in particular is directly useful — several kernels here
+# spell a clamp as FMax-then-FMin and could use it instead.
 
 #must_use
 fn spv_ext_unary(s, ty, glsl_op, x) {
