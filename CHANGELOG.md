@@ -2,6 +2,85 @@
 
 ## [Unreleased]
 
+## [2.0.0] — 2026-08-19
+
+**The Cyrius port.** ranga is now written in Cyrius. The Rust line ends at
+1.0.1 and is preserved at `rust-old/` as the parity oracle. Major bumps without
+resetting the series, matching every prior AGNOS port (vidya 1.x→2.0.0,
+prakash 1.2.0→2.0.0, mabda 1.0.0→2.0.0, ai-hwaccel 1.2.0→2.0.0).
+
+**This is not a source-compatible upgrade.** Cyrius has no methods, no traits and
+no `Drop`, so every `X::y()` is now a free `x_y()`, every owning type has an
+explicit `*_free`, and errors are `i64` codes rather than a `RangaError` enum.
+Consumers rewrite against the new surface; `docs/development/parity-rust-v-cyrius.md`
+maps it item by item.
+
+### Added
+
+- **`spectral` and `hwaccel` as optional features**, as they were in Rust
+  (`default = []`). `spectral` bridges **prakash 2.2.3**; `hwaccel` bridges
+  **ai-hwaccel 2.3.17**.
+- **`gpu` as an optional feature over mabda 4.0.9**, with native AMD (amdgpu /
+  GFX9) and NVIDIA (nouveau / SM75) backends and wgpu as the fallback.
+- **A SPIR-V emitter** (`src/gpu_spirv.cyr`). mabda's native backends accept
+  SPIR-V and nothing else, and nothing in the stack translates WGSL, so ranga
+  emits SPIR-V directly. Eleven of the fourteen GPU operations run natively;
+  all fourteen have WGSL for the wgpu path.
+- **`ranga_error_message`** — the `RangaError` Display strings, which the port
+  had been missing entirely.
+- **`bytevec.cyr`** — a byte-granular `Vec<u8>` substitute. Cyrius's `lib/vec.cyr`
+  stores i64 slots, so a 4-byte pixel would occupy 32.
+- Four bundle profiles: `dist/ranga.cyr` (core, no external deps) plus
+  `-spectral`, `-hwaccel` and `-gpu`.
+
+### Changed
+
+- **`ColorSpace` gains `Bt601` and `Bt709`** and renumbers to match Rust
+  exactly. The port had dropped both and let its own `CieLab`/`Oklab` additions
+  take values 3-6, so a `ColorSpace` persisted by 1.0.1 read back as a different
+  space. The first seven discriminants are now Rust's; ranga's additions are
+  numbered above that range.
+- **`PixelView`/`PixelViewMut` require an EXACT buffer length**, as Rust did.
+  The port had accepted any buffer large enough, which silently widened the
+  contract.
+- **GPU grayscale is BT.709 where CPU grayscale is BT.601** — inherited from
+  Rust, which had the same split. Documented rather than reconciled.
+
+### Not ported
+
+- **`gpu_blend`, `gpu_noise_gaussian`, `gpu_gaussian_blur` and bilinear
+  `gpu_resize`** report `RG_GPU_ERR_UNSUPPORTED` on the native backends and run
+  on wgpu. Blocked by limits in mabda's SPIR-V→GFX9 lowering — register
+  pressure for the first three, `OpLoopMerge` rejection for blur. Filed at
+  `mabda/docs/development/issues/2026-08-19-native-spirv-compile-limits.md`.
+- **`GpuBuffer::download_async`** — existed to work around a Rust borrow-checker
+  constraint; the Cyrius mabda exposes no async readback to build on.
+- **`Lut3d::from_cube`** — the `.cube` file parser. The LUT itself is ported;
+  loading one from disk is not.
+- **`PixelBuffer::into_data`**, **`GpuContext::new_with_hwaccel`**, and the
+  `FromStr` inverses of `blend_mode_name` / `color_space_name` / `pixel_format_name`.
+- **Serde codecs for the four enums** are hand-written. `#derive(Serialize)`
+  works on a Cyrius struct but silently emits nothing on an enum; filed at
+  `cyrius/docs/development/issues/2026-08-19-derive-serialize-on-enum-emits-nothing.md`.
+
+### Testing
+
+**1,878 assertions across 19 suites, 0 lint warnings.** Expected values come
+from Python oracles replicating the exact Rust formula, not from reading the
+Cyrius back. Every module is mutation-tested once it goes green.
+
+The GPU path is hardware-verified on an AMD Cezanne (gfx90c): SPIR-V emitted by
+ranga, lowered to GFX9 by mabda, dispatched, and read back byte-exact against
+f32 oracles.
+
+### Upstream issues filed during the port
+
+Two resolved in cycc during the port — decimal float literals past ~9
+significant digits parsing to a silently wrong value, and `fl_calloc` re-zeroing
+mmap'd pages a byte at a time. Three remain open: mabda's native SPIR-V limits,
+`#derive(Serialize)` on enums, and `distlib` profile sidecars written empty.
+
+
 ## [1.0.1] — 2026-08-13
 
 **Final Rust release.** ranga continues in Cyrius alongside the rest of the AGNOS

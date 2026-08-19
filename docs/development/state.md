@@ -5,9 +5,9 @@
 
 ## Version
 
-**1.0.1** — the final Rust release. The Rust→Cyrius port is in flight and lands
-as **2.0.0** at M8, following the AGNOS precedent that a port bumps major
-without resetting the series.
+**2.0.0** — the Cyrius port. The Rust line ended at 1.0.1 and is preserved at
+`rust-old/` as the parity oracle, following the AGNOS precedent that a port
+bumps major without resetting the series.
 
 ## Toolchain
 
@@ -63,7 +63,7 @@ be trusted; `dist/ranga.deps` is authoritative for all three. Filed upstream.
 
 ## Tests
 
-**1,846 assertions, 0 failures. 0 lint warnings, 0 untracked deferrals.**
+**1,878 assertions, 0 failures. 0 lint warnings, 0 untracked deferrals.**
 
 | Suite | Assertions |
 | --- | ---: |

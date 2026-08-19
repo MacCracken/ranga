@@ -677,9 +677,23 @@ assume the audit was lying.
 Surface count against `rust-old/`, full benchmark sweep on a quiesced machine,
 `benchmarks-rust-v-cyrius.md` filled in.
 
-### M8 — Release
+### M8 — Release ✅
 
-distlib, docs, CHANGELOG, CI gates, **`VERSION` → 2.0.0**.
+**`VERSION` → 2.0.0.** All four bundles rebuilt and byte-current, CHANGELOG
+written, docs refreshed.
+
+⚠ **CI would have failed on the first push, and the gate that would have caught
+it did not exist.** `cyrius deps` ran with no features while `cyrius test`
+auto-discovers every `tests/*.tcyr` — so the spectral, hwaccel and gpu suites,
+which `include "lib/prakash.cyr"` / `"lib/ai-hwaccel.cyr"` / `"lib/mabda.cyr"`,
+would have hit libs that were never vendored. The features are off by DEFAULT
+for consumers, but the repo tests all of them. Now
+`cyrius deps --features spectral,hwaccel,gpu`.
+
+Two gates added while there: `cyrius lint` (0 warnings and 0 untracked
+deferrals was a habit, now a gate) and `cyrius distlib --check` (byte-compares
+the bundles, so a source change that was never re-bundled fails CI instead of
+shipping a stale `dist/`).
 
 ## Out of scope (for 2.0.0)
 

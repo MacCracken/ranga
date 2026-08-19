@@ -34,7 +34,13 @@ jobs:
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
       - name: Resolve dependencies
-        run: cyrius deps
+        # ⚠ ALL FEATURES, not the default set. `cyrius test` auto-discovers
+        # every tests/*.tcyr, and the spectral / hwaccel / gpu suites include
+        # lib/prakash.cyr, lib/ai-hwaccel.cyr and lib/mabda.cyr respectively.
+        # A bare `cyrius deps` never vendors those, so the suites fail to
+        # compile — the features are off by DEFAULT for consumers, but the repo
+        # tests all of them.
+        run: cyrius deps --features spectral,hwaccel,gpu
 
       - name: Build
         run: |
@@ -47,4 +53,19 @@ jobs:
         # `cyrius test src/test.cyr` form that hard-failed when the
         # stub didn't exist (Issue 1) and also wouldn't ever exercise
         # tests/${proj}.tcyr.
+        #
+        # The GPU suites gate every hardware assertion on a context actually
+        # opening, so they pass on a runner with no GPU — see the note at the
+        # top of tests/gpu.tcyr. What they still exercise there is the SPIR-V
+        # emitter, the error mapping and every guard.
         run: cyrius test
+
+      - name: Lint
+        # 0 warnings and 0 untracked deferrals is the standing bar; this makes
+        # it a gate rather than a habit.
+        run: cyrius lint src/*.cyr tests/*.tcyr
+
+      - name: Bundles are current
+        # --check compares BYTES, so a source change that was never re-bundled
+        # fails here instead of shipping a stale dist/. All four profiles.
+        run: cyrius distlib --check
