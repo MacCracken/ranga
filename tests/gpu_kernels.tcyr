@@ -231,6 +231,174 @@ if (ctx != 0) {
     assert_eq(load32(r4 + NPX * 4), 0x5A5A5A5A, "and so did brightness/contrast");
     assert_eq(load32(r6 + NPX * 4), 0x5A5A5A5A, "and fade");
 
+    # ================================================================
+    # Two-buffer and geometry kernels
+    # ================================================================
+    var U = 0x0080 | 0x0008 | 0x0004;
+    var src = fl_alloc(28);
+    var dst = fl_alloc(28);
+    var pr = fl_alloc(32);
+    var w6 = fl_alloc(24);
+
+    # Six words is enough to be a 3x2 image or a 6x1 strip, and small enough
+    # that every element can be asserted individually rather than by a count.
+    fn seed2(a, b) {
+        var j = 0;
+        while (j < 6) { store32(a + j * 4, j + 1); j = j + 1; }
+        j = 0;
+        while (j < 6) { store32(b + j * 4, 100); j = j + 1; }
+        j = 0;
+        while (j < 32) { store8(pr + j, 0); j = j + 1; }
+        return 0;
+    }
+
+    fn run2(sv, srcv, dstv, p) {
+        var wl = spv_finish(sv, outp);
+        if (wl == 0) { return 0; }
+        var sh = gpu_shader_module_create_spirv(m, load64(outp), wl);
+        if (sh == 0) { return 0; }
+        var sb = gpu_buffer_create(m, 28, U);
+        var db = gpu_buffer_create(m, 28, U);
+        var pb = gpu_buffer_create(m, 32, U);
+        # A seventh word past everything any of these kernels is told about.
+        # The guards compare STRICTLY (`bound > value`); a loose comparison
+        # lets the invocation at index == count through and clobbers it. The
+        # buffer is 64 KiB-aligned, so without an explicit sentinel a one-past
+        # write lands in slack and is invisible.
+        # DIFFERENT values on the two sides. With the same sentinel in both, a
+        # one-past COPY writes an identical word and is undetectable — only a
+        # one-past computed write would show. wipe copies, so the two must
+        # differ for its guard to be observable at all.
+        store32(srcv + 24, 0xA5A5A5A5);
+        store32(dstv + 24, 0x5A5A5A5A);
+        gpu_buffer_write(m, sb, 0, srcv, 28);
+        gpu_buffer_write(m, db, 0, dstv, 28);
+        gpu_buffer_write(m, pb, 0, p, 32);
+        var bp[72];
+        store64(&bp, 4);
+        native_buf_pair_write(&bp + 8,  load64(sb + NATIVE_BUF_FIELD_HANDLE), load64(sb + NATIVE_BUF_FIELD_VA));
+        native_buf_pair_write(&bp + 24, load64(db + NATIVE_BUF_FIELD_HANDLE), load64(db + NATIVE_BUF_FIELD_VA));
+        native_buf_pair_write(&bp + 40, load64(pb + NATIVE_BUF_FIELD_HANDLE), load64(pb + NATIVE_BUF_FIELD_VA));
+        native_buf_pair_write(&bp + 56, load64(pb + NATIVE_BUF_FIELD_HANDLE), load64(pb + NATIVE_BUF_FIELD_VA));
+        if (gpu_compute_dispatch(m, sh, 1, 1, 1, &bp) != 0) { return 0; }
+        var back = fl_alloc(28);
+        if (gpu_buffer_read(m, db, 0, back, 28) != 0) { return 0; }
+        gpu_buffer_release(m, sb);
+        gpu_buffer_release(m, db);
+        gpu_buffer_release(m, pb);
+        return back;
+    }
+
+    fn eq6(got, a, b, cc, d, ee, f, name) {
+        if (got == 0) { assert_eq(0, 1, name); return 1; }
+        var ok = 1;
+        if (load32(got + 0)  != a)  { ok = 0; }
+        if (load32(got + 4)  != b)  { ok = 0; }
+        if (load32(got + 8)  != cc) { ok = 0; }
+        if (load32(got + 12) != d)  { ok = 0; }
+        if (load32(got + 16) != ee) { ok = 0; }
+        if (load32(got + 20) != f)  { ok = 0; }
+        if (load32(got + 24) != 0x5A5A5A5A) { ok = 0; }
+        assert_eq(ok, 1, name);
+        return 0;
+    }
+
+    # --- dissolve: dst = src + f * (dst - src), on ALL FOUR channels ---
+    # Unlike the per-pixel kernels, alpha is mixed too — the WGSL mixes a vec4.
+    seed2(src, dst);
+    store32(pr + 0, 6);
+    store32(pr + 4, f64_to_f32(0) & 0xFFFFFFFF);
+    var d0 = spv_new();
+    gk_dissolve(d0);
+    var rd0 = run2(d0, src, dst, pr);
+    eq6(rd0, 1, 2, 3, 4, 5, 6, "dissolve at 0.0 is entirely the source");
+    store32(pr + 4, f64_to_f32(F64_ONE) & 0xFFFFFFFF);
+    var d1 = spv_new();
+    gk_dissolve(d1);
+    var rd1 = run2(d1, src, dst, pr);
+    eq6(rd1, 100, 100, 100, 100, 100, 100, "dissolve at 1.0 leaves the destination");
+
+    # ⚠ Alpha is mixed as well, and the data above cannot show it — both sides
+    # have an alpha byte of 0, so dropping the alpha channel entirely would
+    # still pass. These two pixels carry alpha 0x00 against 0xFF.
+    store32(src + 0, 0x00000001);
+    store32(dst + 0, 0xFF000064);
+    store32(src + 4, 0x0000000A);
+    store32(dst + 4, 0xFF00FF00);
+    var j2 = 2;
+    while (j2 < 6) { store32(src + j2 * 4, 0); store32(dst + j2 * 4, 0); j2 = j2 + 1; }
+    store32(pr + 0, 6);
+    store32(pr + 4, f64_to_f32(0.5) & 0xFFFFFFFF);
+    var dh = spv_new();
+    gk_dissolve(dh);
+    var rdh = run2(dh, src, dst, pr);
+    assert_eq(rdh != 0, 1, "dissolve at 0.5 runs");
+    assert_eq(load32(rdh + 0), 0x80000033, "dissolve at 0.5 mixes every channel");
+    assert_eq(load32(rdh + 4), 0x80008005, "including on a second pixel");
+    # Stated separately, because this is the byte a vec3-only mix would leave at
+    # 0 while the rest of the pixel still looked right.
+    assert_eq((load32(rdh + 0) >> 24) & 255, 0x80, "and ALPHA is mixed, not passed through");
+
+    # --- wipe: left of the line keeps dst, right takes src ---
+    # ⚠ Two conditions with no nesting and no OpSelect available — the guard
+    # uses the sign-bit conjunction. progress 0.5 on width 6 puts the line at 3.
+    seed2(src, dst);
+    store32(pr + 0, 6);
+    store32(pr + 4, 6);
+    store32(pr + 8, 1);
+    store32(pr + 12, f64_to_f32(0.5) & 0xFFFFFFFF);
+    var wv = spv_new();
+    gk_wipe(wv);
+    var rw = run2(wv, src, dst, pr);
+    eq6(rw, 100, 100, 100, 4, 5, 6, "wipe at 0.5 splits the row at the halfway line");
+    # progress 0 puts the line at 0, so every pixel takes the source.
+    store32(pr + 12, f64_to_f32(0) & 0xFFFFFFFF);
+    var wv0 = spv_new();
+    gk_wipe(wv0);
+    eq6(run2(wv0, src, dst, pr), 1, 2, 3, 4, 5, 6, "wipe at 0.0 is entirely the source");
+    # progress 1 puts it past the end, so the destination is untouched. This is
+    # the case that fails if the conjunction is wrong in the other direction.
+    store32(pr + 12, f64_to_f32(F64_ONE) & 0xFFFFFFFF);
+    var wv1 = spv_new();
+    gk_wipe(wv1);
+    eq6(run2(wv1, src, dst, pr), 100, 100, 100, 100, 100, 100,
+        "wipe at 1.0 leaves the destination entirely alone");
+
+    # --- flips on a 3x2 image ---
+    # 1 2 3 / 4 5 6.  Horizontal gives 3 2 1 / 6 5 4; vertical gives 4 5 6 / 1 2 3.
+    # Both are self-inverse, and each moves every element, so a kernel that
+    # confused the two axes cannot pass both.
+    seed2(src, dst);
+    store32(pr + 0, 6);
+    store32(pr + 4, 3);
+    store32(pr + 8, 2);
+    var fh = spv_new();
+    gk_flip_horizontal(fh);
+    eq6(run2(fh, src, dst, pr), 3, 2, 1, 6, 5, 4, "flip_horizontal mirrors within each row");
+    var fv = spv_new();
+    gk_flip_vertical(fv);
+    eq6(run2(fv, src, dst, pr), 4, 5, 6, 1, 2, 3, "flip_vertical exchanges the rows");
+
+    # --- crop: 2x1 window at (1, 0) out of a 3x2 source ---
+    # Only the first two output words are written; the rest of the destination
+    # must keep its 100s, which is what shows the count guard bounding the work.
+    seed2(src, dst);
+    store32(pr + 0, 2);
+    store32(pr + 4, 3);
+    store32(pr + 8, 2);
+    store32(pr + 12, 1);
+    store32(pr + 16, 1);
+    store32(pr + 20, 0);
+    var cr = spv_new();
+    gk_crop(cr);
+    eq6(run2(cr, src, dst, pr), 2, 3, 100, 100, 100, 100,
+        "crop takes the 2x1 window at (1, 0) and writes nothing else");
+    # Shift the window down a row: (1, 1) of a 3-wide source is element 5.
+    store32(pr + 20, 1);
+    var cr2 = spv_new();
+    gk_crop(cr2);
+    eq6(run2(cr2, src, dst, pr), 5, 6, 100, 100, 100, 100, "and follows src_y down a row");
+
     gpu_context_free(ctx);
 }
 

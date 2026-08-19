@@ -316,3 +316,337 @@ fn _gk_sat_one(s, f32t, c, lum, f) {
     t = spv_ext_binary(s, f32t, GLSL_STD450_FMAX, t, zero);
     return spv_ext_binary(s, f32t, GLSL_STD450_FMIN, t, one);
 }
+
+# ── Two-buffer and 2D kernels ────────
+#
+# The rest of the operations are not per-pixel-in-place. They read one buffer
+# and write another, and the geometry ones index by (x, y) from a 16x16
+# workgroup rather than by a flat invocation index. Same guard discipline
+# applies — body in the then-block, merge block holds the only OpReturn.
+#
+#   CopyCtx 96 bytes
+#     +0  u32   +8  i32   +16 bool  +24 f32
+#     +32 input ssbo      +40 output ssbo
+#     +48 params u32 view +56 params f32 view
+#     +64 x    +72 y      +80 merge label 1   +88 merge label 2
+
+var _GK_CPY = 96;
+var GK_WORKGROUP_2D = 16;
+
+#must_use
+fn _gk_cpy_param_u32(s, k, w) {
+    var pu = spv_type_ptr(s, SPIRV_SC_STORAGE_BUFFER, load64(k));
+    var zero = spv_const(s, load64(k + 8), 0);
+    var wi = spv_const(s, load64(k + 8), w);
+    return spv_load(s, load64(k), spv_access_chain2(s, pu, load64(k + 48), zero, wi));
+}
+
+#must_use
+fn _gk_cpy_param_f32(s, k, w) {
+    var pf = spv_type_ptr(s, SPIRV_SC_STORAGE_BUFFER, load64(k + 24));
+    var zero = spv_const(s, load64(k + 8), 0);
+    var wi = spv_const(s, load64(k + 8), w);
+    return spv_load(s, load64(k + 24), spv_access_chain2(s, pf, load64(k + 56), zero, wi));
+}
+
+# Shared setup for every two-buffer kernel. `two_d` picks a 16x16 workgroup and
+# extracts both gid.x and gid.y; otherwise it is 256x1x1 and only x.
+#must_use
+fn _gk_copy_begin(s, two_d) {
+    var k = fl_calloc(_GK_CPY);
+    if (k == 0) { return 0; }
+    var voidt = spv_type_void(s);
+    var fnt = spv_type_fn(s, voidt);
+    var u32t = spv_type_int(s, 32, 0);
+    var i32t = spv_type_int(s, 32, 1);
+    var f32t = spv_type_float(s, 32);
+    var boolt = spv_type_bool(s);
+    store64(k, u32t);
+    store64(k + 8, i32t);
+    store64(k + 16, boolt);
+    store64(k + 24, f32t);
+
+    var gid = spv_builtin_global_id(s);
+    var inp = spv_ssbo(s, u32t, 4, 0, 0);
+    var outp = spv_ssbo(s, u32t, 4, 1, 0);
+    var pu = spv_ssbo(s, u32t, 4, 2, 0);
+    var pf = spv_ssbo(s, f32t, 4, 3, 0);
+    store64(k + 32, inp);
+    store64(k + 40, outp);
+    store64(k + 48, pu);
+    store64(k + 56, pf);
+
+    var entry = spv_id(s);
+    var iface[40];
+    store64(&iface, gid);
+    store64(&iface + 8, inp);
+    store64(&iface + 16, outp);
+    store64(&iface + 24, pu);
+    store64(&iface + 32, pf);
+    var wx = GK_WORKGROUP;
+    var wy = 1;
+    if (two_d == 1) { wx = GK_WORKGROUP_2D; wy = GK_WORKGROUP_2D; }
+    spv_preamble(s, "main", wx, wy, 1, entry, &iface, 5);
+    spv_fn_begin(s, entry, voidt, fnt);
+
+    var v3 = spv_type_vec(s, u32t, 3);
+    var g = spv_load(s, v3, gid);
+    store64(k + 64, spv_composite_extract(s, u32t, g, 0));
+    if (two_d == 1) { store64(k + 72, spv_composite_extract(s, u32t, g, 1)); }
+    return k;
+}
+
+# Open a guard `if (bound > value) { ...`. Returns the merge label the caller
+# must close with `_gk_guard_close`. Nested guards are how the 2D kernels get
+# `if x >= w || y >= h { return; }` without a logical-or, which mabda's binop
+# map does not carry.
+#must_use
+fn _gk_guard_open(s, k, bound, value) {
+    var cond = spv_binop(s, SPIRV_OP_UGREATERTHAN, load64(k + 16), bound, value);
+    var lwork = spv_id(s);
+    var lmerge = spv_id(s);
+    spv_selection_merge(s, lmerge);
+    spv_branch_conditional(s, cond, lwork, lmerge);
+    spv_label(s, lwork);
+    return lmerge;
+}
+
+# Open a guard on TWO conditions at once, without nesting and without OpSelect.
+#
+# ⚠ NEITHER OF THE OBVIOUS ROUTES WORKS. Measured directly against the compiler:
+#   * a selection nested inside a selection makes
+#     `gpu_shader_module_create_spirv` return 0, while two SEQUENTIAL selections
+#     compile fine;
+#   * `OpSelect` also returns 0, even though mabda's lowerer has a case for it —
+#     it is dispatched but not selectable on GFX9.
+# There is no OpLogicalAnd in the binop map either. So the conjunction is built
+# out of arithmetic that is known to survive: subtract, or, compare.
+#
+# THE TRICK. For `b1 > v1 && b2 > v2` on unsigned values below 2^31, form
+# `d = (b1 - 1 - v1) | (b2 - 1 - v2)`. Each term is small when its condition
+# holds and underflows — setting bit 31 — when it does not. OR-ing them keeps
+# bit 31 clear only if BOTH held, so one comparison against 0x80000000 tests the
+# conjunction.
+#must_use
+fn _gk_guard_open2(s, k, b1, v1, b2, v2) {
+    var u32t = load64(k);
+    var boolt = load64(k + 16);
+    var one = spv_const(s, u32t, 1);
+    var d1 = spv_binop(s, SPIRV_OP_ISUB, u32t,
+               spv_binop(s, SPIRV_OP_ISUB, u32t, b1, one), v1);
+    var d2 = spv_binop(s, SPIRV_OP_ISUB, u32t,
+               spv_binop(s, SPIRV_OP_ISUB, u32t, b2, one), v2);
+    var both = spv_binop(s, SPIRV_OP_BITWISE_OR, u32t, d1, d2);
+    var cond = spv_binop(s, SPIRV_OP_UGREATERTHAN, boolt,
+                         spv_const(s, u32t, 0x80000000), both);
+    var lwork = spv_id(s);
+    var lmerge = spv_id(s);
+    spv_selection_merge(s, lmerge);
+    spv_branch_conditional(s, cond, lwork, lmerge);
+    spv_label(s, lwork);
+    return lmerge;
+}
+
+fn _gk_guard_close(s, lmerge) {
+    spv_branch(s, lmerge);
+    spv_label(s, lmerge);
+    return RG_ERR_NONE;
+}
+
+# output[dst_idx] = input[src_idx]
+fn _gk_copy_word(s, k, src_idx, dst_idx) {
+    var u32t = load64(k);
+    var pu = spv_type_ptr(s, SPIRV_SC_STORAGE_BUFFER, u32t);
+    var zero = spv_const(s, load64(k + 8), 0);
+    var v = spv_load(s, u32t, spv_access_chain2(s, pu, load64(k + 32), zero, src_idx));
+    return spv_store(s, spv_access_chain2(s, pu, load64(k + 40), zero, dst_idx), v);
+}
+
+# ── DISSOLVE ────────
+#
+# dst = mix(src, dst, f) = src + f * (dst - src), applied to ALL FOUR channels
+# including alpha — unlike the per-pixel kernels, where alpha passes through.
+# params: [count, factor].
+fn gk_dissolve(s) {
+    var k = _gk_copy_begin(s, 0);
+    if (k == 0) { return RG_ERR_ALLOCATION; }
+    var u32t = load64(k);
+    var f32t = load64(k + 24);
+    var i32t = load64(k + 8);
+    var idx = load64(k + 64);
+    var lm = _gk_guard_open(s, k, _gk_cpy_param_u32(s, k, 0), idx);
+
+    var pu = spv_type_ptr(s, SPIRV_SC_STORAGE_BUFFER, u32t);
+    var zero = spv_const(s, i32t, 0);
+    var sp = spv_access_chain2(s, pu, load64(k + 32), zero, idx);
+    var dp = spv_access_chain2(s, pu, load64(k + 40), zero, idx);
+    var sw = spv_load(s, u32t, sp);
+    var dw = spv_load(s, u32t, dp);
+    var f = _gk_cpy_param_f32(s, k, 1);
+
+    var mask = spv_const(s, u32t, 255);
+    var inv255 = spv_const_f32(s, f32t, f64_div(F64_ONE, 255.0));
+    var c255 = spv_const_f32(s, f32t, 255.0);
+    var chalf = spv_const_f32(s, f32t, 0.5);
+    var czero = spv_const_f32(s, f32t, 0);
+    var acc = 0;
+    var i = 0;
+    while (i < 4) {
+        var sc = sw;
+        var dc = dw;
+        if (i > 0) {
+            var sh = spv_const(s, u32t, i * 8);
+            sc = spv_binop(s, SPIRV_OP_SHR_LOGICAL, u32t, sw, sh);
+            dc = spv_binop(s, SPIRV_OP_SHR_LOGICAL, u32t, dw, sh);
+        }
+        var sf = spv_binop(s, SPIRV_OP_FMUL, f32t,
+                   spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t,
+                     spv_binop(s, SPIRV_OP_BITWISE_AND, u32t, sc, mask)), inv255);
+        var df = spv_binop(s, SPIRV_OP_FMUL, f32t,
+                   spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t,
+                     spv_binop(s, SPIRV_OP_BITWISE_AND, u32t, dc, mask)), inv255);
+        var diff = spv_binop(s, SPIRV_OP_FSUB, f32t, df, sf);
+        var mixed = spv_binop(s, SPIRV_OP_FADD, f32t, sf,
+                              spv_binop(s, SPIRV_OP_FMUL, f32t, diff, f));
+        var scaled = spv_binop(s, SPIRV_OP_FADD, f32t,
+                       spv_binop(s, SPIRV_OP_FMUL, f32t, mixed, c255), chalf);
+        var rounded = spv_ext_unary(s, f32t, GLSL_STD450_FLOOR, scaled);
+        var lo = spv_ext_binary(s, f32t, GLSL_STD450_FMAX, rounded, czero);
+        var hi = spv_ext_binary(s, f32t, GLSL_STD450_FMIN, lo, c255);
+        var byte = spv_unop(s, SPIRV_OP_CONVERT_F_TO_S, u32t, hi);
+        if (i > 0) { byte = spv_binop(s, SPIRV_OP_SHL, u32t, byte, spv_const(s, u32t, i * 8)); }
+        if (i == 0) { acc = byte; }
+        if (i > 0) { acc = spv_binop(s, SPIRV_OP_BITWISE_OR, u32t, acc, byte); }
+        i = i + 1;
+    }
+    spv_store(s, dp, acc);
+    _gk_guard_close(s, lm);
+    spv_fn_end(s);
+    fl_free(k);
+    return RG_ERR_NONE;
+}
+
+# ── WIPE ────────
+#
+# Left of the wipe line the destination keeps its own pixel; right of it the
+# source replaces it. params: [count, width, height, progress(f32)].
+#
+# ⚠ The WGSL writes NOTHING in the left-hand case — the comment there reads
+# "Keep dst as-is (already in dst buffer)". So this is a one-sided guard, not a
+# select: the store only happens on the else side.
+fn gk_wipe(s) {
+    var k = _gk_copy_begin(s, 0);
+    if (k == 0) { return RG_ERR_ALLOCATION; }
+    var u32t = load64(k);
+    var f32t = load64(k + 24);
+    var idx = load64(k + 64);
+    var count = _gk_cpy_param_u32(s, k, 0);
+    var width = _gk_cpy_param_u32(s, k, 1);
+    # Computed BEFORE the guard, so it runs for out-of-range invocations too.
+    # That is harmless — it touches no memory — and it is what lets the two
+    # conditions merge into one selection instead of nesting.
+    var x = spv_binop(s, SPIRV_OP_UMOD, u32t, idx, width);
+    var wf = spv_binop(s, SPIRV_OP_FMUL, f32t,
+                       spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t, width),
+                       _gk_cpy_param_f32(s, k, 3));
+    var wipe_x = spv_unop(s, SPIRV_OP_CONVERT_F_TO_S, u32t, wf);
+    # The store happens when idx is in range AND x >= wipe_x. The second is
+    # written `x + 1 > wipe_x` because ULessThan is absent from mabda's map.
+    var xp1 = spv_binop(s, SPIRV_OP_IADD, u32t, x, spv_const(s, u32t, 1));
+    var lm = _gk_guard_open2(s, k, count, idx, xp1, wipe_x);
+    _gk_copy_word(s, k, idx, idx);
+    _gk_guard_close(s, lm);
+    spv_fn_end(s);
+    fl_free(k);
+    return RG_ERR_NONE;
+}
+
+# ── CROP ────────
+#
+# output[gy*dst_w + gx] = input[(src_y+gy)*src_w + (src_x+gx)]
+# params: [src_width, dst_width, dst_height, src_x, src_y].
+# ⚠ 1D, NOT the WGSL's 16x16. Indexing by a flat invocation id needs ONE bound
+# (the output pixel count) where an (x, y) grid needs two, and two bounds cannot
+# be combined cheaply here — see `_gk_guard_open2`. x and y are recovered with
+# UMod and UDiv, both of which lower cleanly. The 16x16 shape existed for cache
+# locality on wgpu; the WGSL fallback keeps it.
+# params: [count, src_width, dst_width, dst_height, src_x, src_y].
+fn gk_crop(s) {
+    var k = _gk_copy_begin(s, 0);
+    if (k == 0) { return RG_ERR_ALLOCATION; }
+    var u32t = load64(k);
+    var idx = load64(k + 64);
+    var lm = _gk_guard_open(s, k, _gk_cpy_param_u32(s, k, 0), idx);
+
+    var src_w = _gk_cpy_param_u32(s, k, 1);
+    var dst_w = _gk_cpy_param_u32(s, k, 2);
+    var sx = _gk_cpy_param_u32(s, k, 4);
+    var sy = _gk_cpy_param_u32(s, k, 5);
+    var gx = spv_binop(s, SPIRV_OP_UMOD, u32t, idx, dst_w);
+    var gy = spv_binop(s, SPIRV_OP_UDIV, u32t, idx, dst_w);
+    var srow = spv_binop(s, SPIRV_OP_IADD, u32t, sy, gy);
+    var scol = spv_binop(s, SPIRV_OP_IADD, u32t, sx, gx);
+    var sidx = spv_binop(s, SPIRV_OP_IADD, u32t,
+                 spv_binop(s, SPIRV_OP_IMUL, u32t, srow, src_w), scol);
+    _gk_copy_word(s, k, sidx, idx);
+
+    _gk_guard_close(s, lm);
+    spv_fn_end(s);
+    fl_free(k);
+    return RG_ERR_NONE;
+}
+
+# ── FLIP HORIZONTAL ────────
+#
+# output[y*w + (w-1-x)] = input[y*w + x]. 1D, as in crop.
+# params: [count, width, height].
+fn gk_flip_horizontal(s) {
+    var k = _gk_copy_begin(s, 0);
+    if (k == 0) { return RG_ERR_ALLOCATION; }
+    var u32t = load64(k);
+    var idx = load64(k + 64);
+    var lm = _gk_guard_open(s, k, _gk_cpy_param_u32(s, k, 0), idx);
+    var w = _gk_cpy_param_u32(s, k, 1);
+    var x = spv_binop(s, SPIRV_OP_UMOD, u32t, idx, w);
+    var y = spv_binop(s, SPIRV_OP_UDIV, u32t, idx, w);
+
+    var row = spv_binop(s, SPIRV_OP_IMUL, u32t, y, w);
+    var sidx = idx;
+    var mirrored = spv_binop(s, SPIRV_OP_ISUB, u32t,
+                     spv_binop(s, SPIRV_OP_ISUB, u32t, w, spv_const(s, u32t, 1)), x);
+    var didx = spv_binop(s, SPIRV_OP_IADD, u32t, row, mirrored);
+    _gk_copy_word(s, k, sidx, didx);
+
+    _gk_guard_close(s, lm);
+    spv_fn_end(s);
+    fl_free(k);
+    return RG_ERR_NONE;
+}
+
+# ── FLIP VERTICAL ────────
+#
+# output[(h-1-y)*w + x] = input[y*w + x]. 1D, as in crop.
+# params: [count, width, height].
+fn gk_flip_vertical(s) {
+    var k = _gk_copy_begin(s, 0);
+    if (k == 0) { return RG_ERR_ALLOCATION; }
+    var u32t = load64(k);
+    var idx = load64(k + 64);
+    var lm = _gk_guard_open(s, k, _gk_cpy_param_u32(s, k, 0), idx);
+    var w = _gk_cpy_param_u32(s, k, 1);
+    var h = _gk_cpy_param_u32(s, k, 2);
+    var x = spv_binop(s, SPIRV_OP_UMOD, u32t, idx, w);
+    var y = spv_binop(s, SPIRV_OP_UDIV, u32t, idx, w);
+
+    var sidx = idx;
+    var mrow = spv_binop(s, SPIRV_OP_ISUB, u32t,
+                 spv_binop(s, SPIRV_OP_ISUB, u32t, h, spv_const(s, u32t, 1)), y);
+    var didx = spv_binop(s, SPIRV_OP_IADD, u32t,
+                 spv_binop(s, SPIRV_OP_IMUL, u32t, mrow, w), x);
+    _gk_copy_word(s, k, sidx, didx);
+
+    _gk_guard_close(s, lm);
+    spv_fn_end(s);
+    fl_free(k);
+    return RG_ERR_NONE;
+}

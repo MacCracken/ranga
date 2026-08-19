@@ -39,7 +39,7 @@ Cyrius port: **7,639 lines** across 14 modules, bundled to
 | `spectral.cyr` | 137 | `spectral.rs` (optional) |
 | `hwaccel.cyr` | 209 | `hwaccel.rs` (optional) |
 | `gpu_spirv.cyr` | 476 | — (SPIR-V emitter; no Rust counterpart) |
-| `gpu_kernels.cyr` | 347 | `gpu/shaders.rs` (5 of 14, optional) |
+| `gpu_kernels.cyr` | 703 | `gpu/shaders.rs` (10 of 14, optional) |
 | `gpu_context.cyr` | 289 | `gpu/context.rs` (optional) |
 | `gpu_buffer.cyr` | 112 | `gpu/buffer.rs` (optional) |
 | `main.cyr` | 15 | — |
@@ -54,14 +54,14 @@ Cyrius port: **7,639 lines** across 14 modules, bundled to
 | `dist/ranga.cyr` | 7,624 | core, no external deps |
 | `dist/ranga-spectral.cyr` | 7,769 | core + `spectral.cyr` (needs prakash) |
 | `dist/ranga-hwaccel.cyr` | 7,835 | core + `hwaccel.cyr` (needs ai-hwaccel) |
-| `dist/ranga-gpu.cyr` | 9,079 | core + gpu context/buffer (needs mabda 4.0.9) |
+| `dist/ranga-gpu.cyr` | 9,413 | core + gpu context/buffer (needs mabda 4.0.9) |
 
 ⚠ The two profile `.deps` sidecars are written empty by cycc 6.5.27 and must not
 be trusted; `dist/ranga.deps` is authoritative for all three. Filed upstream.
 
 ## Tests
 
-**1,642 assertions, 0 failures. 0 lint warnings, 0 untracked deferrals.**
+**1,655 assertions, 0 failures. 0 lint warnings, 0 untracked deferrals.**
 
 | Suite | Assertions |
 | --- | ---: |
@@ -69,7 +69,7 @@ be trusted; `dist/ranga.deps` is authoritative for all three. Filed upstream.
 | `spectral.tcyr` | 58 |
 | `gpu.tcyr` | 43 |
 | `gpu_spirv.tcyr` | 53 |
-| `gpu_kernels.tcyr` | 26 |
+| `gpu_kernels.tcyr` | 39 |
 | `hwaccel.tcyr` | 48 |
 | `composite.tcyr` | 159 |
 | `filter_point.tcyr` | 150 |

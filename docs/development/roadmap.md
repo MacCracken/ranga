@@ -415,6 +415,43 @@ preserved as-is — reconciling either side would change output the Rust line
 produced. The test asserts the gap explicitly so it reads as inherited rather
 than accidental.
 
+#### ✅ Five more: dissolve, wipe, crop, flip_horizontal, flip_vertical
+
+**Ten of fourteen operations now run on the native backend**, all HW-verified on
+AMD Cezanne against exact expected output.
+
+⚠ **Two more things the compiler silently rejects.** Both surfaced as
+`gpu_shader_module_create_spirv` returning 0 with no diagnostic, and both were
+isolated by bisecting a working kernel rather than guessed:
+
+- **A selection nested inside a selection does not compile.** Two SEQUENTIAL
+  selections do, and a 2D workgroup using `gid.y` does. So the WGSL's 2D bounds
+  test `if x >= w || y >= h { return; }` cannot be written as two nested ifs.
+- **`OpSelect` does not compile either**, despite mabda's lowerer having a case
+  for it — it is dispatched but not selectable on GFX9. That rules out the
+  obvious workaround of reducing two booleans to 1/0 and multiplying.
+
+There is no OpLogicalAnd in the binop map either, so conjunction is built from
+arithmetic that does survive. For `b1 > v1 && b2 > v2` on unsigned values below
+2^31, form `d = (b1 - 1 - v1) | (b2 - 1 - v2)`: each term underflows and sets
+bit 31 exactly when its condition fails, so one comparison against `0x80000000`
+tests both. `wipe` uses this.
+
+**The geometry kernels moved to 1D indexing.** crop, flip_horizontal and
+flip_vertical dispatch flat and recover x and y with UMod and UDiv, so they need
+ONE bound instead of two and avoid the conjunction entirely. The WGSL's 16x16
+workgroup was for cache locality on wgpu and the fallback keeps it.
+
+**Mutation testing: 11 mutants, 11 killed** — after three rounds of fixing the
+TESTS, not the code. `dissolve` mixes all four channels including alpha, and the
+first data set had alpha 0 on both sides, so dropping the alpha channel passed.
+The guards compare strictly, and a one-past write lands in 64 KiB alignment
+slack unless an explicit sentinel sits past `count`. And the sentinel has to
+differ between source and destination: with the same value in both, a one-past
+*copy* writes an identical word and stays invisible.
+
+#### Per-pixel kernels
+
 **Mutation testing: 15 mutants, 15 killed.** Three needed better inputs rather
 than better assertions: the clamps inside `pack_rgba` are unreachable from any
 kernel that clamps in its own maths, so `fade` at 2.0 (mid-grey lands on exactly
