@@ -70,6 +70,19 @@ bv_free(v);
 # ================================================================
 test_group("pixel format");
 
+# ⚠ DISCRIMINANTS ARE THE RUST DECLARATION ORDER, and this pins it.
+# ColorSpace drifted exactly here — two variants were dropped and two ranga
+# additions took their numbers, so a value persisted by ranga 1.0.1 read back as
+# a different variant with nothing to signal it. Names were asserted; numbers
+# were not. These guard the numbers.
+assert_eq(PF_RGBA8, 0, "PF_RGBA8 is 0, as in Rust");
+assert_eq(PF_ARGB8, 1, "PF_ARGB8 is 1, as in Rust");
+assert_eq(PF_RGB8, 2, "PF_RGB8 is 2, as in Rust");
+assert_eq(PF_YUV420P, 3, "PF_YUV420P is 3, as in Rust");
+assert_eq(PF_NV12, 4, "PF_NV12 is 4, as in Rust");
+assert_eq(PF_RGBAF32, 5, "PF_RGBAF32 is 5, as in Rust");
+
+
 assert_eq(pixel_format_checked_buffer_size(PF_RGB8, 10, 10), 300, "Rgb8 10x10 == 300 (doctest)");
 assert_eq(pixel_format_checked_buffer_size(PF_RGBA8, 10, 10), 400, "Rgba8 10x10 == 400");
 assert_eq(pixel_format_checked_buffer_size(PF_RGBAF32, 10, 10), 1600, "RgbaF32 10x10 == 1600");

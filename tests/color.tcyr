@@ -409,6 +409,22 @@ srgba_free(red); srgba_free(green); srgba_free(blue); srgba_free(grey); srgba_fr
 test_group("color space");
 
 assert_streq(color_space_name(CS_SRGB), "sRGB", "Display for sRGB");
+# ⚠ THE FIRST SEVEN DISCRIMINANTS ARE THE RUST WIRE FORM. An earlier version of
+# this port dropped Bt601 and Bt709 and let CieLab and Oklab occupy 3-6, so a
+# ColorSpace persisted by ranga 1.0.1 read back as a different space entirely.
+# These pin the numbering, not just the names.
+assert_eq(CS_SRGB, 0, "Srgb is 0, as in Rust");
+assert_eq(CS_LINEAR_RGB, 1, "LinearRgb is 1");
+assert_eq(CS_DISPLAY_P3, 2, "DisplayP3 is 2");
+assert_eq(CS_BT601, 3, "Bt601 is 3 — it was missing entirely");
+assert_eq(CS_BT709, 4, "Bt709 is 4 — likewise");
+assert_eq(CS_BT2020, 5, "Bt2020 is 5, NOT 3");
+assert_eq(CS_CIE_XYZ, 6, "CieXyz is 6, NOT 4");
+# ranga's two additions sit past Rust's range so they cannot displace anything.
+assert_eq(CS_CIE_LAB > CS_CIE_XYZ, 1, "CieLab is numbered above Rust's last variant");
+assert_eq(CS_OKLAB > CS_CIE_XYZ, 1, "and so is Oklab");
+assert_streq(color_space_name(CS_BT601), "BT.601", "Display for BT.601");
+assert_streq(color_space_name(CS_BT709), "BT.709", "Display for BT.709");
 assert_streq(color_space_name(CS_CIE_LAB), "CIE L*a*b*", "Display for CIE Lab");
 assert_streq(color_space_name(CS_OKLAB), "Oklab", "Display for Oklab");
 

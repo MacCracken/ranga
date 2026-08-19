@@ -63,6 +63,25 @@ assert_eq(_bl_f32_to_u8(f32_from(f64_div(0.5, 255.0))), 1, "round-half-up gives 
 # ================================================================
 test_group("blend mode");
 
+# ⚠ DISCRIMINANTS ARE THE RUST DECLARATION ORDER, and this pins it.
+# ColorSpace drifted exactly here — two variants were dropped and two ranga
+# additions took their numbers, so a value persisted by ranga 1.0.1 read back as
+# a different variant with nothing to signal it. Names were asserted; numbers
+# were not. These guard the numbers.
+assert_eq(BM_NORMAL, 0, "BM_NORMAL is 0, as in Rust");
+assert_eq(BM_MULTIPLY, 1, "BM_MULTIPLY is 1, as in Rust");
+assert_eq(BM_SCREEN, 2, "BM_SCREEN is 2, as in Rust");
+assert_eq(BM_OVERLAY, 3, "BM_OVERLAY is 3, as in Rust");
+assert_eq(BM_DARKEN, 4, "BM_DARKEN is 4, as in Rust");
+assert_eq(BM_LIGHTEN, 5, "BM_LIGHTEN is 5, as in Rust");
+assert_eq(BM_COLOR_DODGE, 6, "BM_COLOR_DODGE is 6, as in Rust");
+assert_eq(BM_COLOR_BURN, 7, "BM_COLOR_BURN is 7, as in Rust");
+assert_eq(BM_SOFT_LIGHT, 8, "BM_SOFT_LIGHT is 8, as in Rust");
+assert_eq(BM_HARD_LIGHT, 9, "BM_HARD_LIGHT is 9, as in Rust");
+assert_eq(BM_DIFFERENCE, 10, "BM_DIFFERENCE is 10, as in Rust");
+assert_eq(BM_EXCLUSION, 11, "BM_EXCLUSION is 11, as in Rust");
+
+
 assert_streq(blend_mode_name(BM_NORMAL), "Normal", "Display for Normal");
 # The two-word names carry a SPACE — consumers show these in a UI.
 assert_streq(blend_mode_name(BM_COLOR_DODGE), "Color Dodge", "Display for Color Dodge has a space");

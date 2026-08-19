@@ -31,6 +31,15 @@ fn chan(b, i, c) { return load8(pixel_buffer_data(b) + i * 4 + c); }
 # ================================================================
 test_group("scale filter");
 
+# ⚠ DISCRIMINANTS ARE THE RUST DECLARATION ORDER, and this pins it. ColorSpace
+# drifted exactly here — two variants were dropped and two ranga additions took
+# their numbers, so a value persisted by ranga 1.0.1 read back as a different
+# variant. Names were asserted; numbers were not.
+assert_eq(SF_NEAREST, 0, "SF_NEAREST is 0, as in Rust");
+assert_eq(SF_BILINEAR, 1, "SF_BILINEAR is 1, as in Rust");
+assert_eq(SF_BICUBIC, 2, "SF_BICUBIC is 2, as in Rust");
+
+
 assert_streq(scale_filter_name(SF_NEAREST), "Nearest", "Display for Nearest");
 assert_streq(scale_filter_name(SF_BICUBIC), "Bicubic", "Display for Bicubic");
 assert_eq(scale_filter_is_valid(SF_BILINEAR), 1, "Bilinear is valid");

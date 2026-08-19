@@ -1338,19 +1338,35 @@ fn buffer_pool_free(p) {
 # cyrius/docs/development/issues/2026-08-17-decimal-float-literal-silent-precision-loss.md
 
 # ── ColorSpace ────────
+#
+# ⚠ DISCRIMINANTS ARE THE RUST DECLARATION ORDER, and the first seven must stay
+# exactly where Rust put them. An earlier version of this port omitted Bt601 and
+# Bt709 and let CieLab and Oklab take values 3-6, which made the enum a
+# DIFFERENT enum wearing the same name: a ColorSpace persisted by ranga 1.0.1
+# read back here as the wrong space — Rust's Bt2020 (5) as CIE L*a*b*, its
+# CieXyz (6) as Oklab — with nothing to signal it. pixel.cyr's PixelFormat
+# carries the same rule and says so; this file did not, and drifted.
+#
+# CieLab and Oklab are ranga ADDITIONS with no Rust variant. They are numbered
+# ABOVE Rust's range so that adding them cannot move anything Rust defined.
 var CS_SRGB       = 0;
 var CS_LINEAR_RGB = 1;
 var CS_DISPLAY_P3 = 2;
-var CS_BT2020     = 3;
-var CS_CIE_XYZ    = 4;
-var CS_CIE_LAB    = 5;
-var CS_OKLAB      = 6;
+var CS_BT601      = 3;
+var CS_BT709      = 4;
+var CS_BT2020     = 5;
+var CS_CIE_XYZ    = 6;
+# ── past Rust's #[non_exhaustive] enum ────────
+var CS_CIE_LAB    = 7;
+var CS_OKLAB      = 8;
 
 #must_use
 fn color_space_name(s) {
     if (s == CS_SRGB) { return "sRGB"; }
     if (s == CS_LINEAR_RGB) { return "Linear RGB"; }
     if (s == CS_DISPLAY_P3) { return "Display P3"; }
+    if (s == CS_BT601) { return "BT.601"; }
+    if (s == CS_BT709) { return "BT.709"; }
     if (s == CS_BT2020) { return "BT.2020"; }
     if (s == CS_CIE_XYZ) { return "CIE XYZ"; }
     if (s == CS_CIE_LAB) { return "CIE L*a*b*"; }

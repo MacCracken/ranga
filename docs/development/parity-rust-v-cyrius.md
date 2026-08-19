@@ -39,8 +39,24 @@ eleven kernels and all twenty-one WGSL sources. So the gap is **wiring, not
 maths** — each missing operation is a function that uploads, picks a kernel,
 dispatches and downloads.
 
-The rest is mostly `#[derive]`, and the reason each one is absent differs —
-**Cyrius has `#derive`**, so "no analogue" is not the explanation:
+⚠ **A defect the audit's own summary buried under "derive impls".** ranga's
+`ColorSpace` was not a renumbered Rust enum — it was a DIFFERENT enum wearing
+the same name. Rust declares `Srgb, LinearRgb, DisplayP3, Bt601, Bt709, Bt2020,
+CieXyz`; the port dropped **Bt601 and Bt709** and let its own additions CieLab
+and Oklab take values 3-6. So a `ColorSpace` persisted by ranga 1.0.1 read back
+here as the wrong space — Rust's `Bt2020` (5) as CIE L\*a\*b\*, its `CieXyz`
+(6) as Oklab — with nothing to signal it, while `convert.cyr` had BT.601 and
+BT.709 conversions no ColorSpace value could name. Now corrected: the first
+seven discriminants are Rust's, and the two ranga additions are numbered above
+Rust's range so they cannot displace anything.
+
+**The systemic fix matters more than the fix.** PixelFormat, BlendMode and
+ScaleFilter were all correct, but only PixelFormat's numbering was asserted
+anywhere — the other three suites checked `*_name()` strings, which pass under
+any renumbering. All four enums now have explicit discriminant guards.
+
+The remaining gaps break down as follows. **Cyrius has `#derive`**, so "no
+analogue" is not the explanation for any of them:
 
 - `#derive(accessors)` is a documented Cyrius feature that generates
   `T_field()` / `T_set_field()` pairs. ranga does not use it: every struct here
