@@ -834,6 +834,14 @@ fn _icc_lut_check_channels(data, off, err_out) {
     if (load8(data + off + 8) != 3) { store64(err_out, RG_ERR_INVALID_FORMAT); return 0; }
     if (load8(data + off + 9) != 3) { store64(err_out, RG_ERR_INVALID_FORMAT); return 0; }
     var grid = load8(data + off + 10);
+    # ⚠ ZERO IS AS INVALID AS 65. Rust checks only `> 64`, and a grid_size of 0
+    # then makes `grid_size - 1` underflow: Rust panics on the subtraction in
+    # debug and indexes wildly in release, while this port computed
+    # `f64_from(0 - 1)` as a scale and read below the LUT allocation. The input
+    # is an untrusted byte from a file, so both behaviours are reachable from a
+    # malformed profile. Rejecting it is a deliberate divergence from Rust and
+    # strictly safer — there is no such thing as a zero-point LUT axis.
+    if (grid < 2) { store64(err_out, RG_ERR_INVALID_FORMAT); return 0; }
     if (grid > _ICC_MAX_GRID) { store64(err_out, RG_ERR_INVALID_FORMAT); return 0; }
     store64(err_out, RG_ERR_NONE);
     return grid;

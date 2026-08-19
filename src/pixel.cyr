@@ -34,7 +34,7 @@ var PF_RGBAF32 = 5;
 
 # Display impl. Hand-written because #derive(Serialize) on a Cyrius enum
 # compiles clean and emits NO CODEC AT ALL — the generated `<name>_to_json` is
-# undefined at link time. Re-verified on 6.5.27. The derive DOES work on a
+# undefined at link time. Re-verified at the 6.5.29 pin — still open. The derive DOES work on a
 # struct; it is enums specifically that silently produce nothing, and ranga's
 # serde surface is four enums. See §3 item 6.
 #must_use

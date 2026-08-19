@@ -18,7 +18,10 @@
 # hand-encoded assembly is acceptable: the fallback is the oracle and the test
 # proves the two agree.
 #
-# STACK LAYOUT. Verified empirically on 6.5.27: parameters occupy [rbp-8],
+# STACK LAYOUT. Verified empirically, first on 6.5.27 and re-confirmed at the
+# 6.5.29 pin — this is not a documented ABI, so the assertions in
+# tests/simd_u8.tcyr ARE the verification and fail loudly if it ever moves.
+# Parameters occupy [rbp-8],
 # [rbp-16], [rbp-24], ... in declaration order, and the first local follows.
 # Every asm block below indexes its parameters on that basis, so ADDING OR
 # REORDERING A PARAMETER SILENTLY BREAKS THE ASSEMBLY. If you touch a signature

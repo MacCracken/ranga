@@ -65,7 +65,7 @@ analogue" is not the explanation for any of them:
   and several are read by hand-encoded asm — not a limitation.
 - `#derive(Serialize)` / `#derive(Deserialize)` exist and **work on structs**
   (cyrius's own `lib/sigil.cyr` derives Serialize on `struct ima_status`). On an
-  **enum** at 6.5.27 the derive compiles rc=0 with no diagnostic and emits **no
+  **enum** the derive compiles rc=0 with no diagnostic and emits **no
   codec at all** — the generated `<name>_to_json` is simply undefined at link
   time. Since ranga's serde surface is exactly four enums (`PixelFormat`,
   `BlendMode`, `ColorSpace` and one payload enum), the derive is unusable here
@@ -144,3 +144,67 @@ Found while checking surface parity, not counted as gaps:
   `rows()` on a planar format `debug_assert`s in Rust and yields wrong slices in
   release, where `pixel_buffer_row_offset` returns `RG_ERR_INVALID_FORMAT`. Both
   are hardening, and both mean a program that aborted under Rust now continues.
+
+
+## Final behavioural sweep (pre-2.0.0 tag)
+
+M7 asked whether a counterpart EXISTS. This asked whether it COMPUTES THE SAME
+THING — every ported function compared arithmetic-by-arithmetic against
+`rust-old/`, with each claimed divergence handed to a second agent told to
+refute it by running both sides.
+
+### Fixed before the tag
+
+1. **`oklab(black)` was `(NaN, NaN, NaN)`.** `ganita_f32_cbrt(0.0)` returns NaN —
+   it is `exp(y·ln x)` underneath, and `ln(0)` is -inf — where Rust's
+   `f32::cbrt(0.0)` is `0.0`. The NaN propagated through the entire M2 matrix.
+   Black is the most common pixel value there is. Rust pins this in its own
+   `oklab_black` test, which the port never ported; that test now exists.
+   Fixed with `_rg_f32_cbrt`, which intercepts ONLY zero so every other input
+   keeps the f32 tier exactly rather than being widened to f64 to fix one input.
+2. **`apply_lut3d` truncated where Rust rounds half-up.** Rust is
+   `(v * 255.0 + 0.5).clamp(…) as u8`. A LUT entry of exactly 0.5 gave 127
+   instead of 128, and half of all grey levels came out one count low. Note the
+   +0.5 is NOT the general convention in `filter.rs` — `unsharp_mask` and
+   `vignette` genuinely truncate — so the fix is at the call site, not in the
+   shared `_fk_f32_to_u8`.
+3. **An ICC LUT profile with `grid_size == 0` read below its allocation.** Rust
+   checks only `> 64`, so zero underflows `grid_size - 1`: Rust panics in debug
+   and indexes wildly in release. The byte comes from an untrusted file. The
+   port now rejects `< 2` — a deliberate divergence, and strictly safer.
+
+⚠ **All three were in code with green tests.** The Oklab bug survived eight
+milestones because the one Rust test that would have caught it was not ported,
+and every existing lut3d test used entries that did not land on a .5 boundary.
+
+### Known divergences, documented rather than fixed
+
+These are real and confirmed by running both sides. They are recorded here
+because fixing them is a broad, uniform sweep rather than a point fix, and
+because the direction is toward MORE precision, not less:
+
+- **f32 vs f64 width in the scalar tails.** Rust computes `linear_to_srgb`,
+  `cmyk_to_srgba`, `levels`, `bilateral`, `rgbaf32_to_rgba8` and blend's
+  `f32 → u8` conversion entirely in f32; the port widens to f64 and narrows
+  once at the end. That is more accurate, and it differs by ±1 count at
+  rounding boundaries — e.g. `linear_to_srgb` gives 242 where Rust gives 243 on
+  five measured inputs.
+- **YUV→RGB inverse does not wrap at i16.** Rust's chroma path is i16
+  throughout and wraps; the port computes wider. Saturated colours decode
+  differently. The port's answer is the arithmetically correct one.
+- **NaN handling.** Rust's `as u8` cast saturates NaN to 0 and its `f32::max`
+  discards a NaN operand; the port's comparison-based guards are NaN-correct
+  and therefore propagate rather than swallow. Affects `linear_to_srgb`,
+  `levels` with a NaN white point, and `brightness` with a NaN offset.
+- **`f64_round` is round-half-to-even** where Rust's `.round()` is
+  half-away-from-zero. Latent in `_icc_write_s15fixed16`; reachable only for
+  values exactly on a .5 boundary at 2^-17.
+- **`affine_inverse` reassociates the translation term**, giving a 1-ULP
+  difference that can change the nearest-sampled source pixel on grid-aligned
+  transforms.
+- **Singular-matrix transforms report `RG_ERR_INVALID_PARAMETER`** where Rust
+  reports `Other`, contradicting the port's own mapping table.
+- **`pixel_format_checked_buffer_size` bounds the pixel count against a single
+  format-independent constant** (`floor(i64::MAX/16)`) rather than bounding the
+  final byte count per format, so it rejects some dimension pairs Rust accepts.
+  Reachable only above ~759 million pixels per side.

@@ -146,6 +146,31 @@ fn _rg_pow(base, exp) {
 # the positives a naive test would use. Same reasoning ganita applies in
 # ganita_f32_cbrt.
 #must_use
+# Single-precision cube root with Rust's zero behaviour.
+#
+# ⚠ `ganita_f32_cbrt(0.0)` returns NaN. It delegates to `ganita_f64_pow`, which
+# is `exp(y * ln x)`, and `ln(0)` is -inf while the Cyrius `exp` builtin returns
+# NaN for -inf. Rust's `f32::cbrt(0.0)` is `0.0`. This bit the Oklab forward
+# path, where linear black gives l = m = s = 0 and the NaN then propagated
+# through the whole M2 matrix — so `oklab(black)` was (NaN, NaN, NaN) where Rust
+# gives (0, 0, 0). Black is the most common pixel value there is.
+#
+# Only the zero case is intercepted: every other input keeps the f32 tier
+# exactly, rather than being widened to f64 and narrowed back, which would shift
+# results across the entire colour surface to fix one input. Returning `x`
+# rather than a literal zero preserves the sign, matching `cbrt(-0.0) == -0.0`.
+# ⚠ NO `: f32` ANNOTATION, and the test is on the RAW BIT PATTERN. An annotated
+# parameter makes the body do f32 arithmetic, which broke the widening in the
+# first attempt and returned 0 for every input. An f32 zero is exactly
+# 0x00000000 or 0x80000000, so an integer compare is both exact and free — no
+# float op, no rounding, no NaN subtlety.
+#must_use
+fn _rg_f32_cbrt(x) {
+    if (x == 0) { return x; }
+    if (x == 0x80000000) { return x; }
+    return ganita_f32_cbrt(x);
+}
+
 fn _rg_cbrt(x) {
     var third = f64_div(F64_ONE, f64_from(3));
     if (f64_lt(x, 0) == 1) {

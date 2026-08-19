@@ -253,10 +253,13 @@ is false either way — and is kept because it states the intent Rust spelled wi
 integer division truncates toward zero, so the test now pins a negative larger
 than a megabyte.
 
-**Filed upstream:** profile `.deps` sidecars are written EMPTY at 6.5.27 for any
-project following the documented "source files only need project includes"
-convention — the include-scan has nothing to find. `dist/ranga.deps` is
-authoritative for all three bundles.
+**Filed upstream, and FIXED in 6.5.29.** Profile `.deps` sidecars were written
+empty for any project following the documented "source files only need project
+includes" convention — the include-scan had nothing to find. sit filed the same
+defect from the opposite direction (a sidecar that never appeared at all) and
+located it, explicitly as a hypothesis, in the path derivation; the measured
+root cause was an empty `req_leaves`, and the path derivation was innocent. All
+four of ranga's sidecars are populated at the 6.5.29 pin.
 
 ### M6 — GPU ✅
 

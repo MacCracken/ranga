@@ -269,6 +269,30 @@ assert_eq(approx(load64(trip2 + 16), F64_ONE, 0.0001), 1, "P3 round-trip preserv
 # ================================================================
 test_group("oklab");
 
+# ⚠ BLACK. Rust pins this in its own `oklab_black` test, and the port did not
+# port it — which is how `oklab(black) == (NaN, NaN, NaN)` shipped through eight
+# milestones. `ganita_f32_cbrt(0.0)` returns NaN (it is exp(y·ln 0) underneath),
+# where Rust's `f32::cbrt(0.0)` is 0.0, and the NaN then propagated through the
+# whole M2 matrix. Black is the most common pixel value there is.
+var _ok_zero = f32_from(0);
+var _ok_one = f32_from(F64_ONE);
+var _ok_black = lin_rgba_to_oklab(lin_rgba_new(_ok_zero, _ok_zero, _ok_zero, _ok_one));
+assert_eq(oklab_l(_ok_black), 0, "Oklab L of linear black is exactly 0, not NaN");
+assert_eq(oklab_a(_ok_black), 0, "Oklab a of black is 0");
+assert_eq(oklab_b(_ok_black), 0, "Oklab b of black is 0");
+# NaN is not equal to itself — the assertions above would pass on a wrong-but-
+# finite value, so test the property directly too.
+assert_eq(f64_eq(f32_to(oklab_l(_ok_black)), f32_to(oklab_l(_ok_black))), 1,
+          "and it is a real number, not NaN");
+# sRGB black takes the same path through srgba_to_oklab.
+var _ok_sblack = srgba_to_oklab(srgba_new(0, 0, 0, 255));
+assert_eq(oklab_l(_ok_sblack), 0, "sRGB black also gives L = 0");
+# The shim itself: only zero is intercepted, every other input keeps the f32 tier.
+assert_eq(_rg_f32_cbrt(f32_from(0)), 0, "_rg_f32_cbrt(0) is 0");
+assert_eq(_rg_f32_cbrt(0x80000000), 0x80000000, "and -0.0 keeps its sign");
+assert_eq(_rg_f32_cbrt(f32_from(f64_from(8))), ganita_f32_cbrt(f32_from(f64_from(8))),
+          "while a nonzero input is unchanged from the stdlib routine");
+
 # Doctest: linear red has 0 < l < 1.
 var lin_red = lin_rgba_new(f32_from(F64_ONE), f32_from(0), f32_from(0), f32_from(F64_ONE));
 var ok_red = lin_rgba_to_oklab(lin_red);

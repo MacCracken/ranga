@@ -153,6 +153,31 @@ fn _rg_pow(base, exp) {
 # the positives a naive test would use. Same reasoning ganita applies in
 # ganita_f32_cbrt.
 #must_use
+# Single-precision cube root with Rust's zero behaviour.
+#
+# ⚠ `ganita_f32_cbrt(0.0)` returns NaN. It delegates to `ganita_f64_pow`, which
+# is `exp(y * ln x)`, and `ln(0)` is -inf while the Cyrius `exp` builtin returns
+# NaN for -inf. Rust's `f32::cbrt(0.0)` is `0.0`. This bit the Oklab forward
+# path, where linear black gives l = m = s = 0 and the NaN then propagated
+# through the whole M2 matrix — so `oklab(black)` was (NaN, NaN, NaN) where Rust
+# gives (0, 0, 0). Black is the most common pixel value there is.
+#
+# Only the zero case is intercepted: every other input keeps the f32 tier
+# exactly, rather than being widened to f64 and narrowed back, which would shift
+# results across the entire colour surface to fix one input. Returning `x`
+# rather than a literal zero preserves the sign, matching `cbrt(-0.0) == -0.0`.
+# ⚠ NO `: f32` ANNOTATION, and the test is on the RAW BIT PATTERN. An annotated
+# parameter makes the body do f32 arithmetic, which broke the widening in the
+# first attempt and returned 0 for every input. An f32 zero is exactly
+# 0x00000000 or 0x80000000, so an integer compare is both exact and free — no
+# float op, no rounding, no NaN subtlety.
+#must_use
+fn _rg_f32_cbrt(x) {
+    if (x == 0) { return x; }
+    if (x == 0x80000000) { return x; }
+    return ganita_f32_cbrt(x);
+}
+
 fn _rg_cbrt(x) {
     var third = f64_div(F64_ONE, f64_from(3));
     if (f64_lt(x, 0) == 1) {
@@ -422,7 +447,10 @@ fn bv_free(v) {
 # hand-encoded assembly is acceptable: the fallback is the oracle and the test
 # proves the two agree.
 #
-# STACK LAYOUT. Verified empirically on 6.5.27: parameters occupy [rbp-8],
+# STACK LAYOUT. Verified empirically, first on 6.5.27 and re-confirmed at the
+# 6.5.29 pin — this is not a documented ABI, so the assertions in
+# tests/simd_u8.tcyr ARE the verification and fail loudly if it ever moves.
+# Parameters occupy [rbp-8],
 # [rbp-16], [rbp-24], ... in declaration order, and the first local follows.
 # Every asm block below indexes its parameters on that basis, so ADDING OR
 # REORDERING A PARAMETER SILENTLY BREAKS THE ASSEMBLY. If you touch a signature
@@ -867,7 +895,7 @@ var PF_RGBAF32 = 5;
 
 # Display impl. Hand-written because #derive(Serialize) on a Cyrius enum
 # compiles clean and emits NO CODEC AT ALL — the generated `<name>_to_json` is
-# undefined at link time. Re-verified on 6.5.27. The derive DOES work on a
+# undefined at link time. Re-verified at the 6.5.29 pin — still open. The derive DOES work on a
 # struct; it is enums specifically that silently produce nothing, and ranga's
 # serde surface is four enums. See §3 item 6.
 #must_use
@@ -1328,7 +1356,17 @@ fn buffer_pool_free(p) {
 # for the 7-8 significant digits the sRGB/P3 matrices and Lab thresholds need
 # that is exact and far more readable than a bit pattern.
 #
-# ⚠ It is NOT safe past ~9 significant digits. Measured on 6.5.27, the lexer is
+# ⚠ FIXED IN 6.5.28 — this project now pins 6.5.29, and decimal literals are
+# correct to 16 significant digits. Re-tested at the 6.5.29 pin:
+# `0.4122214708` — the very coefficient below — round-trips exactly.
+#
+# The hex bit patterns are KEPT rather than converted back. They are correct,
+# they are pinned by the white-point assertions in tests/color.cyr, and
+# rewriting eighteen verified constants to gain legibility is churn with a
+# non-zero chance of introducing exactly the class of error the hex was adopted
+# to avoid. New constants in this file may be written as decimals.
+#
+# The original defect, for the record: measured on 6.5.27 the lexer was
 # exact through `3.14159265`, then goes silently wrong: `3.1415926535` parses as
 # 0.95822 and `3.141592653589793` as 0.061575, with no diagnostic. The Oklab
 # coefficients carry 10-11 digits and are therefore written as hex bit patterns
@@ -1890,7 +1928,7 @@ fn _rg_f32_dot3(m0: f32, m1: f32, m2: f32, x: f32, y: f32, z: f32) {
 #
 # ⚠ These must NOT be written as decimal literals. The Cyrius lexer is exact to
 # about 9 significant digits and goes SILENTLY WRONG beyond ~11 — measured on
-# 6.5.27, `3.1415926535` parses as 0.95822 and `3.141592653589793` as 0.061575,
+# 6.5.27 (FIXED in 6.5.28), `3.1415926535` parsed as 0.95822 and `3.141592653589793` as 0.061575,
 # with no diagnostic. Every Ottosson coefficient carries 10-11 digits, which is
 # squarely in that range: written as decimals they produced an Oklab lightness
 # of 6.447 for linear white instead of 1.0. This is why the stdlib itself spells
@@ -1929,9 +1967,11 @@ fn lin_rgba_to_oklab(c) {
     var m = _rg_f32_dot3(f32_from(_OK_M1_10), f32_from(_OK_M1_11), f32_from(_OK_M1_12), r, g, b);
     var s = _rg_f32_dot3(f32_from(_OK_M1_20), f32_from(_OK_M1_21), f32_from(_OK_M1_22), r, g, b);
 
-    var lc = ganita_f32_cbrt(l);
-    var mc = ganita_f32_cbrt(m);
-    var sc = ganita_f32_cbrt(s);
+    # _rg_f32_cbrt, not ganita_f32_cbrt: the stdlib routine returns NaN for 0.0
+    # and linear black makes all three of these zero. See src/error.cyr.
+    var lc = _rg_f32_cbrt(l);
+    var mc = _rg_f32_cbrt(m);
+    var sc = _rg_f32_cbrt(s);
 
     var ol = _rg_f32_dot3(f32_from(_OK_M2_00), f32_from(_OK_M2_01), f32_from(f64_neg(_OK_M2_02)), lc, mc, sc);
     var oa = _rg_f32_dot3(f32_from(_OK_M2_10), f32_from(f64_neg(_OK_M2_11)), f32_from(_OK_M2_12), lc, mc, sc);
@@ -3466,7 +3506,8 @@ fn auto_levels(buf) {
 #   Perspective 72 bytes  row-major 3x3, +0 m00 .. +64 m22            (f64 each)
 #
 # FLOAT STYLE. This module uses `: f64`-annotated locals and parameters and then
-# BARE OPERATORS (`a * b + c`, `t <= 1.0`). Verified on 6.5.27: annotating the
+# BARE OPERATORS (`a * b + c`, `t <= 1.0`). Verified on 6.5.27 and re-confirmed
+# at the 6.5.29 pin by the suite: annotating the
 # binding or the parameter is what carries F64_TYID, and the operators then
 # dispatch to real f64 arithmetic and comparison. It is far more legible than
 # nested f64_mul/f64_add for matrix work, and it is the same mechanism the f32
@@ -5001,6 +5042,9 @@ fn _fk_div(a: f32, b: f32) { return a / b; }
 fn _fk_sub(a: f32, b: f32) { return a - b; }
 #must_use
 fn _fk_add(a: f32, b: f32) { return a + b; }
+# 0.5 as an f32 bit pattern, for the round-half-up tails.
+#must_use
+fn _fk_half() { return f32_from(0.5); }
 
 # Clamp an integer index into [0, hi].
 #must_use
@@ -5393,7 +5437,13 @@ fn apply_lut3d(buf, l) {
         var c = 0;
         while (c < 3) {
             var v: f32 = load32(out + c * 4);
-            store8(q + c, _fk_f32_to_u8(_fk_mul(v, f255)));
+            # ⚠ ROUND HALF UP, not truncate. Rust's apply_lut3d is
+            # `(lr * 255.0 + 0.5).clamp(0.0, 255.0) as u8`. Without the +0.5 a
+            # LUT entry of exactly 0.5 gives 127 instead of 128, and half of all
+            # grey levels come out one count low. Note this is NOT the general
+            # convention in filter.rs — `unsharp_mask` and `vignette` genuinely
+            # truncate, so the +0.5 belongs here rather than in _fk_f32_to_u8.
+            store8(q + c, _fk_f32_to_u8(_fk_add(_fk_mul(v, f255), _fk_half())));
             c = c + 1;
         }
         i = i + 1;
@@ -7536,6 +7586,14 @@ fn _icc_lut_check_channels(data, off, err_out) {
     if (load8(data + off + 8) != 3) { store64(err_out, RG_ERR_INVALID_FORMAT); return 0; }
     if (load8(data + off + 9) != 3) { store64(err_out, RG_ERR_INVALID_FORMAT); return 0; }
     var grid = load8(data + off + 10);
+    # ⚠ ZERO IS AS INVALID AS 65. Rust checks only `> 64`, and a grid_size of 0
+    # then makes `grid_size - 1` underflow: Rust panics on the subtraction in
+    # debug and indexes wildly in release, while this port computed
+    # `f64_from(0 - 1)` as a scale and read below the LUT allocation. The input
+    # is an untrusted byte from a file, so both behaviours are reachable from a
+    # malformed profile. Rejecting it is a deliberate divergence from Rust and
+    # strictly safer — there is no such thing as a zero-point LUT axis.
+    if (grid < 2) { store64(err_out, RG_ERR_INVALID_FORMAT); return 0; }
     if (grid > _ICC_MAX_GRID) { store64(err_out, RG_ERR_INVALID_FORMAT); return 0; }
     store64(err_out, RG_ERR_NONE);
     return grid;

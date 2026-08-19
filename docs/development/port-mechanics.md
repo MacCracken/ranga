@@ -276,7 +276,8 @@ hand gets the rounding wrong; a short Python/numpy search finds them reliably.
 
 ### Hand-encoded `asm { }` is defensible only with a differential oracle
 
-The mechanics, all verified on 6.5.27 and none of them documented:
+The mechanics, verified on 6.5.27 and re-confirmed at the 6.5.29 pin by the
+suite that exercises them; none of them documented upstream:
 
 - Raw bytes, semicolon-separated, inside `asm { ... }`, gated with
   `#ifdef CYRIUS_ARCH_X86` / `#ifndef` and a scalar fallback.

@@ -63,6 +63,32 @@ maps it item by item.
   works on a Cyrius struct but silently emits nothing on an enum; filed at
   `cyrius/docs/development/issues/2026-08-19-derive-serialize-on-enum-emits-nothing.md`.
 
+### Toolchain
+
+- **Cyrius pin 6.5.29** (was 6.5.27). Two defects this port filed were fixed in
+  between: decimal float literals past ~9 significant digits parsing to a
+  silently wrong value (6.5.28), and `distlib` profile `.deps` sidecars written
+  empty (6.5.29). ranga keeps its hex bit patterns for the Oklab matrices —
+  they are correct and pinned by the white-point assertions, and rewriting
+  eighteen verified constants would be churn with a real chance of introducing
+  the very error class the hex was adopted to avoid.
+- **`#derive(Serialize)` on an enum still emits nothing**, re-tested at the
+  6.5.29 pin. The four enum codecs stay hand-written.
+
+### Fixed — found by the final parity sweep
+
+- **`oklab(black)` returned `(NaN, NaN, NaN)`.** `ganita_f32_cbrt(0.0)` is NaN
+  where Rust's `f32::cbrt(0.0)` is `0.0`, and it propagated through the whole
+  Oklab M2 matrix. Rust pins this in a test the port had not ported.
+- **`apply_lut3d` truncated where Rust rounds half-up**, so half of all grey
+  levels came out one count low.
+- **An ICC LUT profile with `grid_size == 0` read below its allocation.** Now
+  rejected — a deliberate divergence from Rust, which underflows there.
+
+Known remaining divergences — chiefly f32-vs-f64 width in the scalar tails, and
+NaN handling where the port is NaN-correct and Rust's casts saturate — are
+enumerated in `docs/development/parity-rust-v-cyrius.md`.
+
 ### Testing
 
 **1,878 assertions across 19 suites, 0 lint warnings.** Expected values come

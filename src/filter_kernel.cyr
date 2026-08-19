@@ -58,6 +58,9 @@ fn _fk_div(a: f32, b: f32) { return a / b; }
 fn _fk_sub(a: f32, b: f32) { return a - b; }
 #must_use
 fn _fk_add(a: f32, b: f32) { return a + b; }
+# 0.5 as an f32 bit pattern, for the round-half-up tails.
+#must_use
+fn _fk_half() { return f32_from(0.5); }
 
 # Clamp an integer index into [0, hi].
 #must_use
@@ -450,7 +453,13 @@ fn apply_lut3d(buf, l) {
         var c = 0;
         while (c < 3) {
             var v: f32 = load32(out + c * 4);
-            store8(q + c, _fk_f32_to_u8(_fk_mul(v, f255)));
+            # ⚠ ROUND HALF UP, not truncate. Rust's apply_lut3d is
+            # `(lr * 255.0 + 0.5).clamp(0.0, 255.0) as u8`. Without the +0.5 a
+            # LUT entry of exactly 0.5 gives 127 instead of 128, and half of all
+            # grey levels come out one count low. Note this is NOT the general
+            # convention in filter.rs — `unsharp_mask` and `vignette` genuinely
+            # truncate, so the +0.5 belongs here rather than in _fk_f32_to_u8.
+            store8(q + c, _fk_f32_to_u8(_fk_add(_fk_mul(v, f255), _fk_half())));
             c = c + 1;
         }
         i = i + 1;

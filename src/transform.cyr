@@ -9,7 +9,8 @@
 #   Perspective 72 bytes  row-major 3x3, +0 m00 .. +64 m22            (f64 each)
 #
 # FLOAT STYLE. This module uses `: f64`-annotated locals and parameters and then
-# BARE OPERATORS (`a * b + c`, `t <= 1.0`). Verified on 6.5.27: annotating the
+# BARE OPERATORS (`a * b + c`, `t <= 1.0`). Verified on 6.5.27 and re-confirmed
+# at the 6.5.29 pin by the suite: annotating the
 # binding or the parameter is what carries F64_TYID, and the operators then
 # dispatch to real f64 arithmetic and comparison. It is far more legible than
 # nested f64_mul/f64_add for matrix work, and it is the same mechanism the f32

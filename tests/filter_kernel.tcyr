@@ -180,6 +180,38 @@ assert_eq(vignette(argb, f32c(1.0)), RG_ERR_INVALID_FORMAT, "vignette rejects no
 # ================================================================
 test_group("lut3d");
 
+# ⚠ ROUND HALF UP. Rust's apply_lut3d is `(v * 255.0 + 0.5).clamp(...) as u8`;
+# the port truncated, so a LUT entry of exactly 0.5 gave 127 instead of 128 and
+# half of all grey levels came out one count low. Found by the final parity
+# sweep against rust-old — every existing lut3d test used entries that did not
+# land on a .5 boundary, so none of them could see it.
+var _lut_half = lut3d_new(2);
+var _lh = f32_from(0.5);
+var _lr = 0;
+while (_lr < 2) {
+    var _lg = 0;
+    while (_lg < 2) {
+        var _lb = 0;
+        while (_lb < 2) {
+            var _lc = 0;
+            while (_lc < 3) { lut3d_set(_lut_half, _lr, _lg, _lb, _lc, _lh); _lc = _lc + 1; }
+            _lb = _lb + 1;
+        }
+        _lg = _lg + 1;
+    }
+    _lr = _lr + 1;
+}
+var _lbuf = pixel_buffer_zeroed(2, 1, PF_RGBA8, err);
+var _lp = pixel_buffer_data(_lbuf);
+store32(_lp, 0xFF404040);
+store32(_lp + 4, 0xFFC0C0C0);
+assert_eq(apply_lut3d(_lbuf, _lut_half), RG_ERR_NONE, "a constant-0.5 LUT applies");
+assert_eq(load8(_lp), 128, "0.5 rounds UP to 128, not down to 127");
+assert_eq(load8(_lp + 4), 128, "regardless of the input pixel");
+assert_eq(load8(_lp + 3), 0xFF, "and alpha is untouched");
+pixel_buffer_free(_lbuf);
+lut3d_free(_lut_half);
+
 # A 2x2x2 identity LUT: entry (r,g,b) maps to (r,g,b) normalised.
 var lut = lut3d_new(2);
 assert_eq(lut != 0, 1, "lut3d_new(2) succeeds");
