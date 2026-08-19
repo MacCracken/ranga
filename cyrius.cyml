@@ -94,6 +94,7 @@ modules = [
     "src/gpu_spirv.cyr",
     "src/gpu_kernels.cyr",
     "src/gpu_shaders.cyr",
+    "src/gpu_pipeline.cyr",
     "src/gpu_context.cyr",
     "src/gpu_buffer.cyr",
 ]

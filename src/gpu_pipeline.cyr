@@ -1,0 +1,540 @@
+# gpu_pipeline.cyr -- the fourteen public GPU operations
+# Ported from rust-old/src/gpu/pipeline.rs. Private prefix: _gp_
+#
+# This is the layer a consumer actually calls. Everything beneath it — the
+# context, the buffers, the SPIR-V emitter, the kernels and the WGSL — existed
+# before this file, and none of it was reachable without hand-assembling a
+# dispatch. `gpu_invert(ctx, buf)` is the promise the GPU feature makes.
+#
+# THE SHAPE, once per operation: validate the format, upload, get the cached
+# shader module, write params, build the binding array, dispatch, read back into
+# the caller's buffer. `_gp_run_1buf` and `_gp_run_2buf` carry all of it; each
+# operation is its parameter block.
+#
+# ⚠ THREE OF THE FOURTEEN CANNOT RUN ON THE NATIVE BACKEND, and they return
+# RG_GPU_ERR_UNSUPPORTED rather than pretending. `gpu_blend` and
+# `gpu_noise_gaussian` have no SPIR-V kernel (blend is 13 modes and exceeds the
+# register budget; noise needs log/cos/sin, which mabda's lowerer does not
+# carry), `gpu_gaussian_blur` needs OpLoopMerge which is rejected outright, and
+# `gpu_resize` with a bilinear filter hits the same register ceiling as blend.
+# All four have complete WGSL in gpu_shaders.cyr and work on the wgpu path.
+# Filed at mabda/docs/development/issues/2026-08-19-native-spirv-compile-limits.md.
+
+# Every per-pixel kernel declares @workgroup_size(256).
+var _GP_WG = 256;
+# Storage | copy-dst | copy-src, matching Rust's create_storage_buffer usage.
+var _GP_USAGE = 0x0080 | 0x0008 | 0x0004;
+# The params buffer is eight words for every operation; crop needs six.
+var _GP_PARAM_BYTES = 32;
+
+# Kernel selectors for the shader-module cache.
+var GP_K_INVERT     = 1;
+var GP_K_GRAYSCALE  = 2;
+var GP_K_FADE       = 3;
+var GP_K_BRIGHTCON  = 4;
+var GP_K_SATURATION = 5;
+var GP_K_DISSOLVE   = 6;
+var GP_K_WIPE       = 7;
+var GP_K_CROP       = 8;
+var GP_K_FLIP_H     = 9;
+var GP_K_FLIP_V     = 10;
+var GP_K_RESIZE_N   = 11;
+
+# ── Shader module cache ────────
+#
+# Distinct from the pipeline cache in gpu_context.cyr: that one holds mabda
+# ComputePipeline handles for the wgpu path and frees them with
+# compute_pipeline_release. These are NATIVE shader modules from
+# gpu_shader_module_create_spirv, freed with gpu_shader_module_release.
+#
+# ⚠ PER-CONTEXT, NOT PROCESS-GLOBAL, and the distinction is load-bearing.
+# `_native_shader_compile_spirv` stages the compiled GFX9 ISA in a GTT buffer
+# object created on THAT context's DRM fd, at a VA carved from that context's
+# texture region. `_native_dispatch_compiled` reads the handle and VA straight
+# out of the module and submits them with whatever context it is handed,
+# checking only that they are non-null. So a process-global cache lets a second
+# context dispatch the first one's modules against a different fd — and after
+# the first context is freed, against a closed one. Rust kept its caches on
+# GpuContext for the same reason; this is a flat (selector, module) vec living
+# in the context and released with it.
+
+# Build the SPIR-V for one selector. Returns 0 for an unknown selector.
+#must_use
+fn _gp_build_kernel(s, kind) {
+    if (kind == GP_K_INVERT)     { gk_invert(s); return 1; }
+    if (kind == GP_K_GRAYSCALE)  { gk_grayscale(s); return 1; }
+    if (kind == GP_K_FADE)       { gk_fade(s); return 1; }
+    if (kind == GP_K_BRIGHTCON)  { gk_brightness_contrast(s); return 1; }
+    if (kind == GP_K_SATURATION) { gk_saturation(s); return 1; }
+    if (kind == GP_K_DISSOLVE)   { gk_dissolve(s); return 1; }
+    if (kind == GP_K_WIPE)       { gk_wipe(s); return 1; }
+    if (kind == GP_K_CROP)       { gk_crop(s); return 1; }
+    if (kind == GP_K_FLIP_H)     { gk_flip_horizontal(s); return 1; }
+    if (kind == GP_K_FLIP_V)     { gk_flip_vertical(s); return 1; }
+    if (kind == GP_K_RESIZE_N)   { gk_resize_nearest(s); return 1; }
+    return 0;
+}
+
+# Compiled shader module for `kind`, built on first use.
+#
+# Rust cached compiled PIPELINES here; the native path has no pipeline object,
+# so the cache holds the compiled GFX9 module instead. Same purpose: a kernel is
+# emitted and lowered once per process, not once per frame.
+#must_use
+fn _gp_kernel(ctx, kind, err_out) {
+    if (ctx == 0) { store64(err_out, RG_GPU_ERR_NO_ADAPTER); return 0; }
+    var cache = gpu_context_shader_cache(ctx);
+    if (cache == 0) { store64(err_out, RG_GPU_ERR_BUFFER_OP); return 0; }
+    var i = 0;
+    while (i < vec_len(cache)) {
+        if (vec_get(cache, i) == kind) {
+            store64(err_out, RG_GPU_ERR_NONE);
+            return vec_get(cache, i + 1);
+        }
+        i = i + 2;
+    }
+    var s = spv_new();
+    if (s == 0) { store64(err_out, RG_GPU_ERR_BUFFER_OP); return 0; }
+    if (_gp_build_kernel(s, kind) == 0) {
+        spv_free(s);
+        store64(err_out, RG_GPU_ERR_UNSUPPORTED);
+        return 0;
+    }
+    var outp = fl_alloc(8);
+    if (outp == 0) { spv_free(s); store64(err_out, RG_GPU_ERR_BUFFER_OP); return 0; }
+    var n = spv_finish(s, outp);
+    var spv = load64(outp);
+    fl_free(outp);
+    spv_free(s);
+    if (n == 0) { store64(err_out, RG_GPU_ERR_BUFFER_OP); return 0; }
+    var shmod = gpu_shader_module_create_spirv(gpu_context_mabda(ctx), spv, n);
+    fl_free(spv);
+    if (shmod == 0) {
+        # The module was valid SPIR-V — spv_finish would have returned 0
+        # otherwise — so this is mabda declining to lower it, not an emitter
+        # fault. See the register-pressure note in the module header.
+        store64(err_out, RG_GPU_ERR_UNSUPPORTED);
+        return 0;
+    }
+    vec_push(cache, kind);
+    vec_push(cache, shmod);
+    store64(err_out, RG_GPU_ERR_NONE);
+    return shmod;
+}
+
+# ── Shared dispatch ────────
+
+#must_use
+fn _gp_require_rgba8(buf, err_out) {
+    if (buf == 0) { store64(err_out, RG_GPU_ERR_BUFFER_OP); return 0; }
+    if (pixel_buffer_format(buf) != PF_RGBA8) {
+        store64(err_out, RG_GPU_ERR_FORMAT);
+        return 0;
+    }
+    return 1;
+}
+
+# ⚠ BOTH DIMENSIONS, not the pixel count. Rust guards dissolve and wipe with
+# `src.width != dst.width || src.height != dst.height`; comparing width*height
+# instead accepts an 8x2 source against a 4x4 destination, and wipe then reflows
+# the source into a different raster and returns a silently wrong composite
+# rather than DimensionMismatch.
+#must_use
+fn _gp_same_shape(a, b) {
+    if (pixel_buffer_width(a) != pixel_buffer_width(b)) { return 0; }
+    if (pixel_buffer_height(a) != pixel_buffer_height(b)) { return 0; }
+    return 1;
+}
+
+# Rust's `pixel_count.div_ceil(256)`.
+#must_use
+fn _gp_groups(count) {
+    if (count <= 0) { return 1; }
+    return (count + _GP_WG - 1) / _GP_WG;
+}
+
+# An in-place operation over one pixel buffer.
+#
+# `params` points at _GP_PARAM_BYTES the caller has filled; word 0 must be the
+# element count the kernel guards against. The params buffer is bound TWICE —
+# once as the u32 view and once as the f32 view — because mabda's supported
+# opcode set has no OpBitcast, so a word read as both a count and a float needs
+# two differently-typed arrays over the same memory.
+fn _gp_run_1buf(ctx, buf, kind, params, groups, err_out) {
+    # ctx first: every sibling in the GPU feature treats a null context as a
+    # coded RG_GPU_ERR_NO_ADAPTER, and this layer used to dereference it.
+    if (ctx == 0) { store64(err_out, RG_GPU_ERR_NO_ADAPTER); return RG_ERR_OTHER; }
+    if (_gp_require_rgba8(buf, err_out) == 0) { return gpu_error_to_ranga(load64(err_out)); }
+    # ⚠ The two code spaces OVERLAP numerically — RG_GPU_ERR_FORMAT is -4 and so
+    # is RG_ERR_UNSUPPORTED_CONVERSION; RG_GPU_ERR_BUFFER_OP is -3 and so is
+    # RG_ERR_BUFFER_TOO_SMALL. Returning err_out's value directly from a slot
+    # documented as RG_ERR_* would hand callers a code from the wrong space that
+    # still looks valid. gpu_error_to_ranga is the only correct bridge.
+    var shmod = _gp_kernel(ctx, kind, err_out);
+    if (shmod == 0) { return gpu_error_to_ranga(load64(err_out)); }
+
+    var m = gpu_context_mabda(ctx);
+    var gb = gpu_buffer_upload(ctx, buf, err_out);
+    if (gb == 0) { return gpu_error_to_ranga(load64(err_out)); }
+
+    var pb = gpu_buffer_create(m, _GP_PARAM_BYTES, _GP_USAGE);
+    if (pb == 0) {
+        gpu_buffer_free(ctx, gb);
+        store64(err_out, RG_GPU_ERR_BUFFER_OP);
+        return RG_ERR_OTHER;
+    }
+    gpu_buffer_write(m, pb, 0, params, _GP_PARAM_BYTES);
+
+    var bp[56];
+    store64(&bp, 3);
+    _gp_bind(&bp + 8, gb);
+    native_buf_pair_write(&bp + 24, load64(pb + NATIVE_BUF_FIELD_HANDLE), load64(pb + NATIVE_BUF_FIELD_VA));
+    native_buf_pair_write(&bp + 40, load64(pb + NATIVE_BUF_FIELD_HANDLE), load64(pb + NATIVE_BUF_FIELD_VA));
+    var rc = gpu_compute_dispatch(m, shmod, groups, 1, 1, &bp);
+    gpu_buffer_release(m, pb);
+    if (rc != 0) {
+        gpu_buffer_free(ctx, gb);
+        store64(err_out, RG_GPU_ERR_BUFFER_OP);
+        return RG_ERR_OTHER;
+    }
+
+    # Read straight back over the caller's bytes. Rust replaced buf.data with
+    # the downloaded Vec; here the buffer is already the right size and owned by
+    # the caller, so an in-place read avoids an allocation and a copy.
+    var back = gpu_buffer_read(m, gpu_buffer_handle(gb), 0,
+                               pixel_buffer_data(buf), pixel_buffer_len(buf));
+    gpu_buffer_free(ctx, gb);
+    if (back != 0) { store64(err_out, RG_GPU_ERR_BUFFER_OP); return RG_ERR_OTHER; }
+    store64(err_out, RG_GPU_ERR_NONE);
+    return RG_ERR_NONE;
+}
+
+# Write one (handle, VA) binding pair from a ranga GpuBuffer.
+#
+# ⚠ TWO INDIRECTIONS, AND SKIPPING ONE COSTS NOTHING VISIBLE. `gpu_buffer_handle`
+# returns the mabda buffer OBJECT pointer; the native handle and VA are FIELDS
+# inside it, at +0 and +8. Passing the object pointer straight through as the
+# handle — which is what the first version of this file did — dispatches
+# cleanly and writes nothing, because mabda reads a bogus residency entry rather
+# than failing. Every operation returned BUFFER_OP with no other symptom.
+fn _gp_bind(dst, gb) {
+    var obj = gpu_buffer_handle(gb);
+    return native_buf_pair_write(dst, load64(obj + NATIVE_BUF_FIELD_HANDLE),
+                                      load64(obj + NATIVE_BUF_FIELD_VA));
+}
+
+# A two-buffer operation: `src` is read, `dst` is read AND written.
+fn _gp_run_2buf(ctx, src, dst, kind, params, groups, err_out) {
+    if (ctx == 0) { store64(err_out, RG_GPU_ERR_NO_ADAPTER); return RG_ERR_OTHER; }
+    if (_gp_require_rgba8(src, err_out) == 0) { return gpu_error_to_ranga(load64(err_out)); }
+    if (_gp_require_rgba8(dst, err_out) == 0) { return gpu_error_to_ranga(load64(err_out)); }
+    var shmod = _gp_kernel(ctx, kind, err_out);
+    if (shmod == 0) { return gpu_error_to_ranga(load64(err_out)); }
+
+    var m = gpu_context_mabda(ctx);
+    var sg = gpu_buffer_upload(ctx, src, err_out);
+    if (sg == 0) { return gpu_error_to_ranga(load64(err_out)); }
+    var dg = gpu_buffer_upload(ctx, dst, err_out);
+    if (dg == 0) { gpu_buffer_free(ctx, sg); return gpu_error_to_ranga(load64(err_out)); }
+
+    var pb = gpu_buffer_create(m, _GP_PARAM_BYTES, _GP_USAGE);
+    if (pb == 0) {
+        gpu_buffer_free(ctx, dg);
+        gpu_buffer_free(ctx, sg);
+        store64(err_out, RG_GPU_ERR_BUFFER_OP);
+        return RG_ERR_OTHER;
+    }
+    gpu_buffer_write(m, pb, 0, params, _GP_PARAM_BYTES);
+
+    var bp[72];
+    store64(&bp, 4);
+    _gp_bind(&bp + 8, sg);
+    _gp_bind(&bp + 24, dg);
+    native_buf_pair_write(&bp + 40, load64(pb + NATIVE_BUF_FIELD_HANDLE), load64(pb + NATIVE_BUF_FIELD_VA));
+    native_buf_pair_write(&bp + 56, load64(pb + NATIVE_BUF_FIELD_HANDLE), load64(pb + NATIVE_BUF_FIELD_VA));
+    var rc = gpu_compute_dispatch(m, shmod, groups, 1, 1, &bp);
+    gpu_buffer_release(m, pb);
+    if (rc != 0) {
+        gpu_buffer_free(ctx, dg);
+        gpu_buffer_free(ctx, sg);
+        store64(err_out, RG_GPU_ERR_BUFFER_OP);
+        return RG_ERR_OTHER;
+    }
+    var back = gpu_buffer_read(m, gpu_buffer_handle(dg), 0,
+                               pixel_buffer_data(dst), pixel_buffer_len(dst));
+    gpu_buffer_free(ctx, dg);
+    gpu_buffer_free(ctx, sg);
+    if (back != 0) { store64(err_out, RG_GPU_ERR_BUFFER_OP); return RG_ERR_OTHER; }
+    store64(err_out, RG_GPU_ERR_NONE);
+    return RG_ERR_NONE;
+}
+
+# Zero a params block and set the count in word 0.
+fn _gp_params(p, count) {
+    var i = 0;
+    while (i < _GP_PARAM_BYTES) { store8(p + i, 0); i = i + 1; }
+    store32(p, count);
+    return RG_ERR_NONE;
+}
+
+# ── The fourteen operations ────────
+#
+# Each returns RG_ERR_NONE on success or a negative code, and reports the GPU
+# code through err_out. In-place ops mutate `buf`; producing ops return a new
+# PixelBuffer the caller owns.
+
+# Invert RGB in place, alpha preserved. Rust's `gpu_invert`.
+fn gpu_invert(ctx, buf, err_out) {
+    var p = fl_alloc(_GP_PARAM_BYTES);
+    if (p == 0) { store64(err_out, RG_GPU_ERR_BUFFER_OP); return RG_ERR_ALLOCATION; }
+    var n = pixel_buffer_pixel_count(buf);
+    _gp_params(p, n);
+    var rc = _gp_run_1buf(ctx, buf, GP_K_INVERT, p, _gp_groups(n), err_out);
+    fl_free(p);
+    return rc;
+}
+
+# BT.709 luminance into all three channels, alpha preserved.
+#
+# ⚠ This does NOT agree with the CPU `grayscale`, and did not in Rust either:
+# the CPU path uses BT.601 integer weights (77/150/29 >> 8), this uses BT.709
+# floats. On (200, 100, 50) that is 0x7C against 0x76.
+fn gpu_grayscale(ctx, buf, err_out) {
+    var p = fl_alloc(_GP_PARAM_BYTES);
+    if (p == 0) { store64(err_out, RG_GPU_ERR_BUFFER_OP); return RG_ERR_ALLOCATION; }
+    var n = pixel_buffer_pixel_count(buf);
+    _gp_params(p, n);
+    var rc = _gp_run_1buf(ctx, buf, GP_K_GRAYSCALE, p, _gp_groups(n), err_out);
+    fl_free(p);
+    return rc;
+}
+
+# Multiply RGB by `factor`, alpha preserved. `factor` is an f64 bit pattern,
+# narrowed to f32 for the shader.
+fn gpu_fade(ctx, buf, factor, err_out) {
+    var p = fl_alloc(_GP_PARAM_BYTES);
+    if (p == 0) { store64(err_out, RG_GPU_ERR_BUFFER_OP); return RG_ERR_ALLOCATION; }
+    var n = pixel_buffer_pixel_count(buf);
+    _gp_params(p, n);
+    store32(p + 4, f64_to_f32(factor) & 0xFFFFFFFF);
+    var rc = _gp_run_1buf(ctx, buf, GP_K_FADE, p, _gp_groups(n), err_out);
+    fl_free(p);
+    return rc;
+}
+
+# clamp((c + brightness - 0.5) * contrast + 0.5, 0, 1) per channel.
+fn gpu_brightness_contrast(ctx, buf, brightness, contrast, err_out) {
+    var p = fl_alloc(_GP_PARAM_BYTES);
+    if (p == 0) { store64(err_out, RG_GPU_ERR_BUFFER_OP); return RG_ERR_ALLOCATION; }
+    var n = pixel_buffer_pixel_count(buf);
+    _gp_params(p, n);
+    store32(p + 4, f64_to_f32(brightness) & 0xFFFFFFFF);
+    store32(p + 8, f64_to_f32(contrast) & 0xFFFFFFFF);
+    var rc = _gp_run_1buf(ctx, buf, GP_K_BRIGHTCON, p, _gp_groups(n), err_out);
+    fl_free(p);
+    return rc;
+}
+
+# lum + factor * (c - lum), clamped, on BT.709 luminance.
+fn gpu_saturation(ctx, buf, factor, err_out) {
+    var p = fl_alloc(_GP_PARAM_BYTES);
+    if (p == 0) { store64(err_out, RG_GPU_ERR_BUFFER_OP); return RG_ERR_ALLOCATION; }
+    var n = pixel_buffer_pixel_count(buf);
+    _gp_params(p, n);
+    store32(p + 4, f64_to_f32(factor) & 0xFFFFFFFF);
+    var rc = _gp_run_1buf(ctx, buf, GP_K_SATURATION, p, _gp_groups(n), err_out);
+    fl_free(p);
+    return rc;
+}
+
+# dst = mix(src, dst, factor) on ALL FOUR channels, alpha included.
+fn gpu_dissolve(ctx, src, dst, factor, err_out) {
+    if (_gp_same_shape(src, dst) == 0) {
+        store64(err_out, RG_GPU_ERR_FORMAT);
+        return RG_ERR_DIMENSION_MISMATCH;
+    }
+    var p = fl_alloc(_GP_PARAM_BYTES);
+    if (p == 0) { store64(err_out, RG_GPU_ERR_BUFFER_OP); return RG_ERR_ALLOCATION; }
+    var n = pixel_buffer_pixel_count(dst);
+    _gp_params(p, n);
+    store32(p + 4, f64_to_f32(factor) & 0xFFFFFFFF);
+    var rc = _gp_run_2buf(ctx, src, dst, GP_K_DISSOLVE, p, _gp_groups(n), err_out);
+    fl_free(p);
+    return rc;
+}
+
+# Horizontal wipe: left of the line keeps dst, right takes src.
+fn gpu_wipe(ctx, src, dst, progress, err_out) {
+    if (_gp_same_shape(src, dst) == 0) {
+        store64(err_out, RG_GPU_ERR_FORMAT);
+        return RG_ERR_DIMENSION_MISMATCH;
+    }
+    var p = fl_alloc(_GP_PARAM_BYTES);
+    if (p == 0) { store64(err_out, RG_GPU_ERR_BUFFER_OP); return RG_ERR_ALLOCATION; }
+    var n = pixel_buffer_pixel_count(dst);
+    _gp_params(p, n);
+    store32(p + 4, pixel_buffer_width(dst));
+    store32(p + 8, pixel_buffer_height(dst));
+    store32(p + 12, f64_to_f32(progress) & 0xFFFFFFFF);
+    var rc = _gp_run_2buf(ctx, src, dst, GP_K_WIPE, p, _gp_groups(n), err_out);
+    fl_free(p);
+    return rc;
+}
+
+# Mirror left-to-right into a NEW buffer. Rust's `gpu_flip_horizontal` returned
+# a fresh PixelBuffer rather than mutating, because the destination index is not
+# the source index and an in-place flip would race.
+#must_use
+fn gpu_flip_horizontal(ctx, buf, err_out) {
+    return _gp_geom(ctx, buf, GP_K_FLIP_H, pixel_buffer_width(buf),
+                    pixel_buffer_height(buf), 0, 0, err_out);
+}
+
+#must_use
+fn gpu_flip_vertical(ctx, buf, err_out) {
+    return _gp_geom(ctx, buf, GP_K_FLIP_V, pixel_buffer_width(buf),
+                    pixel_buffer_height(buf), 0, 0, err_out);
+}
+
+# Copy the rectangle (left, top) .. (right, bottom) into a new buffer.
+#
+# ⚠ RECTANGLE, NOT OFFSET-AND-SIZE, AND IT CLAMPS. Rust's gpu_crop takes
+# `left, top, right, bottom` and clamps each — `l = left.min(width)`,
+# `r = right.min(width).max(l)` — returning a 0x0 buffer for a degenerate
+# rectangle rather than an error. ranga's own CPU `crop` in transform.cyr takes
+# the same four and clamps the same way. An earlier version of this function
+# took (sx, sy, dw, dh) and hard-rejected out-of-range input, which diverged
+# from BOTH: a consumer moving a call between crop() and gpu_crop() would have
+# silently changed what the arguments meant.
+#must_use
+fn gpu_crop(ctx, buf, left, top, right, bottom, err_out) {
+    if (_gp_require_rgba8(buf, err_out) == 0) { return 0; }
+    var bw = pixel_buffer_width(buf);
+    var bh = pixel_buffer_height(buf);
+    var l = left;
+    if (l < 0) { l = 0; }
+    if (l > bw) { l = bw; }
+    var t = top;
+    if (t < 0) { t = 0; }
+    if (t > bh) { t = bh; }
+    var r = right;
+    if (r > bw) { r = bw; }
+    if (r < l) { r = l; }
+    var b = bottom;
+    if (b > bh) { b = bh; }
+    if (b < t) { b = t; }
+    var dw = r - l;
+    var dh = b - t;
+    # A degenerate rectangle yields an empty buffer, as in Rust. The GPU is not
+    # dispatched for it — there is nothing to copy, and a zero-group dispatch is
+    # rejected by mabda anyway.
+    if (dw == 0 || dh == 0) {
+        var ze = fl_alloc(8);
+        if (ze == 0) { store64(err_out, RG_GPU_ERR_BUFFER_OP); return 0; }
+        var empty = pixel_buffer_zeroed(dw, dh, PF_RGBA8, ze);
+        fl_free(ze);
+        store64(err_out, RG_GPU_ERR_NONE);
+        return empty;
+    }
+    return _gp_geom(ctx, buf, GP_K_CROP, dw, dh, l, t, err_out);
+}
+
+# Nearest-neighbour resize into a new buffer.
+#
+# ⚠ `SF_BILINEAR` and `SF_BICUBIC` return RG_GPU_ERR_UNSUPPORTED on the native
+# backend. The bilinear SPIR-V exists and is valid but exceeds mabda's register
+# budget; bicubic has no GPU shader in the Rust line either. Both have WGSL and
+# work on the wgpu path, and both have full CPU implementations in transform.cyr.
+#must_use
+fn gpu_resize(ctx, buf, new_w, new_h, filter, err_out) {
+    if (new_w <= 0 || new_h <= 0) { store64(err_out, RG_GPU_ERR_FORMAT); return 0; }
+    if (filter != SF_NEAREST) { store64(err_out, RG_GPU_ERR_UNSUPPORTED); return 0; }
+    return _gp_geom(ctx, buf, GP_K_RESIZE_N, new_w, new_h, 0, 0, err_out);
+}
+
+# Shared body for the operations that WRITE A DIFFERENT SHAPE than they read:
+# crop, both flips, and nearest resize. The output buffer is allocated here and
+# returned to the caller.
+#
+# The params block is the union of what those kernels want:
+#   [count, a, b, c, d, e]
+# crop reads a=src_w b=dst_w c=dst_h d=src_x e=src_y
+# flips read a=width b=height
+# resize_nearest reads a=src_w b=src_h c=dst_w d=dst_h
+#must_use
+fn _gp_geom(ctx, buf, kind, out_w, out_h, sx, sy, err_out) {
+    if (_gp_require_rgba8(buf, err_out) == 0) { return 0; }
+    var perr = fl_alloc(8);
+    if (perr == 0) { store64(err_out, RG_GPU_ERR_BUFFER_OP); return 0; }
+    var out = pixel_buffer_zeroed(out_w, out_h, PF_RGBA8, perr);
+    var prc = load64(perr);
+    fl_free(perr);
+    if (out == 0 || prc != RG_ERR_NONE) {
+        store64(err_out, RG_GPU_ERR_BUFFER_OP);
+        return 0;
+    }
+
+    var p = fl_alloc(_GP_PARAM_BYTES);
+    if (p == 0) { pixel_buffer_free(out); store64(err_out, RG_GPU_ERR_BUFFER_OP); return 0; }
+    var n = out_w * out_h;
+    _gp_params(p, n);
+    if (kind == GP_K_CROP) {
+        store32(p + 4, pixel_buffer_width(buf));
+        store32(p + 8, out_w);
+        store32(p + 12, out_h);
+        store32(p + 16, sx);
+        store32(p + 20, sy);
+    }
+    if (kind == GP_K_FLIP_H || kind == GP_K_FLIP_V) {
+        store32(p + 4, pixel_buffer_width(buf));
+        store32(p + 8, pixel_buffer_height(buf));
+    }
+    if (kind == GP_K_RESIZE_N) {
+        store32(p + 4, pixel_buffer_width(buf));
+        store32(p + 8, pixel_buffer_height(buf));
+        store32(p + 12, out_w);
+        store32(p + 16, out_h);
+    }
+    var rc = _gp_run_2buf(ctx, buf, out, kind, p, _gp_groups(n), err_out);
+    fl_free(p);
+    if (rc != RG_ERR_NONE) { pixel_buffer_free(out); return 0; }
+    return out;
+}
+
+# ── Not available on the native backend ────────
+#
+# These four have complete WGSL in gpu_shaders.cyr and run on the wgpu path.
+# They return RG_GPU_ERR_UNSUPPORTED here rather than silently doing nothing —
+# which is what a missing kernel would otherwise produce, since mabda's dispatch
+# accepts a null shader module about as quietly as it accepts a bad one.
+
+# 13 blend modes. No SPIR-V kernel: the mode switch alone exceeds the register
+# budget that already stops the four-tap bilinear resize.
+fn gpu_blend(ctx, src, dst, mode, opacity, err_out) {
+    store64(err_out, RG_GPU_ERR_UNSUPPORTED);
+    return RG_ERR_OTHER;
+}
+
+# Box-Muller over a PCG stream. Needs log, cos and sin; mabda's lowerer carries
+# Sqrt, Floor, FAbs, FMin, FMax, FMA, FClamp and Ldexp, and none of the three.
+fn gpu_noise_gaussian(ctx, buf, amount, seed, err_out) {
+    store64(err_out, RG_GPU_ERR_UNSUPPORTED);
+    return RG_ERR_OTHER;
+}
+
+# Separable convolution over a dynamic radius. `OpLoopMerge` and `OpPhi` are
+# rejected outright by the lowerer, so the loop cannot be expressed at all —
+# this is the one blocked on control flow rather than on size.
+#
+# ⚠ RETURNS 0, NOT AN ERROR CODE. Rust's gpu_gaussian_blur is
+# `-> Result<PixelBuffer, RangaError>`; it PRODUCES a buffer, where gpu_blend
+# and gpu_noise_gaussian return `Result<(), _>` and mutate in place. So its
+# return slot carries the buffer, and failure must be 0 — exactly as gpu_resize
+# signals an unsupported filter. Returning RG_ERR_OTHER (-8) here would hand
+# back a non-zero value that a caller written to the documented convention
+# treats as a buffer, and `pixel_buffer_data(-8)` dereferences it.
+#must_use
+fn gpu_gaussian_blur(ctx, buf, radius, err_out) {
+    store64(err_out, RG_GPU_ERR_UNSUPPORTED);
+    return 0;
+}

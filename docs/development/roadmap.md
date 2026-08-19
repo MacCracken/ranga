@@ -258,7 +258,62 @@ project following the documented "source files only need project includes"
 convention — the include-scan has nothing to find. `dist/ranga.deps` is
 authoritative for all three bundles.
 
-### M6 — GPU (foundation landed; compute path blocked on a decision)
+### M6 — GPU ✅
+
+`src/gpu_pipeline.cyr` — the fourteen public operations and the wiring that
+makes the GPU feature callable. **99 assertions, HW-verified on AMD Cezanne.**
+Eleven run natively; `gpu_blend`, `gpu_noise_gaussian`, `gpu_gaussian_blur` and
+bilinear `gpu_resize` report `RG_GPU_ERR_UNSUPPORTED` and have complete WGSL for
+the wgpu path.
+
+**A 36-agent audit of the new layer found six real defects in code that passed
+56 assertions on the first run.** Two would have bitten a consumer directly:
+
+1. **`gpu_gaussian_blur` returned an error code from a slot that carries a
+   buffer.** Rust's is `-> Result<PixelBuffer>` — it PRODUCES, where blend and
+   noise mutate in place. Returning `RG_ERR_OTHER` (-8) meant a caller written
+   to the documented convention saw non-zero, took the success branch, and
+   `pixel_buffer_data(-8)` dereferenced it. Now returns 0, like `gpu_resize`'s
+   unsupported path, and the test pins it.
+2. **The shader-module cache was process-global.** A compiled module is staged
+   in a GTT buffer object on the context's own DRM fd, and mabda's dispatch
+   checks only that the handle is non-null — so a second context would dispatch
+   the first one's modules, and after the first was freed, against a closed fd.
+   Rust kept its caches on `GpuContext`; the cache now lives there too and is
+   released with the device. A test creates a second context after freeing the
+   first and asserts it rebuilds.
+3. **`gpu_crop` diverged from BOTH Rust and ranga's own CPU `crop`.** Rust takes
+   `(left, top, right, bottom)` and CLAMPS; ranga's `transform.cyr` crop takes
+   the same four and clamps the same way. This took `(sx, sy, dw, dh)` and hard-
+   rejected out-of-range input, so moving a call between CPU and GPU crop would
+   have silently changed what the arguments meant.
+4. **`gpu_dissolve` and `gpu_wipe` compared pixel COUNT, not shape.** Rust
+   guards width and height separately. 4x1 against 2x2 passed, and wipe then
+   reflowed the source into a different raster — a silently wrong composite
+   rather than `DimensionMismatch`.
+5. **The two error spaces overlap and were being mixed.** `RG_GPU_ERR_FORMAT` is
+   -4 and so is `RG_ERR_UNSUPPORTED_CONVERSION`; `RG_GPU_ERR_BUFFER_OP` is -3
+   and so is `RG_ERR_BUFFER_TOO_SMALL`. Guard paths returned `err_out`'s value
+   straight into a slot documented as `RG_ERR_*`, handing callers a plausible
+   code from the wrong space. Everything now goes through `gpu_error_to_ranga`.
+6. **A null context was dereferenced** where every sibling in the feature
+   returns a coded `RG_GPU_ERR_NO_ADAPTER`.
+
+**And five assertions that could not fail.** Saturation was tested only at
+factor 0 — the one value where it collapses to bare luminance, making the
+expected constants bit-identical to grayscale's and the factor entirely
+unconstrained. Brightness/contrast only at the identity, which says nothing
+about which param is which. Wipe only at 0 and 1, neither of which exercises the
+line. Crop with `top = 0` throughout, leaving `src_y` wiring untested. And every
+dispatch under 256 pixels, so `_gp_groups`' div_ceil was never asked a real
+question — a wrapper hardcoding one workgroup would have passed the entire
+suite. All five now have inputs that distinguish right from wrong.
+
+⚠ The lesson is the same one M7 taught: **a green suite is evidence about the
+tests, not the code.** These 56 assertions passed on the first run against code
+with a dereference-a-negative-integer bug in it.
+
+### M6 — GPU (superseded; foundation notes below)
 
 `src/gpu_context.cyr` + `src/gpu_buffer.cyr` (43 assertions, **round-trip
 HW-verified on AMD Cezanne**). `gpu_shaders` and `gpu_pipeline` — the 14

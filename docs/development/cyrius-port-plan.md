@@ -81,6 +81,14 @@ were adversarially re-verified against the stdlib; **36 turned out to be
 buildable from existing primitives and 4 were false alarms.** Re-checked against
 **6.5.27**, a further one closed upstream. These 6 remain.
 
+> ⚠ **Every item below was RE-TESTED on 2026-08-19, not re-read.** Two claims
+> elsewhere in this port turned out to have drifted — the GLSL.std.450 op count
+> and the enum-derive symptom — in both cases because a recorded sentence was
+> quoted rather than checked. All six still hold, but three had supporting text
+> that had gone stale, and item 3 has become an active trap: the stdlib now
+> offers something that *looks* like the missing primitive and has the wrong
+> semantics.
+
 > **Closed upstream — no longer ranga's problem.** The original list opened with an
 > ~80-line `ranga_f32_*` shim, because `grep -c f32 lib/math.cyr lib/ganita.cyr`
 > returned `0` and `0`. Filed as an issue scoped to ganita; **shipped as ganita
@@ -96,10 +104,10 @@ buildable from existing primitives and 4 were false alarms.** Re-checked against
 |---|---|---|---|
 | 1 | **`ranga_f64_powf`** | ~15 lines | `ganita_f64_pow` does not match Rust's `powf` for `pow(0.0, y)` and `pow(negative, integer)` — and `ganita_f32_pow` delegates straight to it, so the f32 tier inherits the mismatch. ranga's ICC tone curves ([icc.rs:99](../../src/icc.rs), :836) and gamma paths depend on the Rust semantics. Wrap once, route all pow calls through it, rather than sprinkling `if base == 0.0` at call sites. |
 | 2 | **Byte-vec (`Vec<u8>`)** | ~120 lines | `lib/vec.cyr` is i64-slots only — still hardcoded `data + idx * 8` at 6.5.27. `PixelBuffer`'s entire backing store needs a byte-granular vector. Build on `fl_alloc`/`fl_free`, whose >4 KB path is a direct `mmap`/`munmap` — an 8 MB RGBA8 frame becomes one syscall each way, which is a genuinely good fit for `BufferPool`. |
-| 3 | **Saturating u8 vector add/sub** | ~40 lines | No `_mm_adds_epu8`/`_mm_subs_epu8` equivalent. Wrap `paddusb`/`psubusb` (x86) and `uqadd`/`uqsub` (NEON) in an `asm { }` raw-byte block — precedented in-tree by `_fhm_probe16` ([lib/hashmap_fast.cyr:66-110](file:///home/macro/Repos/cyrius/lib/hashmap_fast.cyr)). Encodings verified: `paddusb xmm0,xmm1` = `66 0F DC C1`. |
-| 4 | **256-bit integer SIMD (AVX2)** | ~60 lines | `blend_row_normal_avx2` needs `_mm256_cvtepu8_epi16`, `_mm256_mullo_epi16`, etc. The packed integer surface is exactly `iv_add`/`iv_sub`/`iv_mul`/`iv_dp8` — nothing else lexes. Port the kernel as one `asm { }` block with hand-encoded VEX bytes, mirroring `_sha_ni_compress_one` ([lib/sigil.cyr:4871](file:///home/macro/Repos/cyrius/lib/sigil.cyr)). x86-only; scalar fallback elsewhere. |
-| 5 | **Vector min/max and lane select** | ~50 lines | No packed integer/f32 min/max, compare, or blend/select. Packed f32 is `add`/`sub`/`mul`/`fmadd`/`dot` only — no `divps`, `minps`, `maxps`, `sqrtps`, `cmpps`. Divide via Newton-Raphson on `fmadd` (~1.5–2× a real `divps`, far better than dropping to scalar). **See the ⚠ below before implementing min/max.** |
-| 6 | **serde codecs for 4 enums** | ~10 lines each | `#[derive(Serialize)]` on `PixelFormat`, `BlendMode`, `ColorSpace`, and the one payload enum. **Footgun: writing `#derive(Serialize)` above a Cyrius `enum` compiles rc=0 with no diagnostic and produces a misnamed, crashing codec.** Hand-write them, following the `device_class_to_str` pattern ([lib/yukti.cyr:640](file:///home/macro/Repos/cyrius/lib/yukti.cyr)). |
+| 3 | **Saturating u8 vector add/sub** | ~40 lines | ⚠ **Re-verified 2026-08-19 — still needed, but the reason has narrowed and there is now a TRAP.** `lib/simd.cyr` has since grown `i8v16_add`/`i8v16_sub`, so a reader may think this item closed. It has not: those lower to `paddb`/`psubb`, which **wrap**. Pixel math needs `paddusb`/`psubusb`, which **saturate** — 250 + 10 must be 255, not 4. Using the stdlib pair here would corrupt every clipped highlight silently. Wrap `paddusb`/`psubusb` (x86) and `uqadd`/`uqsub` (NEON) in an `asm { }` raw-byte block — precedented in-tree by `_fhm_probe16` ([lib/hashmap_fast.cyr:66-110](file:///home/macro/Repos/cyrius/lib/hashmap_fast.cyr)). Encodings verified: `paddusb xmm0,xmm1` = `66 0F DC C1`. |
+| 4 | **256-bit integer SIMD (AVX2)** | ~60 lines | ⚠ **Re-verified 2026-08-19 — still needed; supporting text was stale.** `lib/simd.cyr` now carries `simd_has_avx2`, `simd_has_fma` and a full 256-bit **f32** tier (`f32v8_*`), plus typed 128-bit integer wrappers (`i8v16`, `i16v8`, `i32v4`, `i64v2`). What it still does NOT have is 256-bit **integer** anything — the widest integer vector is 128-bit. `blend_row_normal_avx2` needs `_mm256_cvtepu8_epi16`, `_mm256_mullo_epi16`, etc. Port the kernel as one `asm { }` block with hand-encoded VEX bytes, mirroring `_sha_ni_compress_one` ([lib/sigil.cyr:4871](file:///home/macro/Repos/cyrius/lib/sigil.cyr)). x86-only; scalar fallback elsewhere. |
+| 5 | **Vector min/max and lane select** | ~50 lines | ⚠ **Re-verified 2026-08-19 — min/max/compare/select claim HOLDS (grep for min\|max\|cmp\|blend\|select across `lib/simd.cyr` returns zero), but the f32 sentence was partly stale.** f64 gained `f64v2_div`/`f64v4_div` and `f64v2_sqrt`/`f64v4_sqrt`; **f32 did not** — packed f32 really is `add`/`sub`/`mul`/`fmadd`/`dot` only, so the Newton-Raphson advice below applies to the f32 tier and is unnecessary for f64. Divide via Newton-Raphson on `fmadd` (~1.5–2× a real `divps`, far better than dropping to scalar). **See the ⚠ below before implementing min/max.** |
+| 6 | **serde codecs for 4 enums** | ~10 lines each | `#[derive(Serialize)]` on `PixelFormat`, `BlendMode`, `ColorSpace`, and the one payload enum. **Footgun: `#derive(Serialize)` works on a Cyrius `struct` but NOT on an `enum`. Re-checked on 6.5.27: above an enum it compiles rc=0 with no diagnostic and emits NO CODEC AT ALL — the generated `<name>_to_json` is undefined at link time. (Earlier plan text said "misnamed, crashing codec"; the symptom changed, the conclusion did not.)** Hand-write them, following the `device_class_to_str` pattern ([lib/yukti.cyr:640](file:///home/macro/Repos/cyrius/lib/yukti.cyr)). |
 
 > ⚠ **Do not implement vector min/max as a bare unsigned compare on the raw f32
 > pattern.** This plan originally proposed exactly that, on the grounds that for
@@ -134,7 +142,7 @@ ranga-specific or belong in the compiler rather than a library.
 | scalar f32 arithmetic | operators (v6.4.56) | bare `+ - * /` on `: f32` values via `EMIT_F32_BINOP` (real `addss`/`subss`/`mulss`/`divss` + NaN-correct `ucomiss` ladder, all four backends); `f32_from`/`f32_to`. **There is no callable `f32_add`/`f32_sub`/`f32_mul`** — arithmetic dispatches only from a typed binding. Annotated params (`fn f(a: f32, b: f32)`) carry the type into the body; unannotated params arrive as untyped bit patterns and silently emit *integer* ops. Annotate every f32 param. |
 | f32 math library | **ganita 1.1.0** (cycc 6.5.24) | `ganita_f32_abs/neg/sign/min/max/clamp/lerp/floor/ceil/round/trunc/sqrt/cbrt/pow/exp/exp2/ln/log2/sin/cos/atan/atan2/hypot` — 23 fns |
 | SIMD (float) | `lib/simd.cyr` | `f32v4`/`f32v8` + `f32v_fmadd`, `f32v_dot`, `f32v8_fma`; runtime AVX2 gating via `simd_has_avx2()` |
-| SIMD (integer) | `lib/simd.cyr` | `i8v16`/`i16v8`/`i32v4`/`i64v2` + unsigned variants; `iv_add`/`iv_sub`/`iv_mul` (i16/i32 widths), `iv_dp8` (u8·i8→i32 widening dot — maps onto the YUV and grayscale-luminance kernels) |
+| SIMD (integer) | `lib/simd.cyr` | `i8v16`/`i16v8`/`i32v4`/`i64v2` (⚠ re-verified 2026-08-19: **signed only** — there are no u8v16/u16v8/u32v4/u64v2 types, the earlier "+ unsigned variants" was wrong); `iv_add`/`iv_sub`/`iv_mul` (i16/i32 widths), `iv_dp8` (u8·i8→i32 widening dot — maps onto the YUV and grayscale-luminance kernels) |
 | bounds-checked `&[u8]` | `lib/slice.cyr` | `var s: [u8]`, `s[i]` → `_slice_idx_get_W`, `slice_unchecked_get_W` for hot loops, `slice_copy_bytes` |
 | large buffers + pool | `lib/freelist.cyr` | `fl_alloc`/`fl_free`/`fl_calloc`; >4 KB is direct mmap/munmap |
 | raw pixel access | builtins | `load8/16/32/64`, `store8/16/32/64`, `memcpy`/`memset` |
@@ -314,8 +322,9 @@ guarded by the ported test suite.
    integer-multiply-on-float-field both compile clean. The `.tcyr` suite must
    carry bit-fidelity assertions on every color type, ported *before* the code
    that uses them.
-3. **Silent enum-codec corruption** (§3.7). `#derive(Serialize)` on an enum
-   compiles rc=0 and crashes at runtime.
+3. **Silent enum-codec absence** (§3.7). `#derive(Serialize)` on an enum
+   compiles rc=0 and emits nothing — the codec is undefined at link time.
+   Works correctly on a struct.
 4. **f32→f64→f32 round-tripping** changes results at tight tolerances. ranga's
    Delta-E and ICC tests have narrow bands; expect to re-baseline some.
 5. **mabda backend churn.** wgpu retires across v5.0–v5.1 and Intel native is

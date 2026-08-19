@@ -39,12 +39,29 @@ eleven kernels and all twenty-one WGSL sources. So the gap is **wiring, not
 maths** — each missing operation is a function that uploads, picks a kernel,
 dispatches and downloads.
 
-The rest is mostly `#[derive]`. Rust's `Debug`, `Clone`, `Copy`, `PartialEq`,
-`Hash`, `Serialize` and `FromStr` on plain enums have no Cyrius analogue and
-mostly need none — an `i64` is already copyable and comparable. The ones that
-genuinely cost something are the string-facing ones: no `FromStr` means a
-consumer cannot parse `"Multiply"` back into a `BlendMode`, and there is no
-inverse of `blend_mode_name`.
+The rest is mostly `#[derive]`, and the reason each one is absent differs —
+**Cyrius has `#derive`**, so "no analogue" is not the explanation:
+
+- `#derive(accessors)` is a documented Cyrius feature that generates
+  `T_field()` / `T_set_field()` pairs. ranga does not use it: every struct here
+  is hand-rolled `load64`/`store64` against a byte layout written into the
+  module header. That was a choice — the layouts are load-bearing documentation
+  and several are read by hand-encoded asm — not a limitation.
+- `#derive(Serialize)` / `#derive(Deserialize)` exist and **work on structs**
+  (cyrius's own `lib/sigil.cyr` derives Serialize on `struct ima_status`). On an
+  **enum** at 6.5.27 the derive compiles rc=0 with no diagnostic and emits **no
+  codec at all** — the generated `<name>_to_json` is simply undefined at link
+  time. Since ranga's serde surface is exactly four enums (`PixelFormat`,
+  `BlendMode`, `ColorSpace` and one payload enum), the derive is unusable here
+  and the codecs are hand-written. The port plan recorded this as a "misnamed,
+  crashing codec"; the symptom has since changed to a silent no-op, same
+  conclusion.
+- `Debug`, `Clone`, `Copy`, `PartialEq`, `Hash` genuinely have no Cyrius derive
+  and mostly need none — an `i64` is already copyable and comparable.
+
+What genuinely costs something is string-facing: no `FromStr` means a consumer
+cannot parse `"Multiply"` back into a `BlendMode`, and there is no inverse of
+`blend_mode_name`.
 
 ## Fixed by this audit
 

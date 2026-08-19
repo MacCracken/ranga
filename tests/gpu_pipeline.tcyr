@@ -1,0 +1,364 @@
+# gpu_pipeline.tcyr — the fourteen public GPU operations
+# Ported from rust-old/src/gpu/pipeline.rs.
+#
+# This is the layer a consumer calls. Everything below it was already tested in
+# isolation; what is tested here is the WIRING — that the right kernel gets the
+# right params, that buffers come back into the caller's memory, and that the
+# four operations the native backend cannot run say so instead of quietly
+# doing nothing.
+#
+# ⚠ Oracles are f32 throughout, as in gpu_kernels.tcyr. An f64 oracle agrees on
+# most inputs and diverges near rounding boundaries.
+
+include "src/error.cyr"
+include "src/bytevec.cyr"
+include "src/pixel.cyr"
+include "src/transform.cyr"
+include "src/gpu_spirv.cyr"
+include "src/gpu_kernels.cyr"
+include "src/gpu_context.cyr"
+include "src/gpu_buffer.cyr"
+include "src/gpu_pipeline.cyr"
+
+alloc_init();
+
+var err = fl_alloc(8);
+var perr = fl_alloc(8);
+
+# Four pixels chosen so every channel differs and two carry non-opaque alpha —
+# an operation that crossed channels or clobbered alpha cannot pass.
+fn seed4(b) {
+    var r = pixel_buffer_data(b);
+    store32(r + 0,  0xFF204060);
+    store32(r + 4,  0xFF808080);
+    store32(r + 8,  0x40FFFFFF);
+    store32(r + 12, 0xFF000000);
+    return 0;
+}
+
+fn eq4(b, a0, a1, a2, a3, name) {
+    var r = pixel_buffer_data(b);
+    var ok = 1;
+    if (load32(r + 0)  != a0) { ok = 0; }
+    if (load32(r + 4)  != a1) { ok = 0; }
+    if (load32(r + 8)  != a2) { ok = 0; }
+    if (load32(r + 12) != a3) { ok = 0; }
+    assert_eq(ok, 1, name);
+    return 0;
+}
+
+# ================================================================
+test_group("gpu pipeline");
+
+var ctx = gpu_context_new_amd(err);
+if (ctx == 0) {
+    assert_eq(load64(err) < 0, 1, "with no GPU, context creation reports an error");
+}
+
+if (ctx != 0) {
+    # 4x1 RGBA8 — one workgroup, four live lanes, 252 guarded out.
+    var buf = pixel_buffer_zeroed(4, 1, PF_RGBA8, perr);
+    assert_eq(load64(perr), RG_ERR_NONE, "the working buffer allocates");
+
+    # --- in-place operations ---
+    seed4(buf);
+    assert_eq(gpu_invert(ctx, buf, err), RG_ERR_NONE, "gpu_invert succeeds");
+    assert_eq(load64(err), RG_GPU_ERR_NONE, "with no GPU error");
+    eq4(buf, 4292853663, 4286545791, 1073741824, 4294967295, "gpu_invert matches the f32 oracle");
+    # The result lands in the CALLER's buffer, not a copy — Rust replaced
+    # buf.data; this reads straight back over the same bytes.
+    assert_eq(pixel_buffer_width(buf), 4, "and the buffer keeps its shape");
+
+    seed4(buf);
+    assert_eq(gpu_grayscale(ctx, buf, err), RG_ERR_NONE, "gpu_grayscale succeeds");
+    eq4(buf, 4282664004, 4286611584, 1090519039, 4278190080, "gpu_grayscale matches the oracle");
+
+    seed4(buf);
+    assert_eq(gpu_fade(ctx, buf, 0.5, err), RG_ERR_NONE, "gpu_fade succeeds");
+    eq4(buf, 4279246896, 4282400832, 1082163328, 4278190080, "gpu_fade at 0.5 matches the oracle");
+
+    # Saturation 0 collapses every pixel to its own luminance, so the result
+    # must equal grayscale exactly — two different kernels, one answer.
+    seed4(buf);
+    assert_eq(gpu_saturation(ctx, buf, 0, err), RG_ERR_NONE, "gpu_saturation succeeds");
+    eq4(buf, 4282664004, 4286611584, 1090519039, 4278190080,
+        "saturation at 0.0 agrees with grayscale, pixel for pixel");
+    # ⚠ Factor 0 is the ONE value where saturation collapses to bare luminance,
+    # so the assertion above is bit-identical to the grayscale one and leaves
+    # the factor entirely unconstrained — a wrapper that packed the wrong word,
+    # or dropped it, would still pass. These two pin it.
+    seed4(buf);
+    assert_eq(gpu_saturation(ctx, buf, 2.0, err), RG_ERR_NONE, "gpu_saturation at 2.0 succeeds");
+    eq4(buf, 4278205564, 4286611584, 1090519039, 4278190080,
+        "saturation at 2.0 pushes chroma apart, and is NOT the grayscale result");
+    seed4(buf);
+    assert_eq(gpu_saturation(ctx, buf, 0.5, err), RG_ERR_NONE, "gpu_saturation at 0.5 succeeds");
+    eq4(buf, 4281483858, 4286611584, 1090519039, 4278190080,
+        "and 0.5 sits between the two, so the factor really reaches the kernel");
+
+    # Brightness 0 / contrast 1 is the identity, which is the cheapest possible
+    # check that the two f32 params arrive in the right order.
+    seed4(buf);
+    assert_eq(gpu_brightness_contrast(ctx, buf, 0, F64_ONE, err), RG_ERR_NONE,
+              "gpu_brightness_contrast succeeds");
+    eq4(buf, 0xFF204060, 0xFF808080, 0x40FFFFFF, 0xFF000000,
+        "brightness 0 / contrast 1 is the identity");
+    # The identity says nothing about WHICH param is which. Non-trivial values
+    # do: swapping brightness and contrast changes every channel here.
+    seed4(buf);
+    assert_eq(gpu_brightness_contrast(ctx, buf, 0.1, 1.5, err), RG_ERR_NONE,
+              "gpu_brightness_contrast at 0.1 / 1.5 succeeds");
+    eq4(buf, 4279715703, 4289177511, 1090519039, 4278190080,
+        "with brightness and contrast in the right params slots");
+
+    # --- two-buffer operations ---
+    var dst = pixel_buffer_zeroed(4, 1, PF_RGBA8, perr);
+    var dr = pixel_buffer_data(dst);
+    var di = 0;
+    while (di < 4) { store32(dr + di * 4, 0xFF404040); di = di + 1; }
+    seed4(buf);
+    assert_eq(gpu_dissolve(ctx, buf, dst, 0.5, err), RG_ERR_NONE, "gpu_dissolve succeeds");
+    eq4(dst, 4281352272, 4284506208, 2694881440, 4280295456,
+        "gpu_dissolve at 0.5 mixes all four channels, alpha included");
+
+    # progress 0 takes the source everywhere; progress 1 leaves dst alone.
+    seed4(buf);
+    di = 0;
+    while (di < 4) { store32(dr + di * 4, 0xFF404040); di = di + 1; }
+    assert_eq(gpu_wipe(ctx, buf, dst, 0, err), RG_ERR_NONE, "gpu_wipe succeeds");
+    eq4(dst, 0xFF204060, 0xFF808080, 0x40FFFFFF, 0xFF000000, "wipe at 0.0 is entirely the source");
+    di = 0;
+    while (di < 4) { store32(dr + di * 4, 0xFF404040); di = di + 1; }
+    assert_eq(gpu_wipe(ctx, buf, dst, F64_ONE, err), RG_ERR_NONE, "gpu_wipe at 1.0 succeeds");
+    eq4(dst, 0xFF404040, 0xFF404040, 0xFF404040, 0xFF404040, "and leaves the destination untouched");
+    # ⚠ 0 and 1 are both whole-image cases — neither exercises the wipe LINE, so
+    # the width param and the comparison could be wrong and both would pass.
+    # progress 0.5 on a 4-wide row puts the boundary at column 2.
+    di = 0;
+    while (di < 4) { store32(dr + di * 4, 0xFF404040); di = di + 1; }
+    assert_eq(gpu_wipe(ctx, buf, dst, 0.5, err), RG_ERR_NONE, "gpu_wipe at 0.5 succeeds");
+    eq4(dst, 0xFF404040, 0xFF404040, 0x40FFFFFF, 0xFF000000,
+        "and splits the row at the halfway line, dst on the left and src on the right");
+
+    # A size mismatch is caught before any GPU work.
+    var small = pixel_buffer_zeroed(2, 1, PF_RGBA8, perr);
+    assert_eq(gpu_dissolve(ctx, buf, small, 0.5, err), RG_ERR_DIMENSION_MISMATCH,
+              "dissolve rejects mismatched buffers");
+    pixel_buffer_free(small);
+    # ⚠ EQUAL PIXEL COUNT, DIFFERENT SHAPE. Rust guards on width and height
+    # separately; comparing width*height accepts 4x1 against 2x2 and then wipe
+    # reflows the source into a different raster, returning a silently wrong
+    # composite instead of an error.
+    var reshaped = pixel_buffer_zeroed(2, 2, PF_RGBA8, perr);
+    assert_eq(gpu_dissolve(ctx, buf, reshaped, 0.5, err), RG_ERR_DIMENSION_MISMATCH,
+              "dissolve rejects 4x1 against 2x2 — same count, different shape");
+    assert_eq(gpu_wipe(ctx, buf, reshaped, 0.5, err), RG_ERR_DIMENSION_MISMATCH,
+              "and so does wipe");
+    pixel_buffer_free(reshaped);
+
+    # --- geometry, which RETURNS a new buffer ---
+    var geo = pixel_buffer_zeroed(4, 2, PF_RGBA8, perr);
+    var gr = pixel_buffer_data(geo);
+    di = 0;
+    while (di < 8) { store32(gr + di * 4, di + 1); di = di + 1; }
+
+    var fh = gpu_flip_horizontal(ctx, geo, err);
+    assert_eq(fh != 0, 1, "gpu_flip_horizontal returns a buffer");
+    assert_eq(load64(err), RG_GPU_ERR_NONE, "with no error");
+    var fr = pixel_buffer_data(fh);
+    assert_eq(load32(fr + 0), 4, "row 0 is mirrored");
+    assert_eq(load32(fr + 12), 1, "end to end");
+    assert_eq(load32(fr + 16), 8, "and row 1 too");
+    # The SOURCE must be untouched — these ops return a new buffer precisely
+    # because an in-place flip would race.
+    assert_eq(load32(gr + 0), 1, "and the source is left alone");
+    pixel_buffer_free(fh);
+
+    var fv = gpu_flip_vertical(ctx, geo, err);
+    assert_eq(fv != 0, 1, "gpu_flip_vertical returns a buffer");
+    var vr = pixel_buffer_data(fv);
+    assert_eq(load32(vr + 0), 5, "the rows are exchanged");
+    assert_eq(load32(vr + 16), 1, "both ways");
+    pixel_buffer_free(fv);
+
+    # geo is 4x2 holding 1..8: row 0 is 1 2 3 4, row 1 is 5 6 7 8.
+    # ⚠ The arguments are a RECTANGLE (left, top, right, bottom), matching Rust
+    # and ranga's own CPU crop() — not an offset and a size.
+    var cr = gpu_crop(ctx, geo, 1, 0, 3, 1, err);
+    assert_eq(cr != 0, 1, "gpu_crop returns a buffer");
+    assert_eq(pixel_buffer_width(cr), 2, "right - left wide");
+    assert_eq(pixel_buffer_height(cr), 1, "and bottom - top high");
+    var crr = pixel_buffer_data(cr);
+    assert_eq(load32(crr + 0), 2, "starting at the left edge");
+    assert_eq(load32(crr + 4), 3, "and running to the right edge");
+    pixel_buffer_free(cr);
+
+    # ⚠ An out-of-range rectangle CLAMPS, it does not fail — `r.min(width)` in
+    # Rust, and the same in ranga's CPU crop. A version that hard-rejected here
+    # would diverge from both.
+    var cclamp = gpu_crop(ctx, geo, 2, 0, 99, 99, err);
+    assert_eq(cclamp != 0, 1, "an oversized rectangle clamps rather than failing");
+    assert_eq(load64(err), RG_GPU_ERR_NONE, "with no error reported");
+    assert_eq(pixel_buffer_width(cclamp), 2, "clamped to the source width");
+    assert_eq(pixel_buffer_height(cclamp), 2, "and the source height");
+    var ccr = pixel_buffer_data(cclamp);
+    assert_eq(load32(ccr + 0), 3, "taking the top-right corner");
+    assert_eq(load32(ccr + 4), 4, "across");
+    assert_eq(load32(ccr + 8), 7, "and down");
+    assert_eq(load32(ccr + 12), 8, "to the far corner");
+    pixel_buffer_free(cclamp);
+
+    # A degenerate rectangle — right clamped below left — yields an EMPTY
+    # buffer, as Rust's `.max(l)` does, not an error.
+    var cempty = gpu_crop(ctx, geo, 2, 0, 1, 1, err);
+    assert_eq(cempty != 0, 1, "a degenerate rectangle still returns a buffer");
+    assert_eq(pixel_buffer_width(cempty), 0, "of zero width");
+    assert_eq(load64(err), RG_GPU_ERR_NONE, "and reports success, as Rust does");
+    pixel_buffer_free(cempty);
+
+    # ⚠ src_y is exercised here and nowhere else: every other crop in this
+    # suite uses top = 0, which zeroes the (src_y + gy) * src_w term and leaves
+    # that wiring unconstrained.
+    var crow1 = gpu_crop(ctx, geo, 0, 1, 2, 2, err);
+    assert_eq(crow1 != 0, 1, "a crop from the second row returns a buffer");
+    var c1r = pixel_buffer_data(crow1);
+    assert_eq(load32(c1r + 0), 5, "and reads row 1, not row 0");
+    assert_eq(load32(c1r + 4), 6, "across the window");
+    pixel_buffer_free(crow1);
+
+    var rz = gpu_resize(ctx, geo, 8, 4, SF_NEAREST, err);
+    assert_eq(rz != 0, 1, "gpu_resize with SF_NEAREST returns a buffer");
+    assert_eq(pixel_buffer_width(rz), 8, "at the requested width");
+    assert_eq(pixel_buffer_height(rz), 4, "and height");
+    var rr = pixel_buffer_data(rz);
+    # Doubling means each source pixel fills a 2x2 block.
+    assert_eq(load32(rr + 0), 1, "the first output pixel samples the first source pixel");
+    assert_eq(load32(rr + 4), 1, "and its neighbour does too");
+    assert_eq(load32(rr + 8), 2, "before crossing to the second");
+    assert_eq(load32(rr + 124), 8, "and the last output pixel is the last source pixel");
+    pixel_buffer_free(rz);
+
+    # ================================================================
+    # ⚠ The four the native backend cannot run.
+    #
+    # These MUST report UNSUPPORTED. A missing kernel that returned success
+    # would be the worst outcome available: mabda accepts a null shader module
+    # about as quietly as a bad one, so the consumer would get an unchanged
+    # buffer and no error — exactly the silent no-op that cost a bisect earlier
+    # in this port.
+    assert_eq(gpu_resize(ctx, geo, 8, 4, SF_BILINEAR, err), 0, "bilinear resize is refused");
+    assert_eq(load64(err), RG_GPU_ERR_UNSUPPORTED, "as UNSUPPORTED, not as a buffer error");
+    assert_eq(gpu_resize(ctx, geo, 8, 4, SF_BICUBIC, err), 0, "bicubic resize is refused");
+    assert_eq(load64(err), RG_GPU_ERR_UNSUPPORTED, "also UNSUPPORTED");
+
+    gpu_blend(ctx, geo, geo, 0, F64_ONE, err);
+    assert_eq(load64(err), RG_GPU_ERR_UNSUPPORTED, "gpu_blend reports UNSUPPORTED on native");
+    gpu_noise_gaussian(ctx, geo, 0.1, 42, err);
+    assert_eq(load64(err), RG_GPU_ERR_UNSUPPORTED, "gpu_noise_gaussian reports UNSUPPORTED");
+    # ⚠ gaussian_blur PRODUCES a buffer in Rust (Result<PixelBuffer>), so its
+    # return slot carries the buffer and failure must be 0. Returning an error
+    # code here would be non-zero, and a caller following the documented
+    # convention would dereference it.
+    assert_eq(gpu_gaussian_blur(ctx, geo, 3, err), 0, "gpu_gaussian_blur returns a null buffer");
+    assert_eq(load64(err), RG_GPU_ERR_UNSUPPORTED, "and reports UNSUPPORTED");
+    # And UNSUPPORTED is a distinct code, not folded into BufferOp — a consumer
+    # must be able to tell "this backend cannot" from "this attempt failed".
+    assert_eq(RG_GPU_ERR_UNSUPPORTED == RG_GPU_ERR_BUFFER_OP, 0,
+              "UNSUPPORTED is distinguishable from BUFFER_OP");
+
+    # --- format guard ---
+    var yuv = pixel_buffer_zeroed(4, 2, PF_YUV420P, perr);
+    # ⚠ The RETURN is an RG_ERR_* code; the GPU code goes through err_out. The
+    # two spaces overlap numerically — RG_GPU_ERR_FORMAT is -4 and so is
+    # RG_ERR_UNSUPPORTED_CONVERSION — so returning err_out's value directly
+    # would hand back a plausible-looking code from the wrong space.
+    assert_eq(gpu_invert(ctx, yuv, err), RG_ERR_INVALID_FORMAT, "a non-RGBA8 buffer is refused");
+    assert_eq(load64(err), RG_GPU_ERR_FORMAT, "with a GPU format error through err_out");
+    assert_eq(RG_ERR_INVALID_FORMAT == RG_GPU_ERR_FORMAT, 0,
+              "and the two code spaces are not interchangeable");
+    pixel_buffer_free(yuv);
+
+    # --- the kernel cache serves the second call ---
+    # Nothing observable distinguishes a cache hit from a rebuild except that it
+    # works twice; a cache that returned a stale or null module would fail here.
+    seed4(buf);
+    assert_eq(gpu_invert(ctx, buf, err), RG_ERR_NONE, "a second invert succeeds from the cache");
+    eq4(buf, 4292853663, 4286545791, 1073741824, 4294967295, "with the same result");
+
+    # ⚠ MORE THAN ONE WORKGROUP. Every buffer above is at most 32 pixels, so
+    # _gp_groups returns 1 everywhere and its div_ceil is never asked a real
+    # question — a wrapper that dispatched a fixed single group would pass the
+    # whole suite. 300 pixels needs two.
+    var wide = pixel_buffer_zeroed(300, 1, PF_RGBA8, perr);
+    assert_eq(load64(perr), RG_ERR_NONE, "a 300-pixel buffer allocates");
+    var wr = pixel_buffer_data(wide);
+    var wi = 0;
+    while (wi < 300) { store32(wr + wi * 4, 0xFF204060); wi = wi + 1; }
+    assert_eq(_gp_groups(300), 2, "300 pixels is two workgroups of 256");
+    assert_eq(gpu_invert(ctx, wide, err), RG_ERR_NONE, "invert across two workgroups succeeds");
+    # Lane 0 is in the first group, lane 299 in the second. A single-group
+    # dispatch leaves everything past 255 untouched.
+    assert_eq(load32(wr + 0), 4292853663, "the first pixel is inverted");
+    assert_eq(load32(wr + 255 * 4), 4292853663, "the last pixel of group 0 is inverted");
+    assert_eq(load32(wr + 256 * 4), 4292853663, "the FIRST pixel of group 1 is inverted");
+    assert_eq(load32(wr + 299 * 4), 4292853663, "and so is the last pixel of all");
+    # Stated as a count too, so a partial failure reports how many rather than
+    # only that one sample disagreed.
+    var untouched = 0;
+    wi = 0;
+    while (wi < 300) {
+        if (load32(wr + wi * 4) == 0xFF204060) { untouched = untouched + 1; }
+        wi = wi + 1;
+    }
+    assert_eq(untouched, 0, "no pixel in either workgroup was skipped");
+    pixel_buffer_free(wide);
+
+    # The exact boundary: 256 is one group, 257 is two.
+    assert_eq(_gp_groups(256), 1, "256 pixels is exactly one workgroup");
+    assert_eq(_gp_groups(257), 2, "and 257 needs a second");
+    assert_eq(_gp_groups(1), 1, "one pixel still needs one");
+
+    # ⚠ The kernel cache is the only stateful thing here, and it is PER-CONTEXT.
+    # A compiled module is staged in a buffer object on the context's own DRM
+    # fd, so a process-global cache would let a second context dispatch the
+    # first one's modules — and after the first is freed, against a closed fd.
+    var cache = gpu_context_shader_cache(ctx);
+    assert_eq(cache != 0, 1, "the context owns a shader cache");
+    var before = vec_len(cache);
+    assert_eq(before > 0, 1, "which is populated after the operations above");
+    seed4(buf);
+    gpu_invert(ctx, buf, err);
+    assert_eq(vec_len(cache), before, "a repeat call reuses the cached module rather than rebuilding");
+
+    pixel_buffer_free(geo);
+    pixel_buffer_free(dst);
+    pixel_buffer_free(buf);
+    gpu_context_free(ctx);
+
+    # A SECOND context, after the first is freed, must build its own modules and
+    # produce the same answers. This is the assertion a process-global cache
+    # fails: it would hand the new context a module staged on a closed fd.
+    var ctx2 = gpu_context_new_amd(err);
+    if (ctx2 != 0) {
+        assert_eq(gpu_context_shader_cache(ctx2) != 0, 1, "the second context has its own cache");
+        assert_eq(vec_len(gpu_context_shader_cache(ctx2)), 0, "which starts empty");
+        var b2 = pixel_buffer_zeroed(4, 1, PF_RGBA8, perr);
+        seed4(b2);
+        assert_eq(gpu_invert(ctx2, b2, err), RG_ERR_NONE, "invert works on a fresh context");
+        eq4(b2, 4292853663, 4286545791, 1073741824, 4294967295,
+            "with the same result as the first context produced");
+        pixel_buffer_free(b2);
+        gpu_context_free(ctx2);
+    }
+
+    # A null context is a coded error, not a fault — every sibling in the GPU
+    # feature behaves this way and this layer used to dereference it.
+    var b3 = pixel_buffer_zeroed(4, 1, PF_RGBA8, perr);
+    assert_eq(gpu_invert(0, b3, err), RG_ERR_OTHER, "a null context is refused");
+    assert_eq(load64(err), RG_GPU_ERR_NO_ADAPTER, "reporting NoAdapter");
+    pixel_buffer_free(b3);
+}
+
+var exit_code = assert_summary();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);
