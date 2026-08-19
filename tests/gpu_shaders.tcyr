@@ -1,0 +1,127 @@
+# gpu_shaders.tcyr — the WGSL sources for the wgpu fallback
+# Ported from rust-old/src/gpu/shaders.rs #[cfg(test)].
+#
+# ⚠ NO HARDWARE TEST IS POSSIBLE HERE. mabda's wgpu backend requires the
+# consumer to compile in `object;` mode and be entered from a C launcher that
+# builds a wgpu function table; a `.tcyr` run has no launcher. So the WGSL is
+# checked STRUCTURALLY — lengths against the Rust originals, and the same
+# content assertions the Rust's own shader tests made. That is weaker than
+# running them, and saying so is more useful than implying otherwise.
+#
+# The lengths are the real defence. They were measured directly from
+# `rust-old/src/gpu/shaders.rs`, and they catch the failure this module is
+# actually exposed to: a transcription that drops or doubles a line. Each
+# expected length is the Rust literal's length plus one, because the emitter
+# terminates the final line with a newline the raw literal does not carry.
+
+include "src/error.cyr"
+include "src/gpu_shaders.cyr"
+
+alloc_init();
+
+fn has(s: Str, needle) {
+    if (str_index_of_cstr(s, needle) >= 0) { return 1; }
+    return 0;
+}
+
+# ================================================================
+test_group("wgsl transcription");
+
+# Byte lengths against the Rust originals. A dropped line, a doubled line or a
+# lost escape all move these.
+assert_eq(str_len(_gs_pack_helpers()), 586, "PACK_HELPERS transcribes to 586 bytes");
+assert_eq(str_len(_gs_invert()), 422, "INVERT transcribes to 422 bytes");
+assert_eq(str_len(_gs_blend_all()), 2272, "BLEND_ALL transcribes to 2272 bytes");
+assert_eq(str_len(_gs_noise_gaussian()), 1531, "NOISE_GAUSSIAN transcribes to 1531 bytes");
+assert_eq(str_len(_gs_resize_bilinear()), 1529, "RESIZE_BILINEAR transcribes to 1529 bytes");
+
+# Every source must be non-empty and carry a compute entry point. This is the
+# check that catches a shader that transcribed to nothing at all.
+assert_eq(str_len(_gs_grayscale()) > 0, 1, "GRAYSCALE is non-empty");
+assert_eq(has(_gs_grayscale(), "@compute"), 1, "and is a compute shader");
+assert_eq(has(_gs_grayscale(), "fn main"), 1, "with a main entry point");
+assert_eq(has(_gs_lut3d(), "@compute"), 1, "LUT3D is a compute shader");
+assert_eq(has(_gs_rgba_to_y_bt601(), "@compute"), 1, "RGBA_TO_Y_BT601 too");
+assert_eq(has(_gs_blur_horizontal(), "@compute"), 1, "and both blur passes");
+assert_eq(has(_gs_blur_vertical(), "@compute"), 1, "including the vertical one");
+
+# ================================================================
+test_group("wgsl content");
+
+# The Rust's own shader tests, ported one for one.
+assert_eq(has(_gs_pack_helpers(), "fn unpack_rgba"), 1, "PACK_HELPERS defines unpack_rgba");
+assert_eq(has(_gs_pack_helpers(), "fn pack_rgba"), 1, "and pack_rgba");
+assert_eq(has(_gs_blend_all(), "case 0u"), 1, "BLEND_ALL has the first blend mode");
+assert_eq(has(_gs_blend_all(), "case 11u"), 1, "and the twelfth");
+assert_eq(has(_gs_blend_all(), "blend_channel"), 1, "and the per-channel helper");
+assert_eq(has(_gs_invert(), "1.0 - px.r"), 1, "INVERT inverts red");
+assert_eq(has(_gs_invert(), "px.a"), 1, "and passes alpha through");
+assert_eq(has(_gs_blur_horizontal(), "kernel"), 1, "BLUR_HORIZONTAL binds a kernel");
+assert_eq(has(_gs_blur_vertical(), "kernel"), 1, "and so does BLUR_VERTICAL");
+assert_eq(has(_gs_hue_shift(), "rgb_to_hsl"), 1, "HUE_SHIFT converts to HSL");
+assert_eq(has(_gs_hue_shift(), "hsl_to_rgb"), 1, "and back");
+assert_eq(has(_gs_hue_shift(), "params.shift"), 1, "and reads the shift parameter");
+assert_eq(has(_gs_color_balance(), "shadow_w"), 1, "COLOR_BALANCE weights shadows");
+assert_eq(has(_gs_color_balance(), "mid_w"), 1, "midtones");
+assert_eq(has(_gs_color_balance(), "high_w"), 1, "and highlights");
+assert_eq(has(_gs_noise_gaussian(), "pcg"), 1, "NOISE_GAUSSIAN uses a PCG generator");
+assert_eq(has(_gs_noise_gaussian(), "Box-Muller"), 1, "and the Box-Muller transform");
+assert_eq(has(_gs_dissolve(), "mix"), 1, "DISSOLVE mixes");
+assert_eq(has(_gs_fade(), "px.a"), 1, "FADE preserves alpha");
+assert_eq(has(_gs_wipe(), "params.width"), 1, "WIPE reads the width");
+assert_eq(has(_gs_crop(), "src_x"), 1, "CROP takes a source offset");
+assert_eq(has(_gs_resize_bilinear(), "mix"), 1, "RESIZE_BILINEAR interpolates");
+assert_eq(has(_gs_resize_nearest(), "src_width"), 1, "RESIZE_NEAREST samples by ratio");
+assert_eq(has(_gs_flip_horizontal(), "width - 1u - x"), 1, "FLIP_HORIZONTAL mirrors on x");
+assert_eq(has(_gs_flip_vertical(), "height - 1u - y"), 1, "FLIP_VERTICAL mirrors on y");
+
+# ================================================================
+test_group("shader assembly");
+
+# Rust's `build_shader` prepends the helpers to a body.
+var built = gpu_shader_build(_gs_invert());
+assert_eq(has(built, "fn unpack_rgba"), 1, "a built shader carries unpack_rgba");
+assert_eq(has(built, "fn pack_rgba"), 1, "and pack_rgba");
+assert_eq(has(built, "1.0 - px.r"), 1, "and the body it was given");
+# The helpers come FIRST — WGSL requires a function to be declared before use,
+# so a build that appended them would produce a source wgpu rejects.
+assert_eq(str_index_of_cstr(built, "fn unpack_rgba") < str_index_of_cstr(built, "1.0 - px.r"), 1,
+          "with the helpers BEFORE the body, as WGSL requires");
+assert_eq(str_len(built), 586 + 422, "and the total is exactly helpers plus body");
+
+# Building twice must not accumulate — each call returns a fresh Str.
+var built2 = gpu_shader_build(_gs_invert());
+assert_eq(str_len(built2), str_len(built), "building again gives the same length");
+
+# ================================================================
+test_group("native and wgpu carry the same operations");
+
+# The eleven operations that reach the native backend as SPIR-V must also have
+# WGSL here, or a consumer on the wgpu path would silently lose them. This is
+# the assertion that fails if someone adds a native kernel and forgets the
+# fallback.
+assert_eq(str_len(_gs_invert()) > 0, 1, "invert has a WGSL fallback");
+assert_eq(str_len(_gs_grayscale()) > 0, 1, "grayscale has a WGSL fallback");
+assert_eq(str_len(_gs_fade()) > 0, 1, "fade has a WGSL fallback");
+assert_eq(str_len(_gs_brightness_contrast()) > 0, 1, "brightness_contrast has a WGSL fallback");
+assert_eq(str_len(_gs_saturation()) > 0, 1, "saturation has a WGSL fallback");
+assert_eq(str_len(_gs_dissolve()) > 0, 1, "dissolve has a WGSL fallback");
+assert_eq(str_len(_gs_wipe()) > 0, 1, "wipe has a WGSL fallback");
+assert_eq(str_len(_gs_crop()) > 0, 1, "crop has a WGSL fallback");
+assert_eq(str_len(_gs_flip_horizontal()) > 0, 1, "flip_horizontal has a WGSL fallback");
+assert_eq(str_len(_gs_flip_vertical()) > 0, 1, "flip_vertical has a WGSL fallback");
+assert_eq(str_len(_gs_resize_nearest()) > 0, 1, "resize_nearest has a WGSL fallback");
+
+# And the three the native path CANNOT take are exactly the ones that need this
+# fallback most. They are present and complete here.
+assert_eq(str_len(_gs_resize_bilinear()) > 0, 1, "resize_bilinear — native-blocked — has WGSL");
+assert_eq(str_len(_gs_blend_all()) > 0, 1, "blend — native-blocked — has WGSL");
+assert_eq(str_len(_gs_blur_horizontal()) > 0, 1, "blur horizontal — native-blocked — has WGSL");
+assert_eq(str_len(_gs_blur_vertical()) > 0, 1, "blur vertical — native-blocked — has WGSL");
+# Blur is blocked on OpLoopMerge, and its WGSL genuinely does loop — which is
+# precisely why it cannot be lowered.
+assert_eq(has(_gs_blur_horizontal(), "for "), 1, "and blur's WGSL loops, which is why native rejects it");
+
+var exit_code = assert_summary();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

@@ -9215,6 +9215,886 @@ fn gk_resize_bilinear(s) {
     return RG_ERR_NONE;
 }
 
+# --- gpu_shaders.cyr ---
+
+# gpu_shaders.cyr -- the WGSL sources, for the wgpu fallback path
+# Ported from rust-old/src/gpu/shaders.rs. Private prefix: _gs_
+#
+# mabda has three backends behind one API and picks one at COMPILE time. On the
+# native AMD and NVIDIA paths ranga feeds it SPIR-V emitted by gpu_spirv.cyr; on
+# the wgpu path it feeds it WGSL, and this module is where that WGSL lives.
+# Neither substitutes for the other: the native backends reject WGSL outright
+# (`_backend_native_shader_module_create` takes SPIR-V and nothing else), and
+# the wgpu backend takes WGSL directly.
+#
+# ⚠ MACHINE-TRANSCRIBED FROM THE RUST, NOT RETYPED. Every line below was
+# extracted verbatim from `rust-old/src/gpu/shaders.rs` by a script that escaped
+# it for Cyrius, one WGSL line per `str_builder_add_cstr`. A divergence between
+# the two lines therefore cannot come from a typo here — and the line-per-call
+# shape keeps the diff reviewable, which a single 2,300-character string
+# literal would not be.
+#
+# TWENTY-ONE SOURCES, NOT FOURTEEN. `gpu/mod.rs` re-exports fourteen operations,
+# but shaders.rs also carries LUT3D, HUE_SHIFT, COLOR_BALANCE, RGBA_TO_Y_BT601
+# and the two blur passes, which the pipeline drives internally. All are kept;
+# dropping the ones without a public wrapper would silently narrow the fallback.
+#
+# ⚠ THE WGPU PATH NEEDS A C LAUNCHER. Handing mabda these strings is not enough:
+# its wgpu backend requires the consumer to compile in `object;` mode and be
+# entered from a launcher that builds a wgpu function table and calls
+# `mabda_main(table, preinit)`. ranga cannot impose that on its callers, so the
+# sources are exposed and `gpu_context_from_launcher` adopts a context the
+# launcher already made. That is also why this module has no hardware test —
+# there is no launcher in a `.tcyr` run — and why every shader here is checked
+# structurally instead.
+#
+# Each function returns a freshly built Str the caller owns.
+
+#must_use
+fn _gs_pack_helpers(): Str {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "fn unpack_rgba(packed: u32) -> vec4<f32> {\n");
+    str_builder_add_cstr(sb, "    let r = f32(packed & 0xFFu) / 255.0;\n");
+    str_builder_add_cstr(sb, "    let g = f32((packed >> 8u) & 0xFFu) / 255.0;\n");
+    str_builder_add_cstr(sb, "    let b = f32((packed >> 16u) & 0xFFu) / 255.0;\n");
+    str_builder_add_cstr(sb, "    let a = f32((packed >> 24u) & 0xFFu) / 255.0;\n");
+    str_builder_add_cstr(sb, "    return vec4<f32>(r, g, b, a);\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "fn pack_rgba(c: vec4<f32>) -> u32 {\n");
+    str_builder_add_cstr(sb, "    let r = u32(clamp(round(c.r * 255.0), 0.0, 255.0));\n");
+    str_builder_add_cstr(sb, "    let g = u32(clamp(round(c.g * 255.0), 0.0, 255.0));\n");
+    str_builder_add_cstr(sb, "    let b = u32(clamp(round(c.b * 255.0), 0.0, 255.0));\n");
+    str_builder_add_cstr(sb, "    let a = u32(clamp(round(c.a * 255.0), 0.0, 255.0));\n");
+    str_builder_add_cstr(sb, "    return r | (g << 8u) | (b << 16u) | (a << 24u);\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "\n");
+    return str_builder_build(sb);
+}
+
+#must_use
+fn _gs_blend_all(): Str {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(0) var<storage, read> src: array<u32>;\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(1) var<storage, read_write> dst: array<u32>;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "struct Params {\n");
+    str_builder_add_cstr(sb, "    count: u32,\n");
+    str_builder_add_cstr(sb, "    mode: u32,\n");
+    str_builder_add_cstr(sb, "    opacity: f32,\n");
+    str_builder_add_cstr(sb, "    _pad: u32,\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(2) var<uniform> params: Params;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "fn blend_channel(s: f32, d: f32, mode: u32) -> f32 {\n");
+    str_builder_add_cstr(sb, "    switch mode {\n");
+    str_builder_add_cstr(sb, "        case 0u: { return s; }\n");
+    str_builder_add_cstr(sb, "        case 1u: { return s * d; }\n");
+    str_builder_add_cstr(sb, "        case 2u: { return 1.0 - (1.0 - s) * (1.0 - d); }\n");
+    str_builder_add_cstr(sb, "        case 3u: {\n");
+    str_builder_add_cstr(sb, "            if d < 0.5 { return 2.0 * s * d; }\n");
+    str_builder_add_cstr(sb, "            else { return 1.0 - 2.0 * (1.0 - s) * (1.0 - d); }\n");
+    str_builder_add_cstr(sb, "        }\n");
+    str_builder_add_cstr(sb, "        case 4u: { return min(s, d); }\n");
+    str_builder_add_cstr(sb, "        case 5u: { return max(s, d); }\n");
+    str_builder_add_cstr(sb, "        case 6u: {\n");
+    str_builder_add_cstr(sb, "            if s >= 1.0 { return 1.0; }\n");
+    str_builder_add_cstr(sb, "            else { return min(d / (1.0 - s), 1.0); }\n");
+    str_builder_add_cstr(sb, "        }\n");
+    str_builder_add_cstr(sb, "        case 7u: {\n");
+    str_builder_add_cstr(sb, "            if s <= 0.0 { return 0.0; }\n");
+    str_builder_add_cstr(sb, "            else { return 1.0 - min((1.0 - d) / s, 1.0); }\n");
+    str_builder_add_cstr(sb, "        }\n");
+    str_builder_add_cstr(sb, "        case 8u: {\n");
+    str_builder_add_cstr(sb, "            if s <= 0.5 { return d - (1.0 - 2.0 * s) * d * (1.0 - d); }\n");
+    str_builder_add_cstr(sb, "            else {\n");
+    str_builder_add_cstr(sb, "                var g: f32;\n");
+    str_builder_add_cstr(sb, "                if d <= 0.25 { g = ((16.0 * d - 12.0) * d + 4.0) * d; }\n");
+    str_builder_add_cstr(sb, "                else { g = sqrt(d); }\n");
+    str_builder_add_cstr(sb, "                return d + (2.0 * s - 1.0) * (g - d);\n");
+    str_builder_add_cstr(sb, "            }\n");
+    str_builder_add_cstr(sb, "        }\n");
+    str_builder_add_cstr(sb, "        case 9u: {\n");
+    str_builder_add_cstr(sb, "            if s < 0.5 { return 2.0 * s * d; }\n");
+    str_builder_add_cstr(sb, "            else { return 1.0 - 2.0 * (1.0 - s) * (1.0 - d); }\n");
+    str_builder_add_cstr(sb, "        }\n");
+    str_builder_add_cstr(sb, "        case 10u: { return abs(s - d); }\n");
+    str_builder_add_cstr(sb, "        case 11u: { return s + d - 2.0 * s * d; }\n");
+    str_builder_add_cstr(sb, "        default: { return s; }\n");
+    str_builder_add_cstr(sb, "    }\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@compute @workgroup_size(256)\n");
+    str_builder_add_cstr(sb, "fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
+    str_builder_add_cstr(sb, "    let idx = gid.x;\n");
+    str_builder_add_cstr(sb, "    if idx >= params.count { return; }\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    let s = unpack_rgba(src[idx]);\n");
+    str_builder_add_cstr(sb, "    let d = unpack_rgba(dst[idx]);\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    let sa = s.a * params.opacity;\n");
+    str_builder_add_cstr(sb, "    if sa <= 0.0 { return; }\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    let br = blend_channel(s.r, d.r, params.mode);\n");
+    str_builder_add_cstr(sb, "    let bg = blend_channel(s.g, d.g, params.mode);\n");
+    str_builder_add_cstr(sb, "    let bb = blend_channel(s.b, d.b, params.mode);\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    let inv_sa = 1.0 - sa;\n");
+    str_builder_add_cstr(sb, "    let out_r = clamp(br * sa + d.r * inv_sa, 0.0, 1.0);\n");
+    str_builder_add_cstr(sb, "    let out_g = clamp(bg * sa + d.g * inv_sa, 0.0, 1.0);\n");
+    str_builder_add_cstr(sb, "    let out_b = clamp(bb * sa + d.b * inv_sa, 0.0, 1.0);\n");
+    str_builder_add_cstr(sb, "    let out_a = clamp(sa + d.a * inv_sa, 0.0, 1.0);\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    dst[idx] = pack_rgba(vec4<f32>(out_r, out_g, out_b, out_a));\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "\n");
+    return str_builder_build(sb);
+}
+
+#must_use
+fn _gs_invert(): Str {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(0) var<storage, read_write> pixels: array<u32>;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "struct Params { count: u32, }\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(1) var<uniform> params: Params;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@compute @workgroup_size(256)\n");
+    str_builder_add_cstr(sb, "fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
+    str_builder_add_cstr(sb, "    let idx = gid.x;\n");
+    str_builder_add_cstr(sb, "    if idx >= params.count { return; }\n");
+    str_builder_add_cstr(sb, "    let px = unpack_rgba(pixels[idx]);\n");
+    str_builder_add_cstr(sb, "    pixels[idx] = pack_rgba(vec4<f32>(1.0 - px.r, 1.0 - px.g, 1.0 - px.b, px.a))");
+    str_builder_add_cstr(sb, ";\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "\n");
+    return str_builder_build(sb);
+}
+
+#must_use
+fn _gs_grayscale(): Str {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(0) var<storage, read_write> pixels: array<u32>;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "struct Params { count: u32, }\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(1) var<uniform> params: Params;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@compute @workgroup_size(256)\n");
+    str_builder_add_cstr(sb, "fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
+    str_builder_add_cstr(sb, "    let idx = gid.x;\n");
+    str_builder_add_cstr(sb, "    if idx >= params.count { return; }\n");
+    str_builder_add_cstr(sb, "    let px = unpack_rgba(pixels[idx]);\n");
+    str_builder_add_cstr(sb, "    let lum = 0.2126 * px.r + 0.7152 * px.g + 0.0722 * px.b;\n");
+    str_builder_add_cstr(sb, "    pixels[idx] = pack_rgba(vec4<f32>(lum, lum, lum, px.a));\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "\n");
+    return str_builder_build(sb);
+}
+
+#must_use
+fn _gs_brightness_contrast(): Str {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(0) var<storage, read_write> pixels: array<u32>;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "struct Params {\n");
+    str_builder_add_cstr(sb, "    count: u32,\n");
+    str_builder_add_cstr(sb, "    brightness: f32,\n");
+    str_builder_add_cstr(sb, "    contrast: f32,\n");
+    str_builder_add_cstr(sb, "    _pad: u32,\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(1) var<uniform> params: Params;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@compute @workgroup_size(256)\n");
+    str_builder_add_cstr(sb, "fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
+    str_builder_add_cstr(sb, "    let idx = gid.x;\n");
+    str_builder_add_cstr(sb, "    if idx >= params.count { return; }\n");
+    str_builder_add_cstr(sb, "    let px = unpack_rgba(pixels[idx]);\n");
+    str_builder_add_cstr(sb, "    let b = params.brightness;\n");
+    str_builder_add_cstr(sb, "    let c = params.contrast;\n");
+    str_builder_add_cstr(sb, "    let r = clamp((px.r + b - 0.5) * c + 0.5, 0.0, 1.0);\n");
+    str_builder_add_cstr(sb, "    let g = clamp((px.g + b - 0.5) * c + 0.5, 0.0, 1.0);\n");
+    str_builder_add_cstr(sb, "    let blue = clamp((px.b + b - 0.5) * c + 0.5, 0.0, 1.0);\n");
+    str_builder_add_cstr(sb, "    pixels[idx] = pack_rgba(vec4<f32>(r, g, blue, px.a));\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "\n");
+    return str_builder_build(sb);
+}
+
+#must_use
+fn _gs_saturation(): Str {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(0) var<storage, read_write> pixels: array<u32>;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "struct Params {\n");
+    str_builder_add_cstr(sb, "    count: u32,\n");
+    str_builder_add_cstr(sb, "    factor: f32,\n");
+    str_builder_add_cstr(sb, "    _pad1: u32,\n");
+    str_builder_add_cstr(sb, "    _pad2: u32,\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(1) var<uniform> params: Params;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@compute @workgroup_size(256)\n");
+    str_builder_add_cstr(sb, "fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
+    str_builder_add_cstr(sb, "    let idx = gid.x;\n");
+    str_builder_add_cstr(sb, "    if idx >= params.count { return; }\n");
+    str_builder_add_cstr(sb, "    let px = unpack_rgba(pixels[idx]);\n");
+    str_builder_add_cstr(sb, "    let lum = 0.2126 * px.r + 0.7152 * px.g + 0.0722 * px.b;\n");
+    str_builder_add_cstr(sb, "    let f = params.factor;\n");
+    str_builder_add_cstr(sb, "    let r = clamp(lum + f * (px.r - lum), 0.0, 1.0);\n");
+    str_builder_add_cstr(sb, "    let g = clamp(lum + f * (px.g - lum), 0.0, 1.0);\n");
+    str_builder_add_cstr(sb, "    let b = clamp(lum + f * (px.b - lum), 0.0, 1.0);\n");
+    str_builder_add_cstr(sb, "    pixels[idx] = pack_rgba(vec4<f32>(r, g, b, px.a));\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "\n");
+    return str_builder_build(sb);
+}
+
+#must_use
+fn _gs_blur_horizontal(): Str {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(0) var<storage, read> input: array<u32>;\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(1) var<storage, read_write> output: array<u32>;\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(2) var<storage, read> kernel: array<f32>;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "struct Params {\n");
+    str_builder_add_cstr(sb, "    width: u32,\n");
+    str_builder_add_cstr(sb, "    height: u32,\n");
+    str_builder_add_cstr(sb, "    radius: u32,\n");
+    str_builder_add_cstr(sb, "    _pad: u32,\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(3) var<uniform> params: Params;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@compute @workgroup_size(16, 16)\n");
+    str_builder_add_cstr(sb, "fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
+    str_builder_add_cstr(sb, "    let x = gid.x;\n");
+    str_builder_add_cstr(sb, "    let y = gid.y;\n");
+    str_builder_add_cstr(sb, "    if x >= params.width || y >= params.height { return; }\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    let r = i32(params.radius);\n");
+    str_builder_add_cstr(sb, "    var acc = vec4<f32>(0.0, 0.0, 0.0, 0.0);\n");
+    str_builder_add_cstr(sb, "    for (var i = -r; i <= r; i = i + 1) {\n");
+    str_builder_add_cstr(sb, "        let sx = clamp(i32(x) + i, 0, i32(params.width) - 1);\n");
+    str_builder_add_cstr(sb, "        let idx = u32(sx) + y * params.width;\n");
+    str_builder_add_cstr(sb, "        let w = kernel[u32(i + r)];\n");
+    str_builder_add_cstr(sb, "        acc = acc + unpack_rgba(input[idx]) * w;\n");
+    str_builder_add_cstr(sb, "    }\n");
+    str_builder_add_cstr(sb, "    output[x + y * params.width] = pack_rgba(acc);\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "\n");
+    return str_builder_build(sb);
+}
+
+#must_use
+fn _gs_blur_vertical(): Str {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(0) var<storage, read> input: array<u32>;\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(1) var<storage, read_write> output: array<u32>;\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(2) var<storage, read> kernel: array<f32>;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "struct Params {\n");
+    str_builder_add_cstr(sb, "    width: u32,\n");
+    str_builder_add_cstr(sb, "    height: u32,\n");
+    str_builder_add_cstr(sb, "    radius: u32,\n");
+    str_builder_add_cstr(sb, "    _pad: u32,\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(3) var<uniform> params: Params;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@compute @workgroup_size(16, 16)\n");
+    str_builder_add_cstr(sb, "fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
+    str_builder_add_cstr(sb, "    let x = gid.x;\n");
+    str_builder_add_cstr(sb, "    let y = gid.y;\n");
+    str_builder_add_cstr(sb, "    if x >= params.width || y >= params.height { return; }\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    let r = i32(params.radius);\n");
+    str_builder_add_cstr(sb, "    var acc = vec4<f32>(0.0, 0.0, 0.0, 0.0);\n");
+    str_builder_add_cstr(sb, "    for (var i = -r; i <= r; i = i + 1) {\n");
+    str_builder_add_cstr(sb, "        let sy = clamp(i32(y) + i, 0, i32(params.height) - 1);\n");
+    str_builder_add_cstr(sb, "        let idx = x + u32(sy) * params.width;\n");
+    str_builder_add_cstr(sb, "        let w = kernel[u32(i + r)];\n");
+    str_builder_add_cstr(sb, "        acc = acc + unpack_rgba(input[idx]) * w;\n");
+    str_builder_add_cstr(sb, "    }\n");
+    str_builder_add_cstr(sb, "    output[x + y * params.width] = pack_rgba(acc);\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "\n");
+    return str_builder_build(sb);
+}
+
+#must_use
+fn _gs_rgba_to_y_bt601(): Str {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(0) var<storage, read> pixels: array<u32>;\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(1) var<storage, read_write> y_plane: array<u32>;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "struct Params {\n");
+    str_builder_add_cstr(sb, "    pixel_count: u32,\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(2) var<uniform> params: Params;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@compute @workgroup_size(256)\n");
+    str_builder_add_cstr(sb, "fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
+    str_builder_add_cstr(sb, "    let base = gid.x * 4u;\n");
+    str_builder_add_cstr(sb, "    if base >= params.pixel_count { return; }\n");
+    str_builder_add_cstr(sb, "    var packed_y: u32 = 0u;\n");
+    str_builder_add_cstr(sb, "    for (var i = 0u; i < 4u; i = i + 1u) {\n");
+    str_builder_add_cstr(sb, "        let idx = base + i;\n");
+    str_builder_add_cstr(sb, "        if idx >= params.pixel_count { break; }\n");
+    str_builder_add_cstr(sb, "        let px = unpack_rgba(pixels[idx]);\n");
+    str_builder_add_cstr(sb, "        let y = u32(clamp(px.r * 0.299 + px.g * 0.587 + px.b * 0.114, 0.0, 1.0) ");
+    str_builder_add_cstr(sb, "* 255.0 + 0.5);\n");
+    str_builder_add_cstr(sb, "        packed_y = packed_y | (y << (i * 8u));\n");
+    str_builder_add_cstr(sb, "    }\n");
+    str_builder_add_cstr(sb, "    y_plane[gid.x] = packed_y;\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "\n");
+    return str_builder_build(sb);
+}
+
+#must_use
+fn _gs_lut3d(): Str {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(0) var<storage, read_write> pixels: array<u32>;\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(1) var<storage, read> lut: array<f32>;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "struct Params {\n");
+    str_builder_add_cstr(sb, "    count: u32,\n");
+    str_builder_add_cstr(sb, "    lut_size: u32,\n");
+    str_builder_add_cstr(sb, "    _pad1: u32,\n");
+    str_builder_add_cstr(sb, "    _pad2: u32,\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(2) var<uniform> params: Params;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "fn lut_sample(r: u32, g: u32, b: u32) -> vec4<f32> {\n");
+    str_builder_add_cstr(sb, "    let s = params.lut_size;\n");
+    str_builder_add_cstr(sb, "    let idx = (r + g * s + b * s * s) * 4u;\n");
+    str_builder_add_cstr(sb, "    return vec4<f32>(lut[idx], lut[idx + 1u], lut[idx + 2u], lut[idx + 3u]);\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@compute @workgroup_size(256)\n");
+    str_builder_add_cstr(sb, "fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
+    str_builder_add_cstr(sb, "    let idx = gid.x;\n");
+    str_builder_add_cstr(sb, "    if idx >= params.count { return; }\n");
+    str_builder_add_cstr(sb, "    let px = unpack_rgba(pixels[idx]);\n");
+    str_builder_add_cstr(sb, "    let s = f32(params.lut_size - 1u);\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    let rf = px.r * s;\n");
+    str_builder_add_cstr(sb, "    let gf = px.g * s;\n");
+    str_builder_add_cstr(sb, "    let bf = px.b * s;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    let r0 = u32(floor(rf));\n");
+    str_builder_add_cstr(sb, "    let g0 = u32(floor(gf));\n");
+    str_builder_add_cstr(sb, "    let b0 = u32(floor(bf));\n");
+    str_builder_add_cstr(sb, "    let r1 = min(r0 + 1u, params.lut_size - 1u);\n");
+    str_builder_add_cstr(sb, "    let g1 = min(g0 + 1u, params.lut_size - 1u);\n");
+    str_builder_add_cstr(sb, "    let b1 = min(b0 + 1u, params.lut_size - 1u);\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    let fr = rf - floor(rf);\n");
+    str_builder_add_cstr(sb, "    let fg = gf - floor(gf);\n");
+    str_builder_add_cstr(sb, "    let fb = bf - floor(bf);\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    // Trilinear interpolation.\n");
+    str_builder_add_cstr(sb, "    let c000 = lut_sample(r0, g0, b0);\n");
+    str_builder_add_cstr(sb, "    let c100 = lut_sample(r1, g0, b0);\n");
+    str_builder_add_cstr(sb, "    let c010 = lut_sample(r0, g1, b0);\n");
+    str_builder_add_cstr(sb, "    let c110 = lut_sample(r1, g1, b0);\n");
+    str_builder_add_cstr(sb, "    let c001 = lut_sample(r0, g0, b1);\n");
+    str_builder_add_cstr(sb, "    let c101 = lut_sample(r1, g0, b1);\n");
+    str_builder_add_cstr(sb, "    let c011 = lut_sample(r0, g1, b1);\n");
+    str_builder_add_cstr(sb, "    let c111 = lut_sample(r1, g1, b1);\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    let c00 = mix(c000, c100, fr);\n");
+    str_builder_add_cstr(sb, "    let c10 = mix(c010, c110, fr);\n");
+    str_builder_add_cstr(sb, "    let c01 = mix(c001, c101, fr);\n");
+    str_builder_add_cstr(sb, "    let c11 = mix(c011, c111, fr);\n");
+    str_builder_add_cstr(sb, "    let c0 = mix(c00, c10, fg);\n");
+    str_builder_add_cstr(sb, "    let c1 = mix(c01, c11, fg);\n");
+    str_builder_add_cstr(sb, "    let result = mix(c0, c1, fb);\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    pixels[idx] = pack_rgba(vec4<f32>(\n");
+    str_builder_add_cstr(sb, "        clamp(result.r, 0.0, 1.0),\n");
+    str_builder_add_cstr(sb, "        clamp(result.g, 0.0, 1.0),\n");
+    str_builder_add_cstr(sb, "        clamp(result.b, 0.0, 1.0),\n");
+    str_builder_add_cstr(sb, "        px.a\n");
+    str_builder_add_cstr(sb, "    ));\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "\n");
+    return str_builder_build(sb);
+}
+
+#must_use
+fn _gs_hue_shift(): Str {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(0) var<storage, read_write> pixels: array<u32>;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "struct Params {\n");
+    str_builder_add_cstr(sb, "    count: u32,\n");
+    str_builder_add_cstr(sb, "    shift: f32,\n");
+    str_builder_add_cstr(sb, "    _pad1: u32,\n");
+    str_builder_add_cstr(sb, "    _pad2: u32,\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(1) var<uniform> params: Params;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "fn rgb_to_hsl(c: vec3<f32>) -> vec3<f32> {\n");
+    str_builder_add_cstr(sb, "    let mx = max(max(c.r, c.g), c.b);\n");
+    str_builder_add_cstr(sb, "    let mn = min(min(c.r, c.g), c.b);\n");
+    str_builder_add_cstr(sb, "    let d = mx - mn;\n");
+    str_builder_add_cstr(sb, "    let l = (mx + mn) * 0.5;\n");
+    str_builder_add_cstr(sb, "    if d < 0.00001 { return vec3<f32>(0.0, 0.0, l); }\n");
+    str_builder_add_cstr(sb, "    var s: f32;\n");
+    str_builder_add_cstr(sb, "    if l > 0.5 { s = d / (2.0 - mx - mn); }\n");
+    str_builder_add_cstr(sb, "    else { s = d / (mx + mn); }\n");
+    str_builder_add_cstr(sb, "    var h: f32;\n");
+    str_builder_add_cstr(sb, "    if abs(mx - c.r) < 0.00001 {\n");
+    str_builder_add_cstr(sb, "        h = (c.g - c.b) / d;\n");
+    str_builder_add_cstr(sb, "        if c.g < c.b { h = h + 6.0; }\n");
+    str_builder_add_cstr(sb, "    } else if abs(mx - c.g) < 0.00001 {\n");
+    str_builder_add_cstr(sb, "        h = (c.b - c.r) / d + 2.0;\n");
+    str_builder_add_cstr(sb, "    } else {\n");
+    str_builder_add_cstr(sb, "        h = (c.r - c.g) / d + 4.0;\n");
+    str_builder_add_cstr(sb, "    }\n");
+    str_builder_add_cstr(sb, "    return vec3<f32>(h / 6.0, s, l);\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "fn hue2rgb(p: f32, q: f32, t_in: f32) -> f32 {\n");
+    str_builder_add_cstr(sb, "    var t = t_in;\n");
+    str_builder_add_cstr(sb, "    if t < 0.0 { t = t + 1.0; }\n");
+    str_builder_add_cstr(sb, "    if t > 1.0 { t = t - 1.0; }\n");
+    str_builder_add_cstr(sb, "    if t < 1.0 / 6.0 { return p + (q - p) * 6.0 * t; }\n");
+    str_builder_add_cstr(sb, "    if t < 0.5 { return q; }\n");
+    str_builder_add_cstr(sb, "    if t < 2.0 / 3.0 { return p + (q - p) * (2.0 / 3.0 - t) * 6.0; }\n");
+    str_builder_add_cstr(sb, "    return p;\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "fn hsl_to_rgb(hsl: vec3<f32>) -> vec3<f32> {\n");
+    str_builder_add_cstr(sb, "    if hsl.y < 0.00001 { return vec3<f32>(hsl.z, hsl.z, hsl.z); }\n");
+    str_builder_add_cstr(sb, "    var q: f32;\n");
+    str_builder_add_cstr(sb, "    if hsl.z < 0.5 { q = hsl.z * (1.0 + hsl.y); }\n");
+    str_builder_add_cstr(sb, "    else { q = hsl.z + hsl.y - hsl.z * hsl.y; }\n");
+    str_builder_add_cstr(sb, "    let p = 2.0 * hsl.z - q;\n");
+    str_builder_add_cstr(sb, "    return vec3<f32>(\n");
+    str_builder_add_cstr(sb, "        hue2rgb(p, q, hsl.x + 1.0 / 3.0),\n");
+    str_builder_add_cstr(sb, "        hue2rgb(p, q, hsl.x),\n");
+    str_builder_add_cstr(sb, "        hue2rgb(p, q, hsl.x - 1.0 / 3.0)\n");
+    str_builder_add_cstr(sb, "    );\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@compute @workgroup_size(256)\n");
+    str_builder_add_cstr(sb, "fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
+    str_builder_add_cstr(sb, "    let idx = gid.x;\n");
+    str_builder_add_cstr(sb, "    if idx >= params.count { return; }\n");
+    str_builder_add_cstr(sb, "    let px = unpack_rgba(pixels[idx]);\n");
+    str_builder_add_cstr(sb, "    var hsl = rgb_to_hsl(vec3<f32>(px.r, px.g, px.b));\n");
+    str_builder_add_cstr(sb, "    hsl.x = fract(hsl.x + params.shift / 360.0);\n");
+    str_builder_add_cstr(sb, "    let rgb = hsl_to_rgb(hsl);\n");
+    str_builder_add_cstr(sb, "    pixels[idx] = pack_rgba(vec4<f32>(\n");
+    str_builder_add_cstr(sb, "        clamp(rgb.r, 0.0, 1.0),\n");
+    str_builder_add_cstr(sb, "        clamp(rgb.g, 0.0, 1.0),\n");
+    str_builder_add_cstr(sb, "        clamp(rgb.b, 0.0, 1.0),\n");
+    str_builder_add_cstr(sb, "        px.a\n");
+    str_builder_add_cstr(sb, "    ));\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "\n");
+    return str_builder_build(sb);
+}
+
+#must_use
+fn _gs_color_balance(): Str {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(0) var<storage, read_write> pixels: array<u32>;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "struct Params {\n");
+    str_builder_add_cstr(sb, "    count: u32,\n");
+    str_builder_add_cstr(sb, "    shadow_r: f32,\n");
+    str_builder_add_cstr(sb, "    shadow_g: f32,\n");
+    str_builder_add_cstr(sb, "    shadow_b: f32,\n");
+    str_builder_add_cstr(sb, "    mid_r: f32,\n");
+    str_builder_add_cstr(sb, "    mid_g: f32,\n");
+    str_builder_add_cstr(sb, "    mid_b: f32,\n");
+    str_builder_add_cstr(sb, "    high_r: f32,\n");
+    str_builder_add_cstr(sb, "    high_g: f32,\n");
+    str_builder_add_cstr(sb, "    high_b: f32,\n");
+    str_builder_add_cstr(sb, "    _pad1: u32,\n");
+    str_builder_add_cstr(sb, "    _pad2: u32,\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(1) var<uniform> params: Params;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@compute @workgroup_size(256)\n");
+    str_builder_add_cstr(sb, "fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
+    str_builder_add_cstr(sb, "    let idx = gid.x;\n");
+    str_builder_add_cstr(sb, "    if idx >= params.count { return; }\n");
+    str_builder_add_cstr(sb, "    let px = unpack_rgba(pixels[idx]);\n");
+    str_builder_add_cstr(sb, "    let lum = 0.2126 * px.r + 0.7152 * px.g + 0.0722 * px.b;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    // Weight functions.\n");
+    str_builder_add_cstr(sb, "    let shadow_w = clamp(1.0 - lum * 4.0, 0.0, 1.0);\n");
+    str_builder_add_cstr(sb, "    let high_w = clamp(lum * 4.0 - 3.0, 0.0, 1.0);\n");
+    str_builder_add_cstr(sb, "    let mid_w = 1.0 - shadow_w - high_w;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    let adj_r = shadow_w * params.shadow_r + mid_w * params.mid_r + high_w * par");
+    str_builder_add_cstr(sb, "ams.high_r;\n");
+    str_builder_add_cstr(sb, "    let adj_g = shadow_w * params.shadow_g + mid_w * params.mid_g + high_w * par");
+    str_builder_add_cstr(sb, "ams.high_g;\n");
+    str_builder_add_cstr(sb, "    let adj_b = shadow_w * params.shadow_b + mid_w * params.mid_b + high_w * par");
+    str_builder_add_cstr(sb, "ams.high_b;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    pixels[idx] = pack_rgba(vec4<f32>(\n");
+    str_builder_add_cstr(sb, "        clamp(px.r + adj_r, 0.0, 1.0),\n");
+    str_builder_add_cstr(sb, "        clamp(px.g + adj_g, 0.0, 1.0),\n");
+    str_builder_add_cstr(sb, "        clamp(px.b + adj_b, 0.0, 1.0),\n");
+    str_builder_add_cstr(sb, "        px.a\n");
+    str_builder_add_cstr(sb, "    ));\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "\n");
+    return str_builder_build(sb);
+}
+
+#must_use
+fn _gs_noise_gaussian(): Str {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(0) var<storage, read_write> pixels: array<u32>;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "struct Params {\n");
+    str_builder_add_cstr(sb, "    count: u32,\n");
+    str_builder_add_cstr(sb, "    seed: u32,\n");
+    str_builder_add_cstr(sb, "    strength: f32,\n");
+    str_builder_add_cstr(sb, "    _pad: u32,\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(1) var<uniform> params: Params;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "fn pcg(v: u32) -> u32 {\n");
+    str_builder_add_cstr(sb, "    var state = v * 747796405u + 2891336453u;\n");
+    str_builder_add_cstr(sb, "    let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;\n");
+    str_builder_add_cstr(sb, "    return (word >> 22u) ^ word;\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "fn rand_uniform(seed_val: u32) -> f32 {\n");
+    str_builder_add_cstr(sb, "    return f32(pcg(seed_val)) / 4294967295.0;\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@compute @workgroup_size(256)\n");
+    str_builder_add_cstr(sb, "fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
+    str_builder_add_cstr(sb, "    let idx = gid.x;\n");
+    str_builder_add_cstr(sb, "    if idx >= params.count { return; }\n");
+    str_builder_add_cstr(sb, "    let px = unpack_rgba(pixels[idx]);\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    // Generate independent Gaussian noise per channel via Box-Muller.\n");
+    str_builder_add_cstr(sb, "    // First pair: u1/u2 -> g1 (R), g2 (G)\n");
+    str_builder_add_cstr(sb, "    let u1 = max(rand_uniform(idx * 4u + params.seed), 0.0001);\n");
+    str_builder_add_cstr(sb, "    let u2 = rand_uniform(idx * 4u + params.seed + 1u);\n");
+    str_builder_add_cstr(sb, "    let mag1 = sqrt(-2.0 * log(u1)) * params.strength;\n");
+    str_builder_add_cstr(sb, "    let angle1 = 6.283185307 * u2;\n");
+    str_builder_add_cstr(sb, "    let g1 = mag1 * cos(angle1);\n");
+    str_builder_add_cstr(sb, "    let g2 = mag1 * sin(angle1);\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    // Second pair: u3/u4 -> g3 (B)\n");
+    str_builder_add_cstr(sb, "    let u3 = max(rand_uniform(idx * 4u + params.seed + 2u), 0.0001);\n");
+    str_builder_add_cstr(sb, "    let u4 = rand_uniform(idx * 4u + params.seed + 3u);\n");
+    str_builder_add_cstr(sb, "    let mag2 = sqrt(-2.0 * log(u3)) * params.strength;\n");
+    str_builder_add_cstr(sb, "    let g3 = mag2 * cos(6.283185307 * u4);\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    // Apply independent noise per channel\n");
+    str_builder_add_cstr(sb, "    let r = clamp(px.r + g1, 0.0, 1.0);\n");
+    str_builder_add_cstr(sb, "    let g = clamp(px.g + g2, 0.0, 1.0);\n");
+    str_builder_add_cstr(sb, "    let b = clamp(px.b + g3, 0.0, 1.0);\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    pixels[idx] = pack_rgba(vec4<f32>(r, g, b, px.a));\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "\n");
+    return str_builder_build(sb);
+}
+
+#must_use
+fn _gs_dissolve(): Str {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(0) var<storage, read> src: array<u32>;\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(1) var<storage, read_write> dst: array<u32>;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "struct Params {\n");
+    str_builder_add_cstr(sb, "    count: u32,\n");
+    str_builder_add_cstr(sb, "    factor: f32,\n");
+    str_builder_add_cstr(sb, "    _pad1: u32,\n");
+    str_builder_add_cstr(sb, "    _pad2: u32,\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(2) var<uniform> params: Params;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@compute @workgroup_size(256)\n");
+    str_builder_add_cstr(sb, "fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
+    str_builder_add_cstr(sb, "    let idx = gid.x;\n");
+    str_builder_add_cstr(sb, "    if idx >= params.count { return; }\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    let s = unpack_rgba(src[idx]);\n");
+    str_builder_add_cstr(sb, "    let d = unpack_rgba(dst[idx]);\n");
+    str_builder_add_cstr(sb, "    let f = params.factor;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    dst[idx] = pack_rgba(mix(s, d, vec4<f32>(f, f, f, f)));\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "\n");
+    return str_builder_build(sb);
+}
+
+#must_use
+fn _gs_fade(): Str {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(0) var<storage, read_write> pixels: array<u32>;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "struct Params {\n");
+    str_builder_add_cstr(sb, "    count: u32,\n");
+    str_builder_add_cstr(sb, "    factor: f32,\n");
+    str_builder_add_cstr(sb, "    _pad1: u32,\n");
+    str_builder_add_cstr(sb, "    _pad2: u32,\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(1) var<uniform> params: Params;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@compute @workgroup_size(256)\n");
+    str_builder_add_cstr(sb, "fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
+    str_builder_add_cstr(sb, "    let idx = gid.x;\n");
+    str_builder_add_cstr(sb, "    if idx >= params.count { return; }\n");
+    str_builder_add_cstr(sb, "    let px = unpack_rgba(pixels[idx]);\n");
+    str_builder_add_cstr(sb, "    let f = params.factor;\n");
+    str_builder_add_cstr(sb, "    pixels[idx] = pack_rgba(vec4<f32>(px.r * f, px.g * f, px.b * f, px.a));\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "\n");
+    return str_builder_build(sb);
+}
+
+#must_use
+fn _gs_wipe(): Str {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(0) var<storage, read> src: array<u32>;\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(1) var<storage, read_write> dst: array<u32>;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "struct Params {\n");
+    str_builder_add_cstr(sb, "    count: u32,\n");
+    str_builder_add_cstr(sb, "    width: u32,\n");
+    str_builder_add_cstr(sb, "    height: u32,\n");
+    str_builder_add_cstr(sb, "    progress: f32,\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(2) var<uniform> params: Params;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@compute @workgroup_size(256)\n");
+    str_builder_add_cstr(sb, "fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
+    str_builder_add_cstr(sb, "    let idx = gid.x;\n");
+    str_builder_add_cstr(sb, "    if idx >= params.count { return; }\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    let x = idx % params.width;\n");
+    str_builder_add_cstr(sb, "    let wipe_x = u32(f32(params.width) * params.progress);\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    if x < wipe_x {\n");
+    str_builder_add_cstr(sb, "        // Keep dst as-is (already in dst buffer)\n");
+    str_builder_add_cstr(sb, "    } else {\n");
+    str_builder_add_cstr(sb, "        dst[idx] = src[idx];\n");
+    str_builder_add_cstr(sb, "    }\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "\n");
+    return str_builder_build(sb);
+}
+
+#must_use
+fn _gs_crop(): Str {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(0) var<storage, read> input: array<u32>;\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(1) var<storage, read_write> output: array<u32>;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "struct Params {\n");
+    str_builder_add_cstr(sb, "    src_width: u32,\n");
+    str_builder_add_cstr(sb, "    dst_width: u32,\n");
+    str_builder_add_cstr(sb, "    dst_height: u32,\n");
+    str_builder_add_cstr(sb, "    src_x: u32,\n");
+    str_builder_add_cstr(sb, "    src_y: u32,\n");
+    str_builder_add_cstr(sb, "    _pad1: u32,\n");
+    str_builder_add_cstr(sb, "    _pad2: u32,\n");
+    str_builder_add_cstr(sb, "    _pad3: u32,\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(2) var<uniform> params: Params;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@compute @workgroup_size(16, 16)\n");
+    str_builder_add_cstr(sb, "fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
+    str_builder_add_cstr(sb, "    let gx = gid.x;\n");
+    str_builder_add_cstr(sb, "    let gy = gid.y;\n");
+    str_builder_add_cstr(sb, "    if gx >= params.dst_width || gy >= params.dst_height { return; }\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    let src_idx = (params.src_y + gy) * params.src_width + (params.src_x + gx);\n");
+    str_builder_add_cstr(sb, "    let dst_idx = gy * params.dst_width + gx;\n");
+    str_builder_add_cstr(sb, "    output[dst_idx] = input[src_idx];\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "\n");
+    return str_builder_build(sb);
+}
+
+#must_use
+fn _gs_resize_bilinear(): Str {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(0) var<storage, read> input: array<u32>;\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(1) var<storage, read_write> output: array<u32>;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "struct Params {\n");
+    str_builder_add_cstr(sb, "    src_width: u32,\n");
+    str_builder_add_cstr(sb, "    src_height: u32,\n");
+    str_builder_add_cstr(sb, "    dst_width: u32,\n");
+    str_builder_add_cstr(sb, "    dst_height: u32,\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(2) var<uniform> params: Params;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@compute @workgroup_size(16, 16)\n");
+    str_builder_add_cstr(sb, "fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
+    str_builder_add_cstr(sb, "    let gx = gid.x;\n");
+    str_builder_add_cstr(sb, "    let gy = gid.y;\n");
+    str_builder_add_cstr(sb, "    if gx >= params.dst_width || gy >= params.dst_height { return; }\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    let sw = f32(params.src_width);\n");
+    str_builder_add_cstr(sb, "    let sh = f32(params.src_height);\n");
+    str_builder_add_cstr(sb, "    let dw = f32(params.dst_width);\n");
+    str_builder_add_cstr(sb, "    let dh = f32(params.dst_height);\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    var sx: f32;\n");
+    str_builder_add_cstr(sb, "    var sy: f32;\n");
+    str_builder_add_cstr(sb, "    if params.dst_width > 1u {\n");
+    str_builder_add_cstr(sb, "        sx = f32(gx) * (sw - 1.0) / (dw - 1.0);\n");
+    str_builder_add_cstr(sb, "    } else {\n");
+    str_builder_add_cstr(sb, "        sx = 0.0;\n");
+    str_builder_add_cstr(sb, "    }\n");
+    str_builder_add_cstr(sb, "    if params.dst_height > 1u {\n");
+    str_builder_add_cstr(sb, "        sy = f32(gy) * (sh - 1.0) / (dh - 1.0);\n");
+    str_builder_add_cstr(sb, "    } else {\n");
+    str_builder_add_cstr(sb, "        sy = 0.0;\n");
+    str_builder_add_cstr(sb, "    }\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    let x0 = u32(floor(sx));\n");
+    str_builder_add_cstr(sb, "    let y0 = u32(floor(sy));\n");
+    str_builder_add_cstr(sb, "    let x1 = min(x0 + 1u, params.src_width - 1u);\n");
+    str_builder_add_cstr(sb, "    let y1 = min(y0 + 1u, params.src_height - 1u);\n");
+    str_builder_add_cstr(sb, "    let fx = sx - floor(sx);\n");
+    str_builder_add_cstr(sb, "    let fy = sy - floor(sy);\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    let c00 = unpack_rgba(input[y0 * params.src_width + x0]);\n");
+    str_builder_add_cstr(sb, "    let c10 = unpack_rgba(input[y0 * params.src_width + x1]);\n");
+    str_builder_add_cstr(sb, "    let c01 = unpack_rgba(input[y1 * params.src_width + x0]);\n");
+    str_builder_add_cstr(sb, "    let c11 = unpack_rgba(input[y1 * params.src_width + x1]);\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    let top = mix(c00, c10, fx);\n");
+    str_builder_add_cstr(sb, "    let bot = mix(c01, c11, fx);\n");
+    str_builder_add_cstr(sb, "    let result = mix(top, bot, fy);\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    output[gy * params.dst_width + gx] = pack_rgba(result);\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "\n");
+    return str_builder_build(sb);
+}
+
+#must_use
+fn _gs_resize_nearest(): Str {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(0) var<storage, read> input: array<u32>;\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(1) var<storage, read_write> output: array<u32>;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "struct Params {\n");
+    str_builder_add_cstr(sb, "    src_width: u32,\n");
+    str_builder_add_cstr(sb, "    src_height: u32,\n");
+    str_builder_add_cstr(sb, "    dst_width: u32,\n");
+    str_builder_add_cstr(sb, "    dst_height: u32,\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(2) var<uniform> params: Params;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@compute @workgroup_size(16, 16)\n");
+    str_builder_add_cstr(sb, "fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
+    str_builder_add_cstr(sb, "    let gx = gid.x;\n");
+    str_builder_add_cstr(sb, "    let gy = gid.y;\n");
+    str_builder_add_cstr(sb, "    if gx >= params.dst_width || gy >= params.dst_height { return; }\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    let sx = min(gx * params.src_width / params.dst_width, params.src_width - 1u");
+    str_builder_add_cstr(sb, ");\n");
+    str_builder_add_cstr(sb, "    let sy = min(gy * params.src_height / params.dst_height, params.src_height -");
+    str_builder_add_cstr(sb, " 1u);\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    output[gy * params.dst_width + gx] = input[sy * params.src_width + sx];\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "\n");
+    return str_builder_build(sb);
+}
+
+#must_use
+fn _gs_flip_horizontal(): Str {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(0) var<storage, read> input: array<u32>;\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(1) var<storage, read_write> output: array<u32>;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "struct Params {\n");
+    str_builder_add_cstr(sb, "    width: u32,\n");
+    str_builder_add_cstr(sb, "    height: u32,\n");
+    str_builder_add_cstr(sb, "    _pad1: u32,\n");
+    str_builder_add_cstr(sb, "    _pad2: u32,\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(2) var<uniform> params: Params;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@compute @workgroup_size(16, 16)\n");
+    str_builder_add_cstr(sb, "fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
+    str_builder_add_cstr(sb, "    let x = gid.x;\n");
+    str_builder_add_cstr(sb, "    let y = gid.y;\n");
+    str_builder_add_cstr(sb, "    if x >= params.width || y >= params.height { return; }\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    let src_idx = y * params.width + x;\n");
+    str_builder_add_cstr(sb, "    let dst_idx = y * params.width + (params.width - 1u - x);\n");
+    str_builder_add_cstr(sb, "    output[dst_idx] = input[src_idx];\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "\n");
+    return str_builder_build(sb);
+}
+
+#must_use
+fn _gs_flip_vertical(): Str {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(0) var<storage, read> input: array<u32>;\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(1) var<storage, read_write> output: array<u32>;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "struct Params {\n");
+    str_builder_add_cstr(sb, "    width: u32,\n");
+    str_builder_add_cstr(sb, "    height: u32,\n");
+    str_builder_add_cstr(sb, "    _pad1: u32,\n");
+    str_builder_add_cstr(sb, "    _pad2: u32,\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "@group(0) @binding(2) var<uniform> params: Params;\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "@compute @workgroup_size(16, 16)\n");
+    str_builder_add_cstr(sb, "fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
+    str_builder_add_cstr(sb, "    let x = gid.x;\n");
+    str_builder_add_cstr(sb, "    let y = gid.y;\n");
+    str_builder_add_cstr(sb, "    if x >= params.width || y >= params.height { return; }\n");
+    str_builder_add_cstr(sb, "\n");
+    str_builder_add_cstr(sb, "    let src_idx = y * params.width + x;\n");
+    str_builder_add_cstr(sb, "    let dst_idx = (params.height - 1u - y) * params.width + x;\n");
+    str_builder_add_cstr(sb, "    output[dst_idx] = input[src_idx];\n");
+    str_builder_add_cstr(sb, "}\n");
+    str_builder_add_cstr(sb, "\n");
+    return str_builder_build(sb);
+}
+
+# Rust's `build_shader`: every body needs unpack_rgba and pack_rgba in scope, so
+# the helpers are prepended rather than repeated in each source.
+#must_use
+fn gpu_shader_build(body: Str): Str {
+    return str_cat(_gs_pack_helpers(), body);
+}
+
 # --- gpu_context.cyr ---
 
 # gpu_context.cyr -- GPU device/queue management over mabda 4.0.9

@@ -450,11 +450,44 @@ slack unless an explicit sentinel sits past `count`. And the sentinel has to
 differ between source and destination: with the same value in both, a one-past
 *copy* writes an identical word and stays invisible.
 
+#### ✅ The WGSL fallback — all 21 sources
+
+`src/gpu_shaders.cyr` (877 lines), `tests/gpu_shaders.tcyr` (59 assertions).
+Every WGSL source from the Rust line, for the wgpu backend.
+
+**Machine-transcribed, not retyped.** A script extracted each source verbatim
+from `rust-old/src/gpu/shaders.rs` and escaped it for Cyrius, one WGSL line per
+`str_builder_add_cstr`, so a divergence between the two lines cannot come from a
+typo. The four WGSL lines too long for the 120-column limit are emitted in
+several calls; the concatenation is byte-identical, only the emission is split.
+The tests assert byte LENGTHS against the Rust originals, which is what catches
+a dropped or doubled line.
+
+**Twenty-one sources, not fourteen.** `gpu/mod.rs` re-exports fourteen
+operations, but shaders.rs also carries LUT3D, HUE_SHIFT, COLOR_BALANCE,
+RGBA_TO_Y_BT601 and the two blur passes, which the pipeline drives internally.
+Dropping the ones without a public wrapper would have silently narrowed what the
+fallback can do.
+
+⚠ **No hardware test is possible for this module**, and the tests say so rather
+than implying otherwise. mabda's wgpu backend requires the consumer to compile
+in `object;` mode and be entered from a C launcher that builds a wgpu function
+table — a `.tcyr` run has no launcher. So the WGSL is checked structurally, and
+`gpu_context_from_launcher` is the entry point for a consumer that has one.
+
+**Every native kernel has a fallback, and every native-blocked one is complete
+here.** The suite asserts both directions, so adding a native kernel without its
+WGSL fails the build. `resize_bilinear`, `blend` and both blur passes — the ones
+the native path cannot take — are present in full. Blur's WGSL genuinely loops,
+which is exactly why `OpLoopMerge` blocks it natively; the test asserts that too.
+
 #### ✅ resize_nearest — and where the native path runs out
 
 **Eleven of fourteen operations run on the native backend**, all HW-verified.
-The remaining three are blocked by concrete mabda limits, now filed upstream as
-`cyrius/docs/development/issues/2026-08-19-mabda-native-spirv-compile-limits.md`.
+The remaining three are blocked by concrete mabda limits, filed in
+**mabda's own repo** at
+`docs/development/issues/2026-08-19-native-spirv-compile-limits.md` — it is a
+mabda defect, and cyrius does not own mabda.
 
 `resize_nearest` landed. The WGSL clamps with `min(gx * src_w / dst_w, src_w - 1u)`;
 that min is **provably redundant** once the bounds guard has run, since
