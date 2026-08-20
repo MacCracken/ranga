@@ -11,7 +11,7 @@ bumps major without resetting the series.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.5.29` (in `cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `6.5.31` (in `cyrius.cyml [package].cyrius`)
 
 ## Source
 
@@ -56,7 +56,7 @@ Cyrius port: **7,639 lines** across 14 modules, bundled to
 | `dist/ranga.cyr` | 7,624 | core, no external deps |
 | `dist/ranga-spectral.cyr` | 7,769 | core + `spectral.cyr` (needs prakash) |
 | `dist/ranga-hwaccel.cyr` | 7,835 | core + `hwaccel.cyr` (needs ai-hwaccel) |
-| `dist/ranga-gpu.cyr` | 11,156 | core + gpu context/buffer (needs mabda 4.0.9) |
+| `dist/ranga-gpu.cyr` | 11,156 | core + gpu context/buffer (needs mabda 4.1.0) |
 
 All four `.deps` sidecars are correct as of the 6.5.29 pin. They were written
 empty for profile bundles through 6.5.27 — filed upstream and fixed there.

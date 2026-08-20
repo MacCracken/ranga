@@ -134,14 +134,7 @@ fn _rg_exp(x) {
 # A negative base is delegated unchanged: Rust's powf is also NaN there for a
 # non-integer exponent, and no ranga call site raises a negative base.
 #must_use
-fn _rg_pow(base, exp) {
-    if (f64_abs(base) == 0) {
-        if (f64_gt(exp, 0) == 1) { return 0; }
-        if (f64_lt(exp, 0) == 1) { return _RG_INF; }
-        return F64_ONE;
-    }
-    return ganita_f64_pow(base, exp);
-}
+fn _rg_pow(base, exp) { return ganita_f64_pow(base, exp); }
 
 # Rust `f64::cbrt`. There is NO f64 cbrt anywhere in the Cyrius tree —
 # `ganita_f32_cbrt` is the only one, and dropping to single precision would cost
@@ -154,30 +147,30 @@ fn _rg_pow(base, exp) {
 # the positives a naive test would use. Same reasoning ganita applies in
 # ganita_f32_cbrt.
 #must_use
-# Single-precision cube root with Rust's zero behaviour.
+# ── Rust-semantics math shims ────────
 #
-# ⚠ `ganita_f32_cbrt(0.0)` returns NaN. It delegates to `ganita_f64_pow`, which
-# is `exp(y * ln x)`, and `ln(0)` is -inf while the Cyrius `exp` builtin returns
-# NaN for -inf. Rust's `f32::cbrt(0.0)` is `0.0`. This bit the Oklab forward
-# path, where linear black gives l = m = s = 0 and the NaN then propagated
-# through the whole M2 matrix — so `oklab(black)` was (NaN, NaN, NaN) where Rust
-# gives (0, 0, 0). Black is the most common pixel value there is.
+# ⚠ ALL THREE ARE NOW THIN DELEGATIONS. ganita 1.1.4 — folded into cyrius 6.5.30,
+# which this project's 6.5.31 pin carries — fixed both defects these existed to
+# work around: `ganita_f32_cbrt(0.0)` returned NaN (it is `exp(y·ln x)`
+# underneath, and `ln 0` is -inf), and `ganita_f64_pow` had no zero-base or
+# negative-base handling at all.
 #
-# Only the zero case is intercepted: every other input keeps the f32 tier
-# exactly, rather than being widened to f64 and narrowed back, which would shift
-# results across the entire colour surface to fix one input. Returning `x`
-# rather than a literal zero preserves the sign, matching `cbrt(-0.0) == -0.0`.
-# ⚠ NO `: f32` ANNOTATION, and the test is on the RAW BIT PATTERN. An annotated
-# parameter makes the body do f32 arithmetic, which broke the widening in the
-# first attempt and returned 0 for every input. An f32 zero is exactly
-# 0x00000000 or 0x80000000, so an integer compare is both exact and free — no
-# float op, no rounding, no NaN subtlety.
+# 1.1.4 goes FURTHER than these shims did: it also returns a real value for a
+# negative base with an integral exponent, where the old path gave NaN. That is
+# Rust's `powf` behaviour, so the delegation moves ranga CLOSER to parity, not
+# away from it.
+#
+# The wrappers are kept rather than inlined at their 16 call sites: the names
+# document which calls are parity-sensitive, and a future ganita regression has
+# one place to be re-patched instead of sixteen.
+#
+# ⚠ STILL NOT EXACT FOR INTEGRAL EXPONENTS. `ganita_f64_pow(2, 3)` is
+# 7.999999…, not 8, because the general path is `exp(y·ln x)`. Rust's `powf` is
+# exact there. ranga tolerates it because every exponent it passes is
+# non-integral (ICC gamma, the sRGB transfer), but a caller wanting exact
+# integral powers should not use these.
 #must_use
-fn _rg_f32_cbrt(x) {
-    if (x == 0) { return x; }
-    if (x == 0x80000000) { return x; }
-    return ganita_f32_cbrt(x);
-}
+fn _rg_f32_cbrt(x) { return ganita_f32_cbrt(x); }
 
 fn _rg_cbrt(x) {
     var third = f64_div(F64_ONE, f64_from(3));
@@ -186,6 +179,11 @@ fn _rg_cbrt(x) {
     }
     return _rg_pow(x, third);
 }
+
+# NOTE the sign split above is still ranga's, not ganita's: 1.1.4's pow rejects
+# a negative base with a NON-integral exponent (1/3 is non-integral), returning
+# NaN exactly as Rust's powf does. Rust's `f64::cbrt` however is defined for
+# negatives, so the split is what makes cbrt(-8) = -2 rather than NaN.
 
 # Sine/cosine with an explicit domain guard. The x86 `fsin`/`fcos` instructions
 # are undefined for |x| >= 2^63 and return the ARGUMENT UNCHANGED there, so

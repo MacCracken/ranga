@@ -65,15 +65,23 @@ maps it item by item.
 
 ### Toolchain
 
-- **Cyrius pin 6.5.29** (was 6.5.27). Two defects this port filed were fixed in
+- **Cyrius pin 6.5.31** (was 6.5.27), **mabda 4.1.0** (was 4.0.9 — aligns with
+  the toolchain's own fold and clears a shadow warning).
+- **ganita 1.1.4** (folded into cyrius 6.5.30) closes internalized-shim item 1.
+  It fixed `ganita_f32_cbrt(0.0)` returning NaN and gave `ganita_f64_pow`
+  zero-base, zero-exponent and negative-base handling. `_rg_pow`, `_rg_cbrt` and
+  `_rg_f32_cbrt` are now thin delegations. 1.1.4 goes further than the shims
+  did — a negative base with an integral exponent now returns a real value, as
+  Rust's `powf` does, where the old path gave NaN. Two defects this port filed were fixed in
   between: decimal float literals past ~9 significant digits parsing to a
   silently wrong value (6.5.28), and `distlib` profile `.deps` sidecars written
   empty (6.5.29). ranga keeps its hex bit patterns for the Oklab matrices —
   they are correct and pinned by the white-point assertions, and rewriting
   eighteen verified constants would be churn with a real chance of introducing
   the very error class the hex was adopted to avoid.
-- **`#derive(Serialize)` on an enum still emits nothing**, re-tested at the
-  6.5.29 pin. The four enum codecs stay hand-written.
+- **`#derive(Serialize)` on an enum now generates a codec** as of 6.5.31 — it
+  emitted nothing through 6.5.30. ranga has no serde at all, so wiring it up is
+  available parity work rather than a change to existing code.
 
 ### Fixed — found by the final parity sweep
 

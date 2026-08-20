@@ -14,7 +14,7 @@ description = "ranga — core image processing: colour spaces, blend modes, pixe
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/ranga"
 language = "cyrius"
-cyrius = "6.5.29"
+cyrius = "6.5.31"
 
 [build]
 entry = "src/main.cyr"
@@ -161,6 +161,6 @@ optional = true
 
 [deps.mabda]
 git = "https://github.com/MacCracken/mabda.git"
-tag = "4.0.9"
+tag = "4.1.0"
 modules = ["dist/mabda.cyr"]
 optional = true
