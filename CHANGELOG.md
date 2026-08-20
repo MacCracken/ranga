@@ -95,9 +95,18 @@ maps it item by item.
 - **An ICC LUT profile with `grid_size == 0` read below its allocation.** Now
   rejected — a deliberate divergence from Rust, which underflows there.
 
-Known remaining divergences — chiefly f32-vs-f64 width in the scalar tails, and
-NaN handling where the port is NaN-correct and Rust's casts saturate — are
-enumerated in `docs/development/parity-rust-v-cyrius.md`.
+- **blend's `f32 → u8` tail computed in f64** where Rust is single-precision
+  throughout, giving 229 against Rust's 230 on a ColorBurn near a rounding
+  boundary. Now matches exactly.
+
+### Intentional divergence
+
+- **The YUV→RGB inverse does not reproduce Rust's `i16` wrap.** Rust's inverse
+  overflows on saturated chroma — measured against the real crate, red
+  round-trips to **black**. Reproducing that would mean deliberately
+  re-introducing an overflow. See
+  [ADR 001](docs/adr/001-yuv-inverse-does-not-reproduce-rusts-i16-wrap.md).
+  Anything pinning golden YUV images will need regenerating.
 
 ### Testing
 

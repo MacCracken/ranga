@@ -389,7 +389,11 @@ pixel_buffer_free(at2);
 
 var singt = affine_new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
 assert_eq(affine_transform(src4, singt, 4, 4, SF_NEAREST, err), 0, "a singular affine is rejected");
-assert_eq(load64(err), RG_ERR_INVALID_PARAMETER, "singular affine is INVALID_PARAMETER");
+# ⚠ OTHER, not INVALID_PARAMETER. Rust maps a singular matrix to
+# RangaError::Other, and error.cyr's own table says Other -> RG_ERR_OTHER. The
+# matrix is a valid parameter; it is the inversion that has no answer. The port
+# reported INVALID_PARAMETER, contradicting its own mapping.
+assert_eq(load64(err), RG_ERR_OTHER, "a singular affine is Other, as in Rust");
 affine_free(singt); affine_free(tr1); affine_free(idt);
 
 # ================================================================
@@ -540,7 +544,7 @@ perspective_free(pdeg);
 
 var psing2 = perspective_new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
 assert_eq(perspective_transform(src4, psing2, 4, 4, SF_NEAREST, err), 0, "a singular perspective is rejected");
-assert_eq(load64(err), RG_ERR_INVALID_PARAMETER, "singular perspective is INVALID_PARAMETER");
+assert_eq(load64(err), RG_ERR_OTHER, "and so is a singular perspective");
 perspective_free(psing2);
 
 assert_eq(perspective_transform(argb, pt_id, 2, 2, SF_NEAREST, err), 0, "perspective rejects non-Rgba8");

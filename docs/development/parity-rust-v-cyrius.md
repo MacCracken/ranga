@@ -177,34 +177,41 @@ refute it by running both sides.
 milestones because the one Rust test that would have caught it was not ported,
 and every existing lut3d test used entries that did not land on a .5 boundary.
 
-### Known divergences, documented rather than fixed
+### Known divergences — MEASURED, not reasoned about
 
-These are real and confirmed by running both sides. They are recorded here
-because fixing them is a broad, uniform sweep rather than a point fix, and
-because the direction is toward MORE precision, not less:
+⚠ **An earlier draft of this section listed seven divergences as "real and
+confirmed by running both sides." Five of them were false.** They came from an
+agent sweep whose findings I recorded without re-measuring. Every claim below
+has now been checked by building the actual Rust crate at `rust-old/` with
+`cargo --release` and diffing its output against the port under cyrius 6.5.31.
 
-- **f32 vs f64 width in the scalar tails.** Rust computes `linear_to_srgb`,
-  `cmyk_to_srgba`, `levels`, `bilateral`, `rgbaf32_to_rgba8` and blend's
-  `f32 → u8` conversion entirely in f32; the port widens to f64 and narrows
-  once at the end. That is more accurate, and it differs by ±1 count at
-  rounding boundaries — e.g. `linear_to_srgb` gives 242 where Rust gives 243 on
-  five measured inputs.
-- **YUV→RGB inverse does not wrap at i16.** Rust's chroma path is i16
-  throughout and wraps; the port computes wider. Saturated colours decode
-  differently. The port's answer is the arithmetically correct one.
-- **NaN handling.** Rust's `as u8` cast saturates NaN to 0 and its `f32::max`
-  discards a NaN operand; the port's comparison-based guards are NaN-correct
-  and therefore propagate rather than swallow. Affects `linear_to_srgb`,
-  `levels` with a NaN white point, and `brightness` with a NaN offset.
-- **`f64_round` is round-half-to-even** where Rust's `.round()` is
-  half-away-from-zero. Latent in `_icc_write_s15fixed16`; reachable only for
-  values exactly on a .5 boundary at 2^-17.
-- **`affine_inverse` reassociates the translation term**, giving a 1-ULP
-  difference that can change the nearest-sampled source pixel on grid-aligned
-  transforms.
-- **Singular-matrix transforms report `RG_ERR_INVALID_PARAMETER`** where Rust
-  reports `Other`, contradicting the port's own mapping table.
-- **`pixel_format_checked_buffer_size` bounds the pixel count against a single
-  format-independent constant** (`floor(i64::MAX/16)`) rather than bounding the
-  final byte count per format, so it rejects some dimension pairs Rust accepts.
-  Reachable only above ~759 million pixels per side.
+**Did not reproduce — the port is byte-identical to Rust:**
+
+| claimed divergence | measurement |
+| --- | --- |
+| `linear_to_srgb` f64 vs f32 | **14,013 inputs**, including boundaries, negatives and out-of-range — 0 differ |
+| `rgbaf32_to_rgba8` rounding | identical on every sample |
+| `cmyk_to_srgba` / `srgba_to_cmyk` | identical, forward and round-trip |
+| `levels` gamma/scale width | byte-identical across an 8-pixel ramp |
+| `affine_inverse` reassociation | 4 transforms including rotation and sub-pixel translation — identical |
+
+**Reproduced and FIXED:**
+
+- **blend's `f32 → u8` tail computed in f64.** Rust's
+  `(result * 255.0 + 0.5).clamp(…) as u8` is single-precision throughout;
+  widening first is more accurate and therefore wrong. ColorBurn on
+  `src(10,200,30) / dst(254,3,180)` gave 229 against Rust's 230. The tail now
+  carries `: f32` annotations and matches exactly.
+
+**Reproduced and ACCEPTED as a divergence — see
+[ADR 001](../adr/001-yuv-inverse-does-not-reproduce-rusts-i16-wrap.md):**
+
+- **The YUV→RGB inverse does not wrap at i16.** Rust's does, and saturated red
+  round-trips to **black**. That is an overflow, not a colour decision.
+  Reproducing it would mean deliberately re-introducing the bug.
+
+**Not yet measured** — recorded as unverified rather than asserted: NaN
+handling in `linear_to_srgb` / `levels` / `brightness`, `f64_round` being
+round-half-to-even in `_icc_write_s15fixed16`, and
+`pixel_format_checked_buffer_size`'s format-independent overflow guard (reachable
+only above ~759 million pixels per side).

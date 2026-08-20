@@ -456,8 +456,12 @@ fn affine_transform(buf, m, out_w, out_h, filter, err_out) {
         store64(err_out, RG_ERR_INVALID_PARAMETER);
         return 0;
     }
+    # RG_ERR_OTHER, not INVALID_PARAMETER: Rust maps a singular matrix to
+    # RangaError::Other("singular affine transform cannot be inverted"), and
+    # error.cyr's mapping table says Other -> RG_ERR_OTHER. The matrix is a
+    # valid parameter — it is the inversion that has no answer.
     var inv = affine_inverse(m);
-    if (inv == 0) { store64(err_out, RG_ERR_INVALID_PARAMETER); return 0; }
+    if (inv == 0) { store64(err_out, RG_ERR_OTHER); return 0; }
 
     var sw = pixel_buffer_width(buf);
     var sh = pixel_buffer_height(buf);
@@ -780,8 +784,10 @@ fn perspective_transform(buf, p, out_w, out_h, filter, err_out) {
         store64(err_out, RG_ERR_INVALID_PARAMETER);
         return 0;
     }
+    # Same as the affine case: Rust's "singular perspective transform" is an
+    # Other, not an invalid parameter.
     var inv = perspective_inverse(p);
-    if (inv == 0) { store64(err_out, RG_ERR_INVALID_PARAMETER); return 0; }
+    if (inv == 0) { store64(err_out, RG_ERR_OTHER); return 0; }
 
     var sw = pixel_buffer_width(buf);
     var sh = pixel_buffer_height(buf);

@@ -32,6 +32,35 @@ fn px4(b, i, r, g, bl, a) {
 # ================================================================
 test_group("luma kernels");
 
+# ⚠ INTENTIONAL DIVERGENCE FROM RUST — see docs/adr/001. Rust's YUV inverse is
+# i16 throughout and OVERFLOWS on saturated chroma: measured against the real
+# crate, red round-trips to (0,0,0) and blue to (0,0,0). That is an overflow,
+# not colour science. The port computes wider and clamps, so red stays red.
+# This test pins the divergence deliberately — if it ever starts matching Rust,
+# the overflow has been reintroduced.
+var _yv = pixel_buffer_zeroed(4, 2, PF_RGBA8, err);
+var _yp = pixel_buffer_data(_yv);
+store32(_yp +  0, 0xFF0000FF);
+store32(_yp +  4, 0xFF00FF00);
+store32(_yp +  8, 0xFFFF0000);
+store32(_yp + 12, 0xFF00FFFF);
+store32(_yp + 16, 0xFFFFFF00);
+store32(_yp + 20, 0xFFFF00FF);
+store32(_yp + 24, 0xFFFFFFFF);
+store32(_yp + 28, 0xFF000000);
+var _yy = rgba_to_yuv420p(_yv, err);
+assert_eq(load64(err), RG_ERR_NONE, "saturated pixels encode to YUV420p");
+var _yb = yuv420p_to_rgba(_yy, err);
+assert_eq(load64(err), RG_ERR_NONE, "and decode back");
+var _ybp = pixel_buffer_data(_yb);
+assert_eq(load8(_ybp), 254, "saturated red survives the round trip (Rust gives 0 here)");
+assert_eq(load8(_ybp + 1), 0, "with green still zero");
+assert_eq(load8(_ybp + 10), 253, "and saturated blue survives (Rust also gives 0)");
+assert_eq(load8(_ybp + 8), 0, "with red still zero");
+pixel_buffer_free(_yb);
+pixel_buffer_free(_yy);
+pixel_buffer_free(_yv);
+
 var yrow = fl_alloc(4);
 var src4 = fl_alloc(16);
 fn set1(p, r, g, b) { store8(p, r); store8(p + 1, g); store8(p + 2, b); store8(p + 3, 255); return 0; }

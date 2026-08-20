@@ -63,6 +63,28 @@ assert_eq(_bl_f32_to_u8(f32_from(f64_div(0.5, 255.0))), 1, "round-half-up gives 
 # ================================================================
 test_group("blend mode");
 
+# ⚠ THE u8 TAIL IS SINGLE PRECISION. Rust's
+# `(result * 255.0 + 0.5).clamp(0.0, 255.0) as u8` is f32 throughout; computing
+# it in f64 first is MORE accurate and therefore wrong. Measured against the
+# real crate built with cargo --release: ColorBurn on these operands gave 229
+# in the port against Rust's 230. Every other mode agreed, so only a case that
+# lands near a rounding boundary can see it.
+var _bt_s = fl_alloc(4);
+var _bt_d = fl_alloc(4);
+var _bt_o = fl_alloc(4);
+store8(_bt_s, 10); store8(_bt_s + 1, 200); store8(_bt_s + 2, 30); store8(_bt_s + 3, 255);
+store8(_bt_d, 254); store8(_bt_d + 1, 3); store8(_bt_d + 2, 180); store8(_bt_d + 3, 255);
+blend_pixel(_bt_s, _bt_d, BM_COLOR_BURN, 255, _bt_o);
+assert_eq(load8(_bt_o), 230, "ColorBurn red matches Rust exactly (230, not 229)");
+assert_eq(load8(_bt_o + 1), 0, "ColorBurn green");
+assert_eq(load8(_bt_o + 2), 0, "ColorBurn blue");
+blend_pixel(_bt_s, _bt_d, BM_MULTIPLY, 255, _bt_o);
+assert_eq(load8(_bt_o), 10, "Multiply on the same operands still agrees");
+blend_pixel(_bt_s, _bt_d, BM_SOFT_LIGHT, 255, _bt_o);
+assert_eq(load8(_bt_o), 253, "and SoftLight");
+blend_pixel(_bt_s, _bt_d, BM_OVERLAY, 255, _bt_o);
+assert_eq(load8(_bt_o), 253, "and Overlay");
+
 # ⚠ DISCRIMINANTS ARE THE RUST DECLARATION ORDER, and this pins it.
 # ColorSpace drifted exactly here — two variants were dropped and two ranga
 # additions took their numbers, so a value persisted by ranga 1.0.1 read back as

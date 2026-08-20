@@ -88,14 +88,26 @@ fn _bl_u8_to_f32(n) { return f32_from(f64_div(f64_from(n & 255), 255.0)); }
 # `(result * 255.0 + 0.5).clamp(0.0, 255.0) as u8` — round-half-up then
 # truncate. NaN saturates to 0, matching Rust's `as u8`; ganita_f32_clamp would
 # give the HIGH bound instead.
+# ⚠ THE SCALE AND ROUND HAPPEN IN f32, NOT f64. Rust's line is
+# `(result * 255.0 + 0.5).clamp(0.0, 255.0) as u8` where `result` is f32 and
+# every literal infers f32, so all three operations round to single precision.
+# Widening to f64 first is MORE accurate and therefore wrong here: measured
+# against the real crate, ColorBurn(src 10,200,30 / dst 254,3,180) gave 229 in
+# the port against Rust's 230. The `: f32` annotations are what make the
+# operators single-precision — an unannotated local silently emits integer ops.
 #must_use
 fn _bl_f32_to_u8(v) {
-    var d = f32_to(v);
-    if (f64_eq(d, d) == 0) { return 0; }
-    var scaled = f64_add(f64_mul(d, 255.0), 0.5);
-    if (f64_lt(scaled, 0) == 1) { return 0; }
-    if (f64_gt(scaled, 255.0) == 1) { return 255; }
-    return f64_to(scaled);
+    if (f64_eq(f32_to(v), f32_to(v)) == 0) { return 0; }
+    return _bl_scale_round(v);
+}
+
+#must_use
+fn _bl_scale_round(v: f32) {
+    var scaled: f32 = v * f32_from(255.0) + f32_from(0.5);
+    var d = f32_to(scaled);
+    if (f64_lt(d, 0) == 1) { return 0; }
+    if (f64_gt(d, 255.0) == 1) { return 255; }
+    return f64_to(d);
 }
 
 # ── the 12 blend functions ────────
