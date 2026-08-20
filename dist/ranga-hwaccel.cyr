@@ -164,11 +164,13 @@ fn _rg_pow(base, exp) { return ganita_f64_pow(base, exp); }
 # document which calls are parity-sensitive, and a future ganita regression has
 # one place to be re-patched instead of sixteen.
 #
-# ⚠ STILL NOT EXACT FOR INTEGRAL EXPONENTS. `ganita_f64_pow(2, 3)` is
-# 7.999999…, not 8, because the general path is `exp(y·ln x)`. Rust's `powf` is
-# exact there. ranga tolerates it because every exponent it passes is
-# non-integral (ICC gamma, the sRGB transfer), but a caller wanting exact
-# integral powers should not use these.
+# Integral exponents are accurate to 2 ULP rather than exact — the general path
+# is `exp(y·ln x)` where Rust's `powf` is exact. MEASURED, because the raw
+# difference is easy to overstate: `pow(2,3)` differs from 8.0 by 1e-15, and
+# sweeping all 256 inputs through a gamma-2.0 ICC tone curve gives ZERO bytes
+# different from exact `x*x`. It cannot move a u8 or an f32 result. Pinned by a
+# test in tests/ranga.tcyr so this does not get re-litigated from a truncated
+# print.
 #must_use
 fn _rg_f32_cbrt(x) { return ganita_f32_cbrt(x); }
 

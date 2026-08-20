@@ -79,6 +79,34 @@ assert_eq(seen_dup, 0, "no two error codes share a message");
 
 test_group("rust-semantics shims");
 
+# ganita 1.1.4 (cyrius 6.5.30) closed internalized-shim item 1: zero base, zero
+# exponent, negative base, and cbrt(±0) are all handled upstream now, so these
+# are thin delegations.
+assert_eq(_rg_pow(0, f64_from(2)), 0, "pow(0, 2) is 0");
+assert_eq(_rg_pow(f64_from(2), 0), F64_ONE, "pow(2, 0) is 1");
+assert_eq(_rg_pow(0, 0), F64_ONE, "pow(0, 0) is 1, as Rust's powf gives");
+assert_eq(_rg_f32_cbrt(f32_from(0)), 0, "cbrt(+0) is +0, not NaN");
+assert_eq(_rg_f32_cbrt(0x80000000), 0x80000000, "cbrt(-0) keeps its sign");
+
+# ⚠ INTEGRAL EXPONENTS ARE 2 ULP, NOT BROKEN. The general path is exp(y·ln x),
+# so pow(2,3) is not bit-identical to 8.0 — it differs by 1e-15. Printing that
+# through a truncating conversion makes it look like "7.999999", which is how it
+# got written up as a defect once. What matters is whether it can move a byte,
+# and it cannot: every one of the 256 inputs to a gamma-2.0 tone curve rounds to
+# the same u8 as exact x*x.
+assert_eq(f64_to(f64_mul(f64_abs(f64_sub(_rg_pow(f64_from(2), f64_from(3)), f64_from(8))), 1000000000000000.0)), 1,
+          "pow(2,3) is within 1e-15 of exact");
+var _pw_diff = 0;
+var _pw_i = 0;
+while (_pw_i < 256) {
+    var _pw_x = f64_div(f64_from(_pw_i), 255.0);
+    var _pw_a = f64_to(f64_add(f64_mul(_rg_pow(_pw_x, f64_from(2)), 255.0), 0.5));
+    var _pw_b = f64_to(f64_add(f64_mul(f64_mul(_pw_x, _pw_x), 255.0), 0.5));
+    if (_pw_a != _pw_b) { _pw_diff = _pw_diff + 1; }
+    _pw_i = _pw_i + 1;
+}
+assert_eq(_pw_diff, 0, "and zero of 256 gamma-2.0 bytes differ from exact x*x");
+
 # --- _rg_pow: zero base ---
 # Rust: 0.0f64.powf(2.0) == 0.0 | bare ganita_f64_pow: NaN (exp(2*ln 0) = exp(-inf))
 # Reached by ordinary image data: a fully black channel raised to a gamma.

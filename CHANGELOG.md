@@ -72,7 +72,9 @@ maps it item by item.
   zero-base, zero-exponent and negative-base handling. `_rg_pow`, `_rg_cbrt` and
   `_rg_f32_cbrt` are now thin delegations. 1.1.4 goes further than the shims
   did — a negative base with an integral exponent now returns a real value, as
-  Rust's `powf` does, where the old path gave NaN. Two defects this port filed were fixed in
+  Rust's `powf` does, where the old path gave NaN. Integral exponents land
+  within 2 ULP of exact rather than bit-exact; measured across a full gamma-2.0
+  tone-curve sweep, zero of 256 bytes differ. Two defects this port filed were fixed in
   between: decimal float literals past ~9 significant digits parsing to a
   silently wrong value (6.5.28), and `distlib` profile `.deps` sidecars written
   empty (6.5.29). ranga keeps its hex bit patterns for the Oklab matrices —
