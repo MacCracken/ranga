@@ -940,9 +940,19 @@ fn _div_ceil2(n) {
 #
 # The overflow guard is not decorative: `Rgba8.checked_buffer_size(u32::MAX,
 # u32::MAX)` is None in Rust, and before 1.0.0 the unchecked version silently
-# wrapped. i64 is wide enough that u32*u32*16 cannot overflow it, so the guard
-# here is a range check against the same limit rather than a carry check.
-var _RG_SIZE_MAX = 0x7FFFFFFFFFFFFFF;
+# wrapped.
+#
+# ⚠ i64 is NOT wide enough to hold u32*u32 — (2^32-1)^2 is 1.8e19 against
+# i64::MAX 9.2e18, so it overflows before any bytes-per-pixel multiply. An
+# earlier comment here claimed the opposite and used it to justify one
+# format-independent limit; the guard below is per-format because the
+# multiplier is.
+#
+# The residual, unavoidable divergence: the port's ceiling is i64::MAX/bpp where
+# Rust's is usize::MAX/bpp, so on a 64-bit target the port still rejects the top
+# factor of two of each format's range. Unreachable in practice — no allocator
+# serves 4.6 exabytes.
+var _RG_SIZE_MAX_BYTES = 0x7FFFFFFFFFFFFFFF;
 
 #must_use
 fn pixel_format_checked_buffer_size(f, width, height) {
@@ -950,10 +960,24 @@ fn pixel_format_checked_buffer_size(f, width, height) {
     if (height < 0) { return RG_ERR_INVALID_PARAMETER; }
     if (pixel_format_is_valid(f) == 0) { return RG_ERR_INVALID_FORMAT; }
 
+    # ⚠ THE BOUND IS PER FORMAT, because the multiplier is. Rust bounds the
+    # FINAL byte count — `w.checked_mul(h)?.checked_mul(4)` for Rgba8, `*3` for
+    # Rgb8, and so on. An earlier version here bounded the PIXEL count against a
+    # single constant equal to floor(i64::MAX / 16) — the divisor only RgbaF32
+    # needs — and so rejected dimension pairs Rust accepts. Measured against the
+    # real crate: 1e9 x 1e9 Rgba8 is Some(4000000000000000000) in Rust and was
+    # RG_ERR_ALLOCATION here.
     var w = width;
     var h = height;
+    var bpp = 4;
+    if (f == PF_RGB8) { bpp = 3; }
+    if (f == PF_RGBAF32) { bpp = 16; }
+    # Yuv420p and Nv12 are 1 byte of luma per pixel plus two half-res chroma
+    # planes; bounding at 2 covers the worst case for odd dimensions.
+    if (f == PF_YUV420P) { bpp = 2; }
+    if (f == PF_NV12) { bpp = 2; }
     if (w != 0) {
-        if (h > _RG_SIZE_MAX / w) { return RG_ERR_ALLOCATION; }
+        if (h > (_RG_SIZE_MAX_BYTES / bpp) / w) { return RG_ERR_ALLOCATION; }
     }
     var px = w * h;
 
@@ -1548,6 +1572,16 @@ fn srgb_to_linear(c) {
 #must_use
 fn linear_to_srgb(c) {
     var v = f32_to(c);
+    # ⚠ NON-FINITE INPUT IS HANDLED UP FRONT, because the transfer function
+    # cannot carry it. Rust's is total: `powf(+inf, 1/2.4)` is `+inf`, so the
+    # scale-and-clamp saturates to 255, and `-inf * 12.92` saturates to 0.
+    # Cyrius's `f64_exp(+inf)` returns NaN rather than +inf — the same builtin
+    # quirk as `exp(-inf)`, which ganita 1.1.4 works around inside pow's
+    # zero-base branch but not for infinity — so the power path turns +inf into
+    # NaN and the whole thing collapsed to 0. Measured against the real crate:
+    # Rust gives 255 here.
+    if (f64_eq(v, v) == 0) { return 0; }
+    if (f64_gt(v, 1000000.0) == 1) { return 255; }
     var s = 0;
     if (f64_le(v, 0.0031308) == 1) {
         s = f64_mul(v, 12.92);
@@ -1557,8 +1591,18 @@ fn linear_to_srgb(c) {
         s = f64_sub(f64_mul(1.055, _rg_pow(v, third)), 0.055);
     }
     var scaled = f64_add(f64_mul(s, 255.0), 0.5);
+    # ⚠ NON-FINITE MUST BE HANDLED FIRST. Rust ends with `.clamp(0.0, 255.0)
+    # as u8`, and a float-to-int `as` cast in Rust SATURATES: NaN gives 0, +inf
+    # gives 255, -inf gives 0. Cyrius's f64_to does not — it returns i64::MIN
+    # for anything it cannot represent. Both comparisons below are false for
+    # NaN, so without this guard the function fell through and returned
+    # -9223372036854775808 from something whose contract is a byte. Measured
+    # against the real crate: NaN and +inf both returned i64::MIN where Rust
+    # gives 0 and 255.
+    if (f64_eq(scaled, scaled) == 0) { return 0; }
     if (f64_lt(scaled, 0) == 1) { return 0; }
     if (f64_gt(scaled, 255.0) == 1) { return 255; }
+    if (f64_ge(scaled, 255.0) == 1) { return 255; }
     return f64_to(scaled);
 }
 
@@ -4436,7 +4480,14 @@ fn brightness(buf, offset) {
     var rc = _fp_validate_rgba8(buf);
     if (rc != RG_ERR_NONE) { return rc; }
     # `(offset * 255.0) as i16` — truncation toward zero, not rounding.
-    var shift = f64_to(f64_mul(f32_to(offset), 255.0));
+    #
+    # ⚠ Rust's float-to-int `as` cast SATURATES, so a NaN offset becomes 0 and
+    # brightness is a complete no-op. Cyrius's f64_to returns i64::MIN instead,
+    # which the port then applied as a shift and blackened the image. Measured
+    # against the real crate: Rust leaves the buffer untouched.
+    var od = f32_to(offset);
+    if (f64_eq(od, od) == 0) { return RG_ERR_NONE; }
+    var shift = f64_to(f64_mul(od, 255.0));
     var p = pixel_buffer_data(buf);
     var n = pixel_buffer_pixel_count(buf);
 
@@ -4550,16 +4601,29 @@ fn saturation(buf, factor) {
 fn levels(buf, black, white, gamma) {
     var rc = _fp_validate_rgba8(buf);
     if (rc != RG_ERR_NONE) { return rc; }
+    # ⚠ NO NaN REJECTION, and the code is OTHER. Rust guards only
+    # `if gamma <= 0.0 { Err(RangaError::Other(...)) }` — a NaN gamma is not
+    # <= 0, so Rust PROCEEDS and the NaN carries through to a black image. The
+    # port used to reject NaN with INVALID_PARAMETER, and to report a
+    # non-positive gamma with INVALID_PARAMETER where error.cyr's own table maps
+    # Other -> RG_ERR_OTHER. Measured against the real crate.
     var gd = f32_to(gamma);
-    if (f64_eq(gd, gd) == 0) { return RG_ERR_INVALID_PARAMETER; }
-    if (f64_le(gd, 0) == 1) { return RG_ERR_INVALID_PARAMETER; }
+    if (f64_le(gd, 0) == 1) { return RG_ERR_OTHER; }
 
     var bl: f32 = black;
     # `(white - black).max(1e-6)` — the floor stops a zero-width window from
     # dividing by zero, and it is applied to the RANGE, not to white.
+    #
+    # ⚠ `f32::max` DISCARDS a NaN operand and returns the other one, so a NaN
+    # white point gives range = 1e-6 in Rust and the image WHITENS. A bare
+    # comparison is false for NaN, which let the NaN survive and blackened the
+    # image instead — the opposite result. The self-inequality test restores
+    # Rust's max semantics.
     var wh: f32 = white;
     var rng: f32 = wh - bl;
     var floor6: f32 = f32_from(0.000001);
+    var rngd = f32_to(rng);
+    if (f64_eq(rngd, rngd) == 0) { rng = floor6; }
     if (f64_lt(f32_to(rng), 0.000001) == 1) { rng = floor6; }
     var invg: f64 = f64_div(F64_ONE, gd);
 
@@ -7302,6 +7366,17 @@ fn _icc_load_primary(data, len, tags, count, sig, m, row, err_out) {
     return _icc_parse_xyz_tag(data, len, tags, idx, m + row * 24, err_out);
 }
 
+# Rust's `f64::round`: half-away-from-zero, unlike Cyrius's half-to-even
+# `f64_round`. floor(x + 0.5) for non-negative x, mirrored below zero so that
+# -0.5 goes to -1 rather than 0.
+#must_use
+fn _icc_round_half_away(x) {
+    if (f64_lt(x, 0) == 1) {
+        return f64_neg(f64_floor(f64_add(f64_neg(x), 0.5)));
+    }
+    return f64_floor(f64_add(x, 0.5));
+}
+
 #must_use
 fn _icc_load_trc(data, len, tags, count, sig, err_out) {
     var idx = _icc_find_tag(tags, count, sig);
@@ -7347,8 +7422,15 @@ fn _icc_write_u16_be(buf, off, v) {
 
 fn _icc_write_s15fixed16(buf, off, v) {
     # Rust's `(v * 65536.0).round() as i32`, then to_be_bytes.
+    #
+    # ⚠ NOT `f64_round`. Rust's `.round()` is HALF-AWAY-FROM-ZERO; Cyrius's
+    # `f64_round` is half-to-EVEN. They agree everywhere except an exact .5,
+    # and there they differ in both directions — measured against the real
+    # crate, 0.5 gives 1 in Rust and 0 here, 2.5 gives 3 against 2, -0.5 gives
+    # -1 against 0. An s15Fixed16 input lands on a .5 exactly when the value is
+    # an odd multiple of 2^-17, which the ICC matrices do hit.
     var scaled = f64_mul(v, 65536.0);
-    var i = f64_to(f64_round(scaled));
+    var i = f64_to(_icc_round_half_away(scaled));
     _icc_write_u32_be(buf, off, i & 0xFFFFFFFF);
     return RG_ERR_NONE;
 }

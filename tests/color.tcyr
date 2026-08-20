@@ -18,6 +18,20 @@ fn approx(a, b, eps) {
 # ================================================================
 test_group("srgb transfer");
 
+# ⚠ NON-FINITE INPUT. Rust's float-to-int `as` cast SATURATES — NaN gives 0,
+# +inf gives 255, -inf gives 0. Cyrius's f64_to returns i64::MIN instead, so
+# linear_to_srgb was returning -9223372036854775808 from something whose
+# contract is a byte. Measured against the real crate built with cargo.
+assert_eq(linear_to_srgb(0x7FC00000), 0, "linear_to_srgb(NaN) is 0, not i64::MIN");
+assert_eq(linear_to_srgb(0xFFC00000), 0, "and -NaN is 0");
+assert_eq(linear_to_srgb(0x7F800000), 255, "+inf saturates to 255");
+assert_eq(linear_to_srgb(0xFF800000), 0, "-inf saturates to 0");
+# Finite behaviour is unchanged — this was verified over 14,013 inputs against
+# the real Rust crate, byte-identical.
+assert_eq(linear_to_srgb(f32_from(0)), 0, "0.0 is still 0");
+assert_eq(linear_to_srgb(f32_from(F64_ONE)), 255, "1.0 is still 255");
+assert_eq(linear_to_srgb(f32_from(0.5)), 188, "0.5 is still 188");
+
 # Doctest anchors: the endpoints are exact.
 assert_eq(f64_to(f32_to(srgb_to_linear(0))), 0, "srgb_to_linear(0) == 0.0");
 assert_eq(approx(f32_to(srgb_to_linear(255)), F64_ONE, 0.0001), 1, "srgb_to_linear(255) == 1.0");

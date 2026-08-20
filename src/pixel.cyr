@@ -78,9 +78,19 @@ fn _div_ceil2(n) {
 #
 # The overflow guard is not decorative: `Rgba8.checked_buffer_size(u32::MAX,
 # u32::MAX)` is None in Rust, and before 1.0.0 the unchecked version silently
-# wrapped. i64 is wide enough that u32*u32*16 cannot overflow it, so the guard
-# here is a range check against the same limit rather than a carry check.
-var _RG_SIZE_MAX = 0x7FFFFFFFFFFFFFF;
+# wrapped.
+#
+# ⚠ i64 is NOT wide enough to hold u32*u32 — (2^32-1)^2 is 1.8e19 against
+# i64::MAX 9.2e18, so it overflows before any bytes-per-pixel multiply. An
+# earlier comment here claimed the opposite and used it to justify one
+# format-independent limit; the guard below is per-format because the
+# multiplier is.
+#
+# The residual, unavoidable divergence: the port's ceiling is i64::MAX/bpp where
+# Rust's is usize::MAX/bpp, so on a 64-bit target the port still rejects the top
+# factor of two of each format's range. Unreachable in practice — no allocator
+# serves 4.6 exabytes.
+var _RG_SIZE_MAX_BYTES = 0x7FFFFFFFFFFFFFFF;
 
 #must_use
 fn pixel_format_checked_buffer_size(f, width, height) {
@@ -88,10 +98,24 @@ fn pixel_format_checked_buffer_size(f, width, height) {
     if (height < 0) { return RG_ERR_INVALID_PARAMETER; }
     if (pixel_format_is_valid(f) == 0) { return RG_ERR_INVALID_FORMAT; }
 
+    # ⚠ THE BOUND IS PER FORMAT, because the multiplier is. Rust bounds the
+    # FINAL byte count — `w.checked_mul(h)?.checked_mul(4)` for Rgba8, `*3` for
+    # Rgb8, and so on. An earlier version here bounded the PIXEL count against a
+    # single constant equal to floor(i64::MAX / 16) — the divisor only RgbaF32
+    # needs — and so rejected dimension pairs Rust accepts. Measured against the
+    # real crate: 1e9 x 1e9 Rgba8 is Some(4000000000000000000) in Rust and was
+    # RG_ERR_ALLOCATION here.
     var w = width;
     var h = height;
+    var bpp = 4;
+    if (f == PF_RGB8) { bpp = 3; }
+    if (f == PF_RGBAF32) { bpp = 16; }
+    # Yuv420p and Nv12 are 1 byte of luma per pixel plus two half-res chroma
+    # planes; bounding at 2 covers the worst case for odd dimensions.
+    if (f == PF_YUV420P) { bpp = 2; }
+    if (f == PF_NV12) { bpp = 2; }
     if (w != 0) {
-        if (h > _RG_SIZE_MAX / w) { return RG_ERR_ALLOCATION; }
+        if (h > (_RG_SIZE_MAX_BYTES / bpp) / w) { return RG_ERR_ALLOCATION; }
     }
     var px = w * h;
 

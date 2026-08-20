@@ -38,6 +38,41 @@ var argb = pixel_buffer_zeroed(2, 2, PF_ARGB8, err);
 # ================================================================
 test_group("luminance kernels");
 
+# ⚠ NaN AND NON-POSITIVE PARAMETERS, all measured against the real Rust crate.
+# Rust guards only `gamma <= 0.0`, which is FALSE for NaN, so a NaN gamma
+# PROCEEDS and blackens; the port used to reject it. A non-positive gamma is
+# RangaError::Other, not an invalid parameter.
+var _nan32 = 0x7FC00000;
+var _nb = pixel_buffer_zeroed(2, 1, PF_RGBA8, err);
+var _np = pixel_buffer_data(_nb);
+fn _nseed(p) {
+    store8(p, 0); store8(p + 1, 64); store8(p + 2, 128); store8(p + 3, 255);
+    store8(p + 4, 32); store8(p + 5, 96); store8(p + 6, 192); store8(p + 7, 255);
+    return 0;
+}
+_nseed(_np);
+assert_eq(levels(_nb, f32_from(0), f32_from(F64_ONE), _nan32), RG_ERR_NONE,
+          "a NaN gamma is accepted, as Rust accepts it");
+assert_eq(load8(_np), 0, "and blackens the image, as Rust does");
+assert_eq(load8(_np + 1), 0, "every channel");
+_nseed(_np);
+assert_eq(levels(_nb, f32_from(0), f32_from(F64_ONE), f32_from(0)), RG_ERR_OTHER,
+          "gamma 0 is RangaError::Other, not INVALID_PARAMETER");
+assert_eq(load8(_np + 1), 64, "and leaves the buffer untouched");
+# ⚠ f32::max DISCARDS NaN, so a NaN white point gives range = 1e-6 and the
+# image WHITENS. A bare comparison let the NaN through and blackened it — the
+# opposite result.
+_nseed(_np);
+assert_eq(levels(_nb, f32_from(0), _nan32, f32_from(F64_ONE)), RG_ERR_NONE, "a NaN white point is accepted");
+assert_eq(load8(_np + 1), 255, "and WHITENS the image, as Rust does");
+assert_eq(load8(_np + 2), 255, "across the channels");
+# ⚠ Rust's `as i16` saturates NaN to 0, making brightness a complete no-op.
+_nseed(_np);
+assert_eq(brightness(_nb, _nan32), RG_ERR_NONE, "a NaN brightness offset is accepted");
+assert_eq(load8(_np + 1), 64, "and is a NO-OP, as Rust is");
+assert_eq(load8(_np + 2), 128, "leaving every channel alone");
+pixel_buffer_free(_nb);
+
 # grayscale/threshold use integer 77/150/29 >> 8; saturation/vibrance/
 # color_balance use float 0.299/0.587/0.114. Pure blue is where they disagree:
 # 29*255>>8 == 28, but 0.114*255 == 29.07 -> 29. Unifying the two would be an
@@ -189,10 +224,16 @@ assert_eq(chan(b4, 2, 0), 255, "identity levels: 255 stays 255");
 
 # The gamma guard is `<= 0`, not `== 0`. A NEGATIVE gamma must be rejected too —
 # an equality check would let it through into powf(1/negative).
-assert_eq(levels(b4, f32c(0.0), f32c(1.0), f32c(0.0)), RG_ERR_INVALID_PARAMETER, "gamma 0 is rejected");
+#
+# ⚠ THE CODE IS OTHER, AND NaN IS NOT REJECTED. Rust's guard is
+# `if gamma <= 0.0 { Err(RangaError::Other(...)) }`. A NaN is not <= 0, so Rust
+# PROCEEDS with it. The port reported INVALID_PARAMETER for both, and rejected
+# NaN outright — measured against the real crate and corrected.
+assert_eq(levels(b4, f32c(0.0), f32c(1.0), f32c(0.0)), RG_ERR_OTHER, "gamma 0 is Other, as in Rust");
 var _lv = levels(b4, f32c(0.0), f32c(1.0), f32c(f64_neg(1.0)));
-assert_eq(_lv, RG_ERR_INVALID_PARAMETER, "NEGATIVE gamma is rejected too");
-assert_eq(levels(b4, f32c(0.0), f32c(1.0), f32_from(_RG_NAN)), RG_ERR_INVALID_PARAMETER, "NaN gamma is rejected");
+assert_eq(_lv, RG_ERR_OTHER, "NEGATIVE gamma is Other too");
+assert_eq(levels(b4, f32c(0.0), f32c(1.0), f32_from(_RG_NAN)), RG_ERR_NONE,
+          "a NaN gamma is ACCEPTED, because Rust's `<= 0` is false for NaN");
 
 # A zero-width window must not divide by zero — the range is floored at 1e-6.
 put(b4, 1, 128, 128, 128, 255);

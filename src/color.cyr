@@ -211,6 +211,16 @@ fn srgb_to_linear(c) {
 #must_use
 fn linear_to_srgb(c) {
     var v = f32_to(c);
+    # ⚠ NON-FINITE INPUT IS HANDLED UP FRONT, because the transfer function
+    # cannot carry it. Rust's is total: `powf(+inf, 1/2.4)` is `+inf`, so the
+    # scale-and-clamp saturates to 255, and `-inf * 12.92` saturates to 0.
+    # Cyrius's `f64_exp(+inf)` returns NaN rather than +inf — the same builtin
+    # quirk as `exp(-inf)`, which ganita 1.1.4 works around inside pow's
+    # zero-base branch but not for infinity — so the power path turns +inf into
+    # NaN and the whole thing collapsed to 0. Measured against the real crate:
+    # Rust gives 255 here.
+    if (f64_eq(v, v) == 0) { return 0; }
+    if (f64_gt(v, 1000000.0) == 1) { return 255; }
     var s = 0;
     if (f64_le(v, 0.0031308) == 1) {
         s = f64_mul(v, 12.92);
@@ -220,8 +230,18 @@ fn linear_to_srgb(c) {
         s = f64_sub(f64_mul(1.055, _rg_pow(v, third)), 0.055);
     }
     var scaled = f64_add(f64_mul(s, 255.0), 0.5);
+    # ⚠ NON-FINITE MUST BE HANDLED FIRST. Rust ends with `.clamp(0.0, 255.0)
+    # as u8`, and a float-to-int `as` cast in Rust SATURATES: NaN gives 0, +inf
+    # gives 255, -inf gives 0. Cyrius's f64_to does not — it returns i64::MIN
+    # for anything it cannot represent. Both comparisons below are false for
+    # NaN, so without this guard the function fell through and returned
+    # -9223372036854775808 from something whose contract is a byte. Measured
+    # against the real crate: NaN and +inf both returned i64::MIN where Rust
+    # gives 0 and 255.
+    if (f64_eq(scaled, scaled) == 0) { return 0; }
     if (f64_lt(scaled, 0) == 1) { return 0; }
     if (f64_gt(scaled, 255.0) == 1) { return 255; }
+    if (f64_ge(scaled, 255.0) == 1) { return 255; }
     return f64_to(scaled);
 }
 

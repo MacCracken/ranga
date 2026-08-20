@@ -531,6 +531,17 @@ fn _icc_load_primary(data, len, tags, count, sig, m, row, err_out) {
     return _icc_parse_xyz_tag(data, len, tags, idx, m + row * 24, err_out);
 }
 
+# Rust's `f64::round`: half-away-from-zero, unlike Cyrius's half-to-even
+# `f64_round`. floor(x + 0.5) for non-negative x, mirrored below zero so that
+# -0.5 goes to -1 rather than 0.
+#must_use
+fn _icc_round_half_away(x) {
+    if (f64_lt(x, 0) == 1) {
+        return f64_neg(f64_floor(f64_add(f64_neg(x), 0.5)));
+    }
+    return f64_floor(f64_add(x, 0.5));
+}
+
 #must_use
 fn _icc_load_trc(data, len, tags, count, sig, err_out) {
     var idx = _icc_find_tag(tags, count, sig);
@@ -576,8 +587,15 @@ fn _icc_write_u16_be(buf, off, v) {
 
 fn _icc_write_s15fixed16(buf, off, v) {
     # Rust's `(v * 65536.0).round() as i32`, then to_be_bytes.
+    #
+    # ⚠ NOT `f64_round`. Rust's `.round()` is HALF-AWAY-FROM-ZERO; Cyrius's
+    # `f64_round` is half-to-EVEN. They agree everywhere except an exact .5,
+    # and there they differ in both directions — measured against the real
+    # crate, 0.5 gives 1 in Rust and 0 here, 2.5 gives 3 against 2, -0.5 gives
+    # -1 against 0. An s15Fixed16 input lands on a .5 exactly when the value is
+    # an odd multiple of 2^-17, which the ICC matrices do hit.
     var scaled = f64_mul(v, 65536.0);
-    var i = f64_to(f64_round(scaled));
+    var i = f64_to(_icc_round_half_away(scaled));
     _icc_write_u32_be(buf, off, i & 0xFFFFFFFF);
     return RG_ERR_NONE;
 }

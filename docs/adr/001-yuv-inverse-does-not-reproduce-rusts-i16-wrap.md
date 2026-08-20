@@ -51,6 +51,13 @@ unaffected — the divergence only appears where Rust's intermediate exceeded
 - If bug-compatibility is ever genuinely needed, it belongs behind an explicit
   opt-in rather than as the default.
 
+## A second instance
+
+`filter::brightness` overflows the same way. Measured against the real crate, an
+offset of 1000 on `(0,64,128)` gives `(255,0,0)` — red saturates, green and blue
+WRAP to 0 — where the port gives `(255,255,255)`. The same judgement applies for
+the same reason, and this ADR covers both.
+
 ## How this was found
 
 The final pre-tag parity sweep. Worth recording that the same sweep produced

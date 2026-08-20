@@ -210,8 +210,40 @@ has now been checked by building the actual Rust crate at `rust-old/` with
   round-trips to **black**. That is an overflow, not a colour decision.
   Reproducing it would mean deliberately re-introducing the bug.
 
-**Not yet measured** — recorded as unverified rather than asserted: NaN
-handling in `linear_to_srgb` / `levels` / `brightness`, `f64_round` being
-round-half-to-even in `_icc_write_s15fixed16`, and
-`pixel_format_checked_buffer_size`'s format-independent overflow guard (reachable
-only above ~759 million pixels per side).
+**Then measured, and all three were real — the worst of the whole sweep:**
+
+- **`linear_to_srgb` returned `i64::MIN` for NaN, and for +inf.** Rust's
+  float-to-int `as` cast SATURATES — NaN to 0, +inf to 255, -inf to 0 — while
+  Cyrius's `f64_to` returns `i64::MIN` for anything it cannot represent. Both
+  clamp comparisons are false for NaN, so the function fell through and returned
+  -9223372036854775808 from something whose contract is a byte. The +inf case
+  has a second cause: **`f64_exp(+inf)` returns NaN in Cyrius** rather than
+  +inf, the same builtin quirk as `exp(-inf)` that ganita 1.1.4 works around for
+  zero bases but not for infinity. Fixed; the 4,012-input finite sweep confirms
+  no regression.
+- **`levels` diverged three ways.** Rust guards only `gamma <= 0.0`, which is
+  false for NaN, so Rust PROCEEDS on a NaN gamma and blackens — the port
+  rejected it. Rust reports a non-positive gamma as `RangaError::Other`, not an
+  invalid parameter. And `f32::max` DISCARDS a NaN operand, so a NaN white point
+  gives `range = 1e-6` and the image WHITENS in Rust, where the port's bare
+  comparison let the NaN survive and blackened it — the opposite result. All
+  three fixed.
+- **`brightness` with a NaN offset blackened the image**; Rust's saturating
+  `as i16` makes it a complete no-op. Fixed.
+- **`_icc_write_s15fixed16` used banker's rounding.** Rust's `.round()` is
+  half-away-from-zero; `f64_round` is half-to-even, and they differ in both
+  directions on an exact .5 — 0.5 gave 0 against Rust's 1, 2.5 gave 2 against 3.
+  An s15Fixed16 value lands on a .5 exactly when it is an odd multiple of
+  2^-17, which real ICC matrices hit. Fixed with an explicit
+  `_icc_round_half_away`.
+- **`pixel_format_checked_buffer_size` bounded the PIXEL count** against one
+  constant equal to `floor(i64::MAX/16)` — the divisor only RgbaF32 needs — and
+  so rejected sizes Rust accepts: 1e9 x 1e9 Rgba8 is `Some(4000000000000000000)`
+  in Rust and was `RG_ERR_ALLOCATION` here. The guard is now per-format, and the
+  comment claiming "i64 is wide enough that u32*u32*16 cannot overflow it" is
+  gone — `(2^32-1)^2` alone is 1.8e19 against i64::MAX 9.2e18.
+
+**A second Rust i16 overflow surfaced while measuring**, alongside the YUV one:
+`brightness` with an offset of 1000 gives `(255,0,0)` in Rust — some channels
+wrap to 0 instead of saturating — where the port saturates to `(255,255,255)`.
+Same judgement as ADR 001: not reproduced.

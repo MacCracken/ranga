@@ -101,7 +101,14 @@ fn brightness(buf, offset) {
     var rc = _fp_validate_rgba8(buf);
     if (rc != RG_ERR_NONE) { return rc; }
     # `(offset * 255.0) as i16` — truncation toward zero, not rounding.
-    var shift = f64_to(f64_mul(f32_to(offset), 255.0));
+    #
+    # ⚠ Rust's float-to-int `as` cast SATURATES, so a NaN offset becomes 0 and
+    # brightness is a complete no-op. Cyrius's f64_to returns i64::MIN instead,
+    # which the port then applied as a shift and blackened the image. Measured
+    # against the real crate: Rust leaves the buffer untouched.
+    var od = f32_to(offset);
+    if (f64_eq(od, od) == 0) { return RG_ERR_NONE; }
+    var shift = f64_to(f64_mul(od, 255.0));
     var p = pixel_buffer_data(buf);
     var n = pixel_buffer_pixel_count(buf);
 
@@ -215,16 +222,29 @@ fn saturation(buf, factor) {
 fn levels(buf, black, white, gamma) {
     var rc = _fp_validate_rgba8(buf);
     if (rc != RG_ERR_NONE) { return rc; }
+    # ⚠ NO NaN REJECTION, and the code is OTHER. Rust guards only
+    # `if gamma <= 0.0 { Err(RangaError::Other(...)) }` — a NaN gamma is not
+    # <= 0, so Rust PROCEEDS and the NaN carries through to a black image. The
+    # port used to reject NaN with INVALID_PARAMETER, and to report a
+    # non-positive gamma with INVALID_PARAMETER where error.cyr's own table maps
+    # Other -> RG_ERR_OTHER. Measured against the real crate.
     var gd = f32_to(gamma);
-    if (f64_eq(gd, gd) == 0) { return RG_ERR_INVALID_PARAMETER; }
-    if (f64_le(gd, 0) == 1) { return RG_ERR_INVALID_PARAMETER; }
+    if (f64_le(gd, 0) == 1) { return RG_ERR_OTHER; }
 
     var bl: f32 = black;
     # `(white - black).max(1e-6)` — the floor stops a zero-width window from
     # dividing by zero, and it is applied to the RANGE, not to white.
+    #
+    # ⚠ `f32::max` DISCARDS a NaN operand and returns the other one, so a NaN
+    # white point gives range = 1e-6 in Rust and the image WHITENS. A bare
+    # comparison is false for NaN, which let the NaN survive and blackened the
+    # image instead — the opposite result. The self-inequality test restores
+    # Rust's max semantics.
     var wh: f32 = white;
     var rng: f32 = wh - bl;
     var floor6: f32 = f32_from(0.000001);
+    var rngd = f32_to(rng);
+    if (f64_eq(rngd, rngd) == 0) { rng = floor6; }
     if (f64_lt(f32_to(rng), 0.000001) == 1) { rng = floor6; }
     var invg: f64 = f64_div(F64_ONE, gd);
 
