@@ -18,6 +18,19 @@ fn approx(a, b, eps) {
 # ================================================================
 test_group("srgb transfer");
 
+# ⚠ srgb_to_linear IS SINGLE PRECISION. Rust is `c as f32 / 255.0` with f32
+# literals and f32::powf, so every intermediate rounds to f32. The port computed
+# in f64 and narrowed once at the end — more accurate, and therefore wrong:
+# measured against the real crate, 214 of the 256 possible inputs differed by
+# one or two ULP. After the rewrite all 256 are bit-identical. These pin the
+# three regions of the curve.
+assert_eq(srgb_to_linear(0), f32_from(0), "0 maps to 0.0");
+assert_eq(srgb_to_linear(255), f32_from(F64_ONE), "255 maps to exactly 1.0");
+# 10 is on the linear segment (s <= 0.04045); 9 and 11 straddle it on the curve.
+assert_eq(srgb_to_linear(9), 993199883, "the linear segment is bit-exact against Rust");
+assert_eq(srgb_to_linear(11), 995840397, "and so is the power segment just above the knee");
+assert_eq(srgb_to_linear(128), 1046284939, "and mid-grey");
+
 # ⚠ NON-FINITE INPUT. Rust's float-to-int `as` cast SATURATES — NaN gives 0,
 # +inf gives 255, -inf gives 0. Cyrius's f64_to returns i64::MIN instead, so
 # linear_to_srgb was returning -9223372036854775808 from something whose

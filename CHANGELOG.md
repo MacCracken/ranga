@@ -99,6 +99,29 @@ maps it item by item.
   throughout, giving 229 against Rust's 230 on a ColorBurn near a rounding
   boundary. Now matches exactly.
 
+- **`srgb_to_linear` computed in f64** where Rust is single-precision
+  throughout. **214 of the 256 possible u8 inputs differed by one or two ULP**,
+  with the whole test suite green — every hand-written assertion used a
+  tolerance wide enough to swallow it. All 256 are now bit-identical.
+- **`linear_to_srgb` returned `i64::MIN`** for NaN and for +inf, where Rust's
+  saturating cast gives 0 and 255.
+- **`levels`** rejected a NaN gamma that Rust accepts, reported non-positive
+  gamma as `INVALID_PARAMETER` instead of `Other`, and blackened on a NaN white
+  point where Rust whitens.
+- **`brightness` with a NaN offset** blackened the image; Rust's saturating cast
+  makes it a no-op.
+- **`_icc_write_s15fixed16` used banker's rounding** where Rust rounds
+  half-away-from-zero.
+- **`pixel_format_checked_buffer_size`** bounded the pixel count against one
+  format-independent constant, rejecting sizes Rust accepts.
+- **Singular-matrix transforms** reported `INVALID_PARAMETER` where Rust reports
+  `Other`.
+
+A **5,800-comparison differential sweep** against the real crate now backs these:
+every u8 output path is byte-exact, and the ~50 residual differences are all in
+f32/f64 intermediates that never round to a byte (max 1.4e-14 on a scale where
+one byte step is 0.39).
+
 ### Intentional divergence
 
 - **The YUV→RGB inverse does not reproduce Rust's `i16` wrap.** Rust's inverse

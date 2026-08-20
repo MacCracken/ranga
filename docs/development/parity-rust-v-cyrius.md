@@ -247,3 +247,49 @@ has now been checked by building the actual Rust crate at `rust-old/` with
 `brightness` with an offset of 1000 gives `(255,0,0)` in Rust — some channels
 wrap to 0 instead of saturating — where the port saturates to `(255,255,255)`.
 Same judgement as ADR 001: not reproduced.
+
+
+## Exhaustive differential sweep — the measurement that should have come first
+
+Everything above was found by sampling. This is the systematic version: the
+crate at `rust-old/` built with `cargo --release`, driven over a broad input
+space, diffed value-by-value against the same calls in the port under cyrius
+6.5.31. **5,800 comparisons.**
+
+| group | coverage | before | after |
+| --- | --- | ---: | ---: |
+| `srgb_to_linear` | all 256 u8 inputs | **214 differ** | **0** |
+| `blend_pixel` | 12 modes x 256 src/dst pairs | 0 | 0 |
+| colour round trips | 216 colours x 8 outputs | 504* | 49 |
+| `delta_e` x3 | 12 Lab pairs | 1 | 1 |
+| format conversions | rgb8, argb8, YUV BT.709, BT.2020 | 0 | 0 |
+| composite | premultiply, unpremultiply, fade | 0 | 0 |
+
+\* inflated by a harness bug of mine — comparing an f64 field against an f32
+one. The real figure was 49.
+
+**Every u8 output path is now byte-exact against Rust.** The 50 residual
+differences are all in f32/f64 *intermediates* that are never rounded to a byte:
+
+- `CieLab.l` — 34 values, max absolute error **1.4e-14** on a 0..100 scale where
+  one u8 step of L\* is 0.39. Thirteen orders of magnitude below significance.
+  It comes from `f64::cbrt` against ganita's `pow(x, 1/3)` — different
+  algorithms, not a defect.
+- `Hsl.h` — 15 values, max error **1.5e-5 degrees** out of 360. The port is the
+  MORE accurate side here: it returns exactly 200.0 where Rust returns
+  200.0000152588.
+- one `delta_e_ciede2000` value, 1 ULP in f64.
+
+### What this exercise actually showed
+
+The `srgb_to_linear` result is the one worth keeping: **214 of 256 inputs were
+wrong, and the entire test suite was green.** Every hand-written assertion in
+`tests/color.tcyr` used a tolerance wide enough to swallow a 1-ULP error,
+because that is what a human writes when checking a colour conversion by eye.
+Only a bit-exact diff against the real oracle could see it.
+
+That is the argument for building the oracle FIRST. `cargo build` on `rust-old/`
+succeeds in under a second; this sweep is a few hundred lines. Doing it at the
+start of M7 would have caught `srgb_to_linear`, the Oklab NaN, the LUT3D
+rounding, the `linear_to_srgb` `i64::MIN`, and the `levels` NaN divergences in
+one pass, instead of over a dozen separate rounds of "one more issue".

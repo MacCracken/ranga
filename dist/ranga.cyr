@@ -1552,14 +1552,26 @@ fn cie_lab_free(c) { if (c != 0) { fl_free(c); } return RG_ERR_NONE; }
 # intermediate would drift from the Rust original, which also evaluates
 # `((s + 0.055) / 1.055).powf(2.4)` at full width before storing to f32.
 #must_use
+# ⚠ SINGLE PRECISION THROUGHOUT. Rust is `let s = c as f32 / 255.0` with f32
+# literals and `f32::powf`, so every intermediate rounds to f32. Computing in
+# f64 and narrowing once at the end is MORE accurate and therefore wrong here:
+# measured against the real crate, 214 of the 256 possible inputs differed by
+# one or two ULP. The `: f32` annotations are what make the bare operators
+# single-precision — an unannotated local silently emits integer ops.
+#must_use
 fn srgb_to_linear(c) {
-    var s = f64_div(f64_from(c & 255), 255.0);
-    # `<=`, matching Rust's `if s <= 0.04045`. f64_le is stdlib (lib/math.cyr:437);
-    # spelling it as a separate f64_lt then f64_eq works but evaluates twice.
-    if (f64_le(s, 0.04045) == 1) {
-        return f32_from(f64_div(s, 12.92));
+    return _c_srgb_to_linear(f32_from(f64_from(c & 255)));
+}
+
+#must_use
+fn _c_srgb_to_linear(cf: f32) {
+    var s: f32 = cf / f32_from(255.0);
+    # `<=`, matching Rust's `if s <= 0.04045`.
+    if (s <= f32_from(0.04045)) {
+        return s / f32_from(12.92);
     }
-    return f32_from(_rg_pow(f64_div(f64_add(s, 0.055), 1.055), 2.4));
+    var base: f32 = (s + f32_from(0.055)) / f32_from(1.055);
+    return ganita_f32_pow(base, f32_from(2.4));
 }
 
 # Inverse sRGB transfer. Takes an f32 bit pattern, returns an integer 0-255.
