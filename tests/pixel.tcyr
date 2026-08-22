@@ -82,7 +82,6 @@ assert_eq(PF_YUV420P, 3, "PF_YUV420P is 3, as in Rust");
 assert_eq(PF_NV12, 4, "PF_NV12 is 4, as in Rust");
 assert_eq(PF_RGBAF32, 5, "PF_RGBAF32 is 5, as in Rust");
 
-
 assert_eq(pixel_format_checked_buffer_size(PF_RGB8, 10, 10), 300, "Rgb8 10x10 == 300 (doctest)");
 assert_eq(pixel_format_checked_buffer_size(PF_RGBA8, 10, 10), 400, "Rgba8 10x10 == 400");
 assert_eq(pixel_format_checked_buffer_size(PF_RGBAF32, 10, 10), 1600, "RgbaF32 10x10 == 1600");
@@ -220,12 +219,12 @@ var bigview = pixel_view_new(bv_data(big), bv_len(big), 4, 4, PF_RGBA8, err);
 assert_eq(bigview, 0, "view rejects an OVERSIZED buffer, as Rust does");
 assert_eq(load64(err), RG_ERR_DIMENSION_MISMATCH, "also DimensionMismatch");
 # The exact size still works, so the check is equality and not a blanket reject.
-var exact = bv_zeroed(4 * 4 * 4);
-var okview = pixel_view_new(bv_data(exact), bv_len(exact), 4, 4, PF_RGBA8, err);
+var view_exact = bv_zeroed(4 * 4 * 4);
+var okview = pixel_view_new(bv_data(view_exact), bv_len(view_exact), 4, 4, PF_RGBA8, err);
 assert_eq(okview != 0, 1, "an exactly-sized buffer is accepted");
 assert_eq(load64(err), RG_ERR_NONE, "with no error");
 pixel_view_free(okview);
-bv_free(exact);
+bv_free(view_exact);
 bv_free(big);
 
 pixel_buffer_free(buf);
@@ -255,9 +254,9 @@ assert_eq(buffer_pool_len(pool), 0, "acquire removes it from the pool");
 # BEST-FIT. Pool a large and a small buffer, then ask for a size only the small
 # one comfortably fits: first-fit would hand back whichever it saw first and
 # strand the large one. 1.0.0 changed this deliberately.
-var big = bv_zeroed(10000);
+var pool_big = bv_zeroed(10000);
 var small2 = bv_zeroed(200);
-buffer_pool_release(pool, big);
+buffer_pool_release(pool, pool_big);
 buffer_pool_release(pool, small2);
 assert_eq(buffer_pool_len(pool), 2, "two buffers pooled");
 

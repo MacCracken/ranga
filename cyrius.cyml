@@ -14,7 +14,7 @@ description = "ranga — core image processing: colour spaces, blend modes, pixe
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/ranga"
 language = "cyrius"
-cyrius = "6.5.31"
+cyrius = "6.5.33"
 
 [build]
 entry = "src/main.cyr"
@@ -149,13 +149,13 @@ stdlib = [
 # locally and bypasses the commit-pin verification cyrius.lock records.
 [deps.prakash]
 git = "https://github.com/MacCracken/prakash.git"
-tag = "2.2.3"
+tag = "2.2.8"
 modules = ["dist/prakash.cyr"]
 optional = true
 
 [deps.ai-hwaccel]
 git = "https://github.com/MacCracken/ai-hwaccel.git"
-tag = "2.3.17"
+tag = "2.3.18"
 modules = ["dist/ai-hwaccel.cyr"]
 optional = true
 

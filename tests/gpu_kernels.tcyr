@@ -452,7 +452,7 @@ if (ctx != 0) {
         gpu_buffer_release(m, rpb);
     }
 
-    # --- resize bilinear: emits a valid module that mabda cannot yet compile ---
+    # --- resize bilinear: emits a valid module mabda cannot yet compile (CHANGELOG 2.0.0) ---
     #
     # ⚠ NOT A DEFECT IN THE EMITTER. `spirv_validate_stream` accepts the module
     # and every table rebuilds from it, but `gpu_shader_module_create_spirv`
@@ -474,7 +474,7 @@ if (ctx != 0) {
     assert_eq(spirv_hdr_id_bound(load64(outp)) < 256, 1,
               "and it is UNDER the 256-id cap, so size is not what stops it");
     assert_eq(gpu_shader_module_create_spirv(m, load64(outp), bll), 0,
-              "but mabda cannot yet lower it to GFX9 — flip this when it can");
+              "but mabda cannot yet lower it to GFX9 — flip this when it can; see CHANGELOG 2.0.0");
 
     gpu_context_free(ctx);
 }

@@ -39,7 +39,6 @@ assert_eq(SF_NEAREST, 0, "SF_NEAREST is 0, as in Rust");
 assert_eq(SF_BILINEAR, 1, "SF_BILINEAR is 1, as in Rust");
 assert_eq(SF_BICUBIC, 2, "SF_BICUBIC is 2, as in Rust");
 
-
 assert_streq(scale_filter_name(SF_NEAREST), "Nearest", "Display for Nearest");
 assert_streq(scale_filter_name(SF_BICUBIC), "Bicubic", "Display for Bicubic");
 assert_eq(scale_filter_is_valid(SF_BILINEAR), 1, "Bilinear is valid");

@@ -330,7 +330,8 @@ assert_eq(tone_curve_kind(ctc), TC_TABLE, "curv count > 1 gives a TABLE, not a g
 assert_eq(tone_curve_len(ctc), 3, "the table has three entries");
 # 0xFFFF / 65535 == 1.0 exactly. With a /65536 divisor it would be 0.99998,
 # which is the only place that divisor is observable.
-assert_eq(approx(tone_curve_apply(ctc, F64_ONE), F64_ONE, 0.000001), 1, "0xFFFF scales to exactly 1.0 (/65535, not /65536)");
+assert_eq(approx(tone_curve_apply(ctc, F64_ONE), F64_ONE, 0.000001), 1,
+          "0xFFFF scales to exactly 1.0 (/65535, not /65536)");
 assert_eq(approx(tone_curve_apply(ctc, 0), 0, 0.000001), 1, "entry 0 is 0.0");
 icc_profile_free(cprof); bv_free(cbv); fl_free(ctrc); fl_free(clen);
 
@@ -371,7 +372,8 @@ assert_eq(approx(tone_curve_apply(p3tc, 0), 0, 0.001), 1, "para type 3 maps 0 to
 assert_eq(approx(tone_curve_apply(p3tc, F64_ONE), F64_ONE, 0.001), 1, "para type 3 maps 1 to 1");
 # The sRGB transfer at 0.5 is ~0.214 — this is the value that would move if the
 # power branch, the linear branch, or the d threshold were wrong.
-assert_eq(approx(tone_curve_apply(p3tc, 0.5), 0.2140, 0.005), 1, "para type 3 at 0.5 matches the sRGB transfer (~0.214)");
+assert_eq(approx(tone_curve_apply(p3tc, 0.5), 0.2140, 0.005), 1,
+          "para type 3 at 0.5 matches the sRGB transfer (~0.214)");
 # Below the d threshold the LINEAR branch runs: 0.02 / 12.92 ~ 0.00155.
 # Tight tolerance on purpose. If the break point were -b/a (-0.055) instead of
 # d (0.04045), every X would take the power branch and 0.02 would come out at
@@ -657,7 +659,6 @@ var bd3r = icc_profile_from_bytes(bd3, plen, err);
 assert_eq(bd3r, 0, "the overrunning tag table is still rejected");
 assert_eq(load64(err), RG_ERR_INVALID_FORMAT,
           "the tag-table overrun is caught by the pre-check, before allocating");
-
 
 # ================================================================
 # IccLutProfile — the A2B0 / 3D-LUT form

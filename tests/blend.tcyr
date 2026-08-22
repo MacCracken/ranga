@@ -103,7 +103,6 @@ assert_eq(BM_HARD_LIGHT, 9, "BM_HARD_LIGHT is 9, as in Rust");
 assert_eq(BM_DIFFERENCE, 10, "BM_DIFFERENCE is 10, as in Rust");
 assert_eq(BM_EXCLUSION, 11, "BM_EXCLUSION is 11, as in Rust");
 
-
 assert_streq(blend_mode_name(BM_NORMAL), "Normal", "Display for Normal");
 # The two-word names carry a SPACE — consumers show these in a UI.
 assert_streq(blend_mode_name(BM_COLOR_DODGE), "Color Dodge", "Display for Color Dodge has a space");

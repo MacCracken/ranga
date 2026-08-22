@@ -2,6 +2,64 @@
 
 ## [Unreleased]
 
+## [2.0.1] — 2026-08-21
+
+Maintenance release. `src/` is untouched — the toolchain pin and the
+optional-dependency pins move, the bundles are restamped, and the lint gate
+starts doing its job. All 1,921 assertions across 19 suites pass before and
+after, with byte-identical bundle contents apart from the version header.
+
+### Changed
+
+- **Toolchain pin `6.5.31` → `6.5.33`.** The wrapper installed locally had
+  already moved to 6.5.33, so every build was emitting a drift warning; CI
+  installs whatever `[package].cyrius` names, so it was still building against
+  6.5.31. The pin is now the version that is actually in use. Re-vendoring the
+  declared `[deps].stdlib` subset from the 6.5.33 snapshot changed no existing
+  leaf byte-for-byte and added one new file, `lib/hashmap_fast.cyr`.
+- **prakash `2.2.3` → `2.2.8`** (optional, feature `spectral`).
+- **ai-hwaccel `2.3.17` → `2.3.18`** (optional, feature `hwaccel`).
+- **mabda stays at `4.1.0`** — already the newest tag.
+- Transitive pins move with them: **hisab `2.11.1` → `2.11.2`** and
+  **sakshi `2.4.10` → `2.4.11`**. `cyrius.lock` now records 59 deps locked and
+  7 commit-pinned, up from 52 and 4.
+- All four `dist/` bundles restamped `v2.0.1`. The `.deps` sidecars are
+  unchanged, and the bundle bodies are byte-identical to 2.0.0.
+
+### Fixed
+
+- **`cyrius.lock` pinned a tag that no longer exists.** The lock recorded
+  hisab `2.11.1`, which has since been retracted upstream — the tag now 404s,
+  so a clean `cyrius deps` on a fresh checkout could not resolve it. Re-resolving
+  moves the pin to `2.11.2`, which is present. Nothing in-tree had noticed
+  because `lib/hisab.cyr` was already vendored locally.
+- **The CI lint gate could not fail, and covered one file in forty-one.**
+  `cyrius lint` accepts a single path and always exits 0 — it reports its
+  counts rather than signalling through the exit status. The step read
+  `cyrius lint src/*.cyr tests/*.tcyr`, so it linted `src/blend.cyr`, silently
+  discarded the other 40 arguments, and passed regardless of what it found.
+  It now loops every file and gates on the reported totals. Note for anyone
+  writing a similar gate: cyrlint prints `N warnings` on **stdout** and
+  `N untracked deferrals` on **stderr**, so the capture needs `2>&1` or the
+  deferral count is silently lost.
+- **Ten lint warnings and two untracked deferrals in `tests/`**, which the
+  broken gate had been hiding. `src/` was already clean and stays clean.
+  - `tests/pixel.tcyr` declared `exact` and `big` twice each at file scope.
+    Cyrius binds a name to the LAST declaration, so cyrlint flagged the earlier
+    reads as `silent zero at init`. The runtime values were correct — the
+    earlier `var` writes the same global before the read — but the duplicate
+    names were real. The second of each is now `view_exact` / `pool_big`.
+  - Three lines over 120 characters wrapped (`icc.tcyr` ×2, `ranga.tcyr`), and
+    four doubled blank lines closed up (`blend.tcyr`, `icc.tcyr`,
+    `pixel.tcyr`, `transform.tcyr`).
+  - The two `resize_bilinear` deferrals in `tests/gpu_kernels.tcyr` now
+    cross-reference the 2.0.0 **Not ported** entry above, which is where that
+    work is tracked. cyrlint matches `not yet` inside `cannot yet` and wants
+    the pointer on the same line.
+
+  No assertion changed: 1,921 before, 1,921 after, every suite matching its
+  previous count exactly.
+
 ## [2.0.0] — 2026-08-19
 
 **The Cyrius port.** ranga is now written in Cyrius. The Rust line ends at

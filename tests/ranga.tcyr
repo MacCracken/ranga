@@ -53,7 +53,8 @@ assert_eq(streq(ranga_error_message(RG_ERR_NONE), "no error"), 1, "success has a
 assert_eq(streq(ranga_error_message(RG_ERR_INVALID_FORMAT), "invalid format"), 1, "InvalidFormat renders");
 assert_eq(streq(ranga_error_message(RG_ERR_DIMENSION_MISMATCH), "dimension mismatch"), 1, "DimensionMismatch renders");
 assert_eq(streq(ranga_error_message(RG_ERR_BUFFER_TOO_SMALL), "buffer too small"), 1, "BufferTooSmall renders");
-assert_eq(streq(ranga_error_message(RG_ERR_UNSUPPORTED_CONVERSION), "unsupported conversion"), 1, "UnsupportedConversion renders");
+assert_eq(streq(ranga_error_message(RG_ERR_UNSUPPORTED_CONVERSION), "unsupported conversion"), 1,
+          "UnsupportedConversion renders");
 assert_eq(streq(ranga_error_message(RG_ERR_INVALID_PARAMETER), "invalid parameter"), 1, "InvalidParameter renders");
 assert_eq(streq(ranga_error_message(RG_ERR_ALLOCATION), "allocation failed"), 1, "Allocation renders");
 assert_eq(streq(ranga_error_message(RG_ERR_PARSE), "parse error"), 1, "Parse renders");

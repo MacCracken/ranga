@@ -63,7 +63,36 @@ jobs:
       - name: Lint
         # 0 warnings and 0 untracked deferrals is the standing bar; this makes
         # it a gate rather than a habit.
-        run: cyrius lint src/*.cyr tests/*.tcyr
+        #
+        # ⚠ `cyrius lint` takes ONE path and ALWAYS exits 0 — it reports its
+        # counts on stdout instead of signalling through the exit status. The
+        # form this replaced, `cyrius lint src/*.cyr tests/*.tcyr`, therefore
+        # linted src/blend.cyr, silently discarded the other 40 arguments, and
+        # could not fail whatever it found. Loop every file and gate on the
+        # reported totals instead.
+        #
+        # `2>&1` is load-bearing: cyrlint prints "N warnings" on STDOUT but
+        # "N untracked deferrals" on STDERR. Capturing only stdout loses the
+        # deferral count.
+        #
+        # The `:-1` defaults are deliberate: if a future cyrius changes the
+        # summary wording the sed yields nothing, and the gate fails loudly
+        # rather than reverting to a pass-everything no-op.
+        run: |
+          set -eu
+          rc=0
+          for f in src/*.cyr tests/*.tcyr; do
+            out=$(cyrius lint "$f" 2>&1)
+            warns=$(printf '%s\n' "$out" | sed -n 's/^\([0-9]\{1,\}\) warnings$/\1/p')
+            defs=$(printf '%s\n' "$out" | sed -n 's/^\([0-9]\{1,\}\) untracked deferrals$/\1/p')
+            if [ "${warns:-1}" -ne 0 ] || [ "${defs:-1}" -ne 0 ]; then
+              echo "::error file=$f::${warns:-unparsed} warning(s), ${defs:-unparsed} untracked deferral(s)"
+              printf '%s\n' "$out"
+              rc=1
+            fi
+          done
+          [ "$rc" -eq 0 ] || { echo "lint gate FAILED"; exit 1; }
+          echo "lint clean: $(ls src/*.cyr tests/*.tcyr | wc -l) files, 0 warnings, 0 untracked deferrals"
 
       - name: Bundles are current
         # --check compares BYTES, so a source change that was never re-bundled
