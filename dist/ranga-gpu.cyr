@@ -1210,13 +1210,13 @@ fn pixel_view_pixel_count(v) { return load64(v + 8) * load64(v + 16); }
 #must_use
 fn pixel_buffer_as_view(b, err_out) {
     return _pixel_view_make(bv_data(load64(b)), load64(b + 8), load64(b + 16),
-                            load64(b + 24), bv_len(load64(b)), err_out);
+      load64(b + 24), bv_len(load64(b)), err_out);
 }
 
 #must_use
 fn pixel_buffer_as_view_mut(b, err_out) {
     return _pixel_view_make(bv_data(load64(b)), load64(b + 8), load64(b + 16),
-                            load64(b + 24), bv_len(load64(b)), err_out);
+      load64(b + 24), bv_len(load64(b)), err_out);
 }
 
 # Copy a view into a new owned buffer. Rust's PixelBuffer::from_view.
@@ -1622,9 +1622,9 @@ fn linear_to_srgb(c) {
 #must_use
 fn srgba_to_lin_rgba(c) {
     return lin_rgba_new(srgb_to_linear(load8(c)),
-                        srgb_to_linear(load8(c + 1)),
-                        srgb_to_linear(load8(c + 2)),
-                        f32_from(f64_div(f64_from(load8(c + 3)), 255.0)));
+      srgb_to_linear(load8(c + 1)),
+      srgb_to_linear(load8(c + 2)),
+      f32_from(f64_div(f64_from(load8(c + 3)), 255.0)));
 }
 
 #must_use
@@ -1640,9 +1640,9 @@ fn lin_rgba_to_srgba(c) {
         if (f64_lt(av, 0) == 0) { a = f64_to(av); }
     }
     return srgba_new(linear_to_srgb(load32(c)),
-                     linear_to_srgb(load32(c + 4)),
-                     linear_to_srgb(load32(c + 8)),
-                     a);
+      linear_to_srgb(load32(c + 4)),
+      linear_to_srgb(load32(c + 8)),
+      a);
 }
 
 # ── LinRgba <-> CieXyz (sRGB D65 primaries) ────────
@@ -1662,8 +1662,8 @@ fn lin_rgba_to_cie_xyz(c) {
     var g = f32_to(load32(c + 4));
     var b = f32_to(load32(c + 8));
     return cie_xyz_new(_rg_dot3(0.4124564, 0.3575761, 0.1804375, r, g, b),
-                       _rg_dot3(0.2126729, 0.7151522, 0.0721750, r, g, b),
-                       _rg_dot3(0.0193339, 0.1191920, 0.9503041, r, g, b));
+      _rg_dot3(0.2126729, 0.7151522, 0.0721750, r, g, b),
+      _rg_dot3(0.0193339, 0.1191920, 0.9503041, r, g, b));
 }
 
 # Alpha is set to 1.0 (fully opaque) — CieXyz carries no alpha.
@@ -1705,8 +1705,8 @@ fn cie_xyz_to_cie_lab(c) {
     var fy = _lab_f(f64_div(load64(c + 8), _D65_YN));
     var fz = _lab_f(f64_div(load64(c + 16), _D65_ZN));
     return cie_lab_new(f64_sub(f64_mul(116.0, fy), 16.0),
-                       f64_mul(500.0, f64_sub(fx, fy)),
-                       f64_mul(200.0, f64_sub(fy, fz)));
+      f64_mul(500.0, f64_sub(fx, fy)),
+      f64_mul(200.0, f64_sub(fy, fz)));
 }
 
 #must_use
@@ -1715,8 +1715,8 @@ fn cie_lab_to_cie_xyz(c) {
     var fx = f64_add(f64_div(load64(c + 8), 500.0), fy);
     var fz = f64_sub(fy, f64_div(load64(c + 16), 200.0));
     return cie_xyz_new(f64_mul(_D65_XN, _lab_f_inv(fx)),
-                       f64_mul(_D65_YN, _lab_f_inv(fy)),
-                       f64_mul(_D65_ZN, _lab_f_inv(fz)));
+      f64_mul(_D65_YN, _lab_f_inv(fy)),
+      f64_mul(_D65_ZN, _lab_f_inv(fz)));
 }
 
 # Convenience: sRGB byte -> Lab in one step. Frees the two intermediates.
@@ -1846,9 +1846,9 @@ fn hsl_to_srgba(c) {
     var hn = f64_div(h, 360.0);
     var third = f64_div(F64_ONE, f64_from(3));
     return srgba_new(_f64_to_u8_round(_hue_to_rgb(p, q, f64_add(hn, third))),
-                     _f64_to_u8_round(_hue_to_rgb(p, q, hn)),
-                     _f64_to_u8_round(_hue_to_rgb(p, q, f64_sub(hn, third))),
-                     255);
+      _f64_to_u8_round(_hue_to_rgb(p, q, hn)),
+      _f64_to_u8_round(_hue_to_rgb(p, q, f64_sub(hn, third))),
+      255);
 }
 
 # ── Cmyk (4 x f32) ────────
@@ -1881,9 +1881,9 @@ fn cmyk_to_srgba(v) {
     var k = f32_to(load32(v + 12));
     var ik = f64_sub(F64_ONE, k);
     return srgba_new(_f64_to_u8_round(f64_mul(f64_sub(F64_ONE, f32_to(load32(v))), ik)),
-                     _f64_to_u8_round(f64_mul(f64_sub(F64_ONE, f32_to(load32(v + 4))), ik)),
-                     _f64_to_u8_round(f64_mul(f64_sub(F64_ONE, f32_to(load32(v + 8))), ik)),
-                     255);
+      _f64_to_u8_round(f64_mul(f64_sub(F64_ONE, f32_to(load32(v + 4))), ik)),
+      _f64_to_u8_round(f64_mul(f64_sub(F64_ONE, f32_to(load32(v + 8))), ik)),
+      255);
 }
 
 #must_use
@@ -1899,9 +1899,9 @@ fn srgba_to_cmyk(c) {
     }
     var inv_k = f64_div(F64_ONE, f64_sub(F64_ONE, k));
     return cmyk_new(f32_from(f64_mul(f64_sub(f64_sub(F64_ONE, r), k), inv_k)),
-                    f32_from(f64_mul(f64_sub(f64_sub(F64_ONE, g), k), inv_k)),
-                    f32_from(f64_mul(f64_sub(f64_sub(F64_ONE, b), k), inv_k)),
-                    f32_from(k));
+      f32_from(f64_mul(f64_sub(f64_sub(F64_ONE, g), k), inv_k)),
+      f32_from(f64_mul(f64_sub(f64_sub(F64_ONE, b), k), inv_k)),
+      f32_from(k));
 }
 
 # ── Display P3 ────────
@@ -2120,8 +2120,8 @@ fn oklch_to_oklab(v) {
     var h = _rg_to_radians(f32_to(load32(v + 8)));
     var chroma = f32_to(load32(v + 4));
     return oklab_new(load32(v),
-                     f32_from(f64_mul(chroma, _rg_cos(h))),
-                     f32_from(f64_mul(chroma, _rg_sin(h))));
+      f32_from(f64_mul(chroma, _rg_cos(h))),
+      f32_from(f64_mul(chroma, _rg_sin(h))));
 }
 
 # Convenience: sRGB byte -> Oklab, through LinRgba.
@@ -2289,10 +2289,10 @@ fn delta_e_ciede2000(lab1, lab2) {
     }
 
     var t = f64_sub(f64_add(f64_add(f64_sub(F64_ONE,
-                f64_mul(0.17, _rg_cos(_rg_to_radians(f64_sub(hbp, 30.0))))),
-                f64_mul(0.24, _rg_cos(_rg_to_radians(f64_mul(2.0, hbp))))),
-                f64_mul(0.32, _rg_cos(_rg_to_radians(f64_add(f64_mul(3.0, hbp), 6.0))))),
-                f64_mul(0.20, _rg_cos(_rg_to_radians(f64_sub(f64_mul(4.0, hbp), 63.0)))));
+            f64_mul(0.17, _rg_cos(_rg_to_radians(f64_sub(hbp, 30.0))))),
+          f64_mul(0.24, _rg_cos(_rg_to_radians(f64_mul(2.0, hbp))))),
+        f64_mul(0.32, _rg_cos(_rg_to_radians(f64_add(f64_mul(3.0, hbp), 6.0))))),
+      f64_mul(0.20, _rg_cos(_rg_to_radians(f64_sub(f64_mul(4.0, hbp), 63.0)))));
 
     var ldiff = f64_sub(lbp, 50.0);
     var ld2 = f64_mul(ldiff, ldiff);
@@ -2311,7 +2311,7 @@ fn delta_e_ciede2000(lab1, lab2) {
     var ht = f64_div(dhp, sh);
 
     var sum = f64_add(f64_add(f64_add(f64_mul(lt, lt), f64_mul(ct, ct)), f64_mul(ht, ht)),
-                      f64_mul(f64_mul(rt, ct), ht));
+      f64_mul(f64_mul(rt, ct), ht));
     return f64_sqrt(sum);
 }
 
@@ -2744,13 +2744,13 @@ fn fill_checkerboard(buf, block_size, color_a, color_b) {
 # Write one interpolated pixel: `start + t * (end - start)` per channel, in f32.
 fn _write_lerp_px(dst, start, end, t) {
     store8(dst, _rg_f32_round_clamp_u8(_rg_f32_lerp(_rg_u8_to_f32(load8(start)),
-                                                    _rg_u8_to_f32(load8(end)), t)));
+          _rg_u8_to_f32(load8(end)), t)));
     store8(dst + 1, _rg_f32_round_clamp_u8(_rg_f32_lerp(_rg_u8_to_f32(load8(start + 1)),
-                                                        _rg_u8_to_f32(load8(end + 1)), t)));
+          _rg_u8_to_f32(load8(end + 1)), t)));
     store8(dst + 2, _rg_f32_round_clamp_u8(_rg_f32_lerp(_rg_u8_to_f32(load8(start + 2)),
-                                                        _rg_u8_to_f32(load8(end + 2)), t)));
+          _rg_u8_to_f32(load8(end + 2)), t)));
     store8(dst + 3, _rg_f32_round_clamp_u8(_rg_f32_lerp(_rg_u8_to_f32(load8(start + 3)),
-                                                        _rg_u8_to_f32(load8(end + 3)), t)));
+          _rg_u8_to_f32(load8(end + 3)), t)));
     return RG_ERR_NONE;
 }
 
@@ -3674,11 +3674,11 @@ fn affine_then(sm, om) {
     var otx: f64 = load64(om + 32);
     var oty: f64 = load64(om + 40);
     return affine_new(sa * oa + sc * ob,
-                      sb * oa + sd * ob,
-                      sa * oc + sc * od,
-                      sb * oc + sd * od,
-                      sa * otx + sc * oty + stx,
-                      sb * otx + sd * oty + sty);
+      sb * oa + sd * ob,
+      sa * oc + sc * od,
+      sb * oc + sd * od,
+      sa * otx + sc * oty + stx,
+      sb * otx + sd * oty + sty);
 }
 
 # Apply to a point; writes the (x, y) pair as two f64 to `out` (16 bytes),
@@ -3717,8 +3717,8 @@ fn affine_inverse(m) {
     var ic: f64 = f64_neg(c) * s;
     var id: f64 = a * s;
     return affine_new(ia, ib, ic, id,
-                      f64_neg(ia * tx + ic * ty),
-                      f64_neg(ib * tx + id * ty));
+      f64_neg(ia * tx + ic * ty),
+      f64_neg(ib * tx + id * ty));
 }
 
 #must_use
@@ -4200,8 +4200,8 @@ fn perspective_inverse(p) {
     if (f64_lt(f64_abs(det), _TF_SINGULAR_EPS) == 1) { return 0; }
     var s: f64 = 1.0 / det;
     return perspective_new(i00 * s, i01 * s, i02 * s,
-                           i10 * s, i11 * s, i12 * s,
-                           i20 * s, i21 * s, i22 * s);
+      i10 * s, i11 * s, i12 * s,
+      i20 * s, i21 * s, i22 * s);
 }
 
 # Solve an 8x8 system by Gaussian elimination with PARTIAL PIVOTING.
@@ -4316,8 +4316,8 @@ fn perspective_from_quad(src, dst) {
         return 0;
     }
     var p = perspective_new(load64(x), load64(x + 8), load64(x + 16),
-                            load64(x + 24), load64(x + 32), load64(x + 40),
-                            load64(x + 48), load64(x + 56), 1.0);
+      load64(x + 24), load64(x + 32), load64(x + 40),
+      load64(x + 48), load64(x + 56), 1.0);
     fl_free(a); fl_free(b); fl_free(x);
     return p;
 }
@@ -6551,8 +6551,8 @@ fn _cv_yuv420p_to_rgba(buf, kr, kgu, kgv, kb, err_out) {
 #must_use
 fn rgba_to_yuv420p(buf, err_out) {
     return _cv_rgba_to_yuv420p(buf, 77, 150, 29,
-                               (0 - 43), (0 - 85), 128,
-                               128, (0 - 107), (0 - 21), err_out);
+      (0 - 43), (0 - 85), 128,
+      128, (0 - 107), (0 - 21), err_out);
 }
 
 #must_use
@@ -6563,8 +6563,8 @@ fn yuv420p_to_rgba(buf, err_out) {
 #must_use
 fn rgba_to_yuv420p_bt709(buf, err_out) {
     return _cv_rgba_to_yuv420p(buf, 54, 183, 19,
-                               (0 - 29), (0 - 99), 128,
-                               128, (0 - 116), (0 - 12), err_out);
+      (0 - 29), (0 - 99), 128,
+      128, (0 - 116), (0 - 12), err_out);
 }
 
 #must_use
@@ -6575,8 +6575,8 @@ fn yuv420p_to_rgba_bt709(buf, err_out) {
 #must_use
 fn rgba_to_yuv420p_bt2020(buf, err_out) {
     return _cv_rgba_to_yuv420p(buf, 67, 174, 15,
-                               (0 - 18), (0 - 46), 64,
-                               64, (0 - 58), (0 - 6), err_out);
+      (0 - 18), (0 - 46), 64,
+      64, (0 - 58), (0 - 6), err_out);
 }
 
 #must_use
@@ -6983,7 +6983,7 @@ fn _icc_read_u32_be(data, len, off, err_out) {
     if (off + 4 > len) { store64(err_out, RG_ERR_PARSE); return 0; }
     store64(err_out, RG_ERR_NONE);
     return (load8(data + off) << 24) | (load8(data + off + 1) << 16)
-         | (load8(data + off + 2) << 8) | load8(data + off + 3);
+    | (load8(data + off + 2) << 8) | load8(data + off + 3);
 }
 
 # Signed 32-bit, sign-extended from the 32-bit value.
@@ -7409,8 +7409,8 @@ fn icc_profile_apply(p, r, g, b, out) {
         # Column-major: component c of the output sums element c of each
         # primary's row.
         var v = f64_add(f64_add(f64_mul(load64(m + c * 8), rl),
-                                f64_mul(load64(m + 24 + c * 8), gl)),
-                        f64_mul(load64(m + 48 + c * 8), bl));
+            f64_mul(load64(m + 24 + c * 8), gl)),
+          f64_mul(load64(m + 48 + c * 8), bl));
         store64(out + c * 8, v);
         c = c + 1;
     }
@@ -7623,7 +7623,7 @@ fn _icc_apply_curve(curve, n, v) {
 # 255. Everything downstream of the byte layout is identical.
 #must_use
 fn _icc_lut_build(data, len, major, minor, cs_off, grid, in_start, in_entries,
-                  lut_start, scale16, err_out) {
+  lut_start, scale16, err_out) {
     var p = fl_calloc(_ILP_SIZE);
     if (p == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
     store64(p, major);
@@ -7735,7 +7735,7 @@ fn _icc_parse_mft2(data, len, off, size, major, minor, cs_off, err_out) {
         return 0;
     }
     return _icc_lut_build(data, len, major, minor, cs_off, grid, in_start,
-                          in_entries, lut_start, 1, err_out);
+      in_entries, lut_start, 1, err_out);
 }
 
 # mft1: 8-bit samples, and both tables are a fixed 256 entries — the entry
@@ -7756,7 +7756,7 @@ fn _icc_parse_mft1(data, len, off, size, major, minor, cs_off, err_out) {
         return 0;
     }
     return _icc_lut_build(data, len, major, minor, cs_off, grid, in_start,
-                          256, lut_start, 0, err_out);
+      256, lut_start, 0, err_out);
 }
 
 # Parse a LUT-based profile. Reads the A2B0 tag and dispatches on its type
@@ -8458,7 +8458,7 @@ fn spv_finish(s, out_ptr) {
     var ty = load64(s + 16);
     var body = load64(s + 24);
     var total = _SV_HDR_WORDS + _sv_buf_len(pre) + _sv_buf_len(ann)
-              + _sv_buf_len(ty) + _sv_buf_len(body);
+    + _sv_buf_len(ty) + _sv_buf_len(body);
     var out = fl_alloc(total * 4);
     if (out == 0) { return 0; }
 
@@ -8705,7 +8705,7 @@ fn _gk_prologue(s) {
         var chan = packed;
         if (sh > 0) {
             chan = spv_binop(s, SPIRV_OP_SHR_LOGICAL, u32t, packed,
-                             spv_const(s, u32t, sh * 8));
+              spv_const(s, u32t, sh * 8));
         }
         var byte = spv_binop(s, SPIRV_OP_BITWISE_AND, u32t, chan, mask);
         var fl = spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t, byte);
@@ -8986,12 +8986,12 @@ fn _gk_guard_open2(s, k, b1, v1, b2, v2) {
     var boolt = load64(k + 16);
     var one = spv_const(s, u32t, 1);
     var d1 = spv_binop(s, SPIRV_OP_ISUB, u32t,
-               spv_binop(s, SPIRV_OP_ISUB, u32t, b1, one), v1);
+      spv_binop(s, SPIRV_OP_ISUB, u32t, b1, one), v1);
     var d2 = spv_binop(s, SPIRV_OP_ISUB, u32t,
-               spv_binop(s, SPIRV_OP_ISUB, u32t, b2, one), v2);
+      spv_binop(s, SPIRV_OP_ISUB, u32t, b2, one), v2);
     var both = spv_binop(s, SPIRV_OP_BITWISE_OR, u32t, d1, d2);
     var cond = spv_binop(s, SPIRV_OP_UGREATERTHAN, boolt,
-                         spv_const(s, u32t, 0x80000000), both);
+      spv_const(s, u32t, 0x80000000), both);
     var lwork = spv_id(s);
     var lmerge = spv_id(s);
     spv_selection_merge(s, lmerge);
@@ -9053,16 +9053,16 @@ fn gk_dissolve(s) {
             dc = spv_binop(s, SPIRV_OP_SHR_LOGICAL, u32t, dw, sh);
         }
         var sf = spv_binop(s, SPIRV_OP_FMUL, f32t,
-                   spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t,
-                     spv_binop(s, SPIRV_OP_BITWISE_AND, u32t, sc, mask)), inv255);
+          spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t,
+            spv_binop(s, SPIRV_OP_BITWISE_AND, u32t, sc, mask)), inv255);
         var df = spv_binop(s, SPIRV_OP_FMUL, f32t,
-                   spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t,
-                     spv_binop(s, SPIRV_OP_BITWISE_AND, u32t, dc, mask)), inv255);
+          spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t,
+            spv_binop(s, SPIRV_OP_BITWISE_AND, u32t, dc, mask)), inv255);
         var diff = spv_binop(s, SPIRV_OP_FSUB, f32t, df, sf);
         var mixed = spv_binop(s, SPIRV_OP_FADD, f32t, sf,
-                              spv_binop(s, SPIRV_OP_FMUL, f32t, diff, f));
+          spv_binop(s, SPIRV_OP_FMUL, f32t, diff, f));
         var scaled = spv_binop(s, SPIRV_OP_FADD, f32t,
-                       spv_binop(s, SPIRV_OP_FMUL, f32t, mixed, c255), chalf);
+          spv_binop(s, SPIRV_OP_FMUL, f32t, mixed, c255), chalf);
         var rounded = spv_ext_unary(s, f32t, GLSL_STD450_FLOOR, scaled);
         var lo = spv_ext_binary(s, f32t, GLSL_STD450_FMAX, rounded, czero);
         var hi = spv_ext_binary(s, f32t, GLSL_STD450_FMIN, lo, c255);
@@ -9100,8 +9100,8 @@ fn gk_wipe(s) {
     # conditions merge into one selection instead of nesting.
     var x = spv_binop(s, SPIRV_OP_UMOD, u32t, idx, width);
     var wf = spv_binop(s, SPIRV_OP_FMUL, f32t,
-                       spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t, width),
-                       _gk_cpy_param_f32(s, k, 3));
+      spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t, width),
+      _gk_cpy_param_f32(s, k, 3));
     var wipe_x = spv_unop(s, SPIRV_OP_CONVERT_F_TO_S, u32t, wf);
     # The store happens when idx is in range AND x >= wipe_x. The second is
     # written `x + 1 > wipe_x` because ULessThan is absent from mabda's map.
@@ -9140,7 +9140,7 @@ fn gk_crop(s) {
     var srow = spv_binop(s, SPIRV_OP_IADD, u32t, sy, gy);
     var scol = spv_binop(s, SPIRV_OP_IADD, u32t, sx, gx);
     var sidx = spv_binop(s, SPIRV_OP_IADD, u32t,
-                 spv_binop(s, SPIRV_OP_IMUL, u32t, srow, src_w), scol);
+      spv_binop(s, SPIRV_OP_IMUL, u32t, srow, src_w), scol);
     _gk_copy_word(s, k, sidx, idx);
 
     _gk_guard_close(s, lm);
@@ -9166,7 +9166,7 @@ fn gk_flip_horizontal(s) {
     var row = spv_binop(s, SPIRV_OP_IMUL, u32t, y, w);
     var sidx = idx;
     var mirrored = spv_binop(s, SPIRV_OP_ISUB, u32t,
-                     spv_binop(s, SPIRV_OP_ISUB, u32t, w, spv_const(s, u32t, 1)), x);
+      spv_binop(s, SPIRV_OP_ISUB, u32t, w, spv_const(s, u32t, 1)), x);
     var didx = spv_binop(s, SPIRV_OP_IADD, u32t, row, mirrored);
     _gk_copy_word(s, k, sidx, didx);
 
@@ -9193,9 +9193,9 @@ fn gk_flip_vertical(s) {
 
     var sidx = idx;
     var mrow = spv_binop(s, SPIRV_OP_ISUB, u32t,
-                 spv_binop(s, SPIRV_OP_ISUB, u32t, h, spv_const(s, u32t, 1)), y);
+      spv_binop(s, SPIRV_OP_ISUB, u32t, h, spv_const(s, u32t, 1)), y);
     var didx = spv_binop(s, SPIRV_OP_IADD, u32t,
-                 spv_binop(s, SPIRV_OP_IMUL, u32t, mrow, w), x);
+      spv_binop(s, SPIRV_OP_IMUL, u32t, mrow, w), x);
     _gk_copy_word(s, k, sidx, didx);
 
     _gk_guard_close(s, lm);
@@ -9277,15 +9277,15 @@ fn _gk_byte_f32(s, k, word, i, mask) {
         chan = spv_binop(s, SPIRV_OP_SHR_LOGICAL, u32t, word, spv_const(s, u32t, i * 8));
     }
     return spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, load64(k + 24),
-             spv_binop(s, SPIRV_OP_BITWISE_AND, u32t, chan, mask));
+      spv_binop(s, SPIRV_OP_BITWISE_AND, u32t, chan, mask));
 }
 
 # a + t * (b - a), the scalar form of WGSL's mix().
 #must_use
 fn _gk_lerp(s, f32t, a, b, t) {
     return spv_binop(s, SPIRV_OP_FADD, f32t, a,
-             spv_binop(s, SPIRV_OP_FMUL, f32t,
-               spv_binop(s, SPIRV_OP_FSUB, f32t, b, a), t));
+      spv_binop(s, SPIRV_OP_FMUL, f32t,
+        spv_binop(s, SPIRV_OP_FSUB, f32t, b, a), t));
 }
 
 # ── RESIZE NEAREST ────────
@@ -9313,11 +9313,11 @@ fn gk_resize_nearest(s) {
     var gx = spv_binop(s, SPIRV_OP_UMOD, u32t, idx, dst_w);
     var gy = spv_binop(s, SPIRV_OP_UDIV, u32t, idx, dst_w);
     var sx = spv_binop(s, SPIRV_OP_UDIV, u32t,
-               spv_binop(s, SPIRV_OP_IMUL, u32t, gx, src_w), dst_w);
+      spv_binop(s, SPIRV_OP_IMUL, u32t, gx, src_w), dst_w);
     var sy = spv_binop(s, SPIRV_OP_UDIV, u32t,
-               spv_binop(s, SPIRV_OP_IMUL, u32t, gy, src_h), dst_h);
+      spv_binop(s, SPIRV_OP_IMUL, u32t, gy, src_h), dst_h);
     var sidx = spv_binop(s, SPIRV_OP_IADD, u32t,
-                 spv_binop(s, SPIRV_OP_IMUL, u32t, sy, src_w), sx);
+      spv_binop(s, SPIRV_OP_IMUL, u32t, sy, src_w), sx);
     _gk_copy_word(s, k, sidx, idx);
 
     _gk_guard_close(s, lm);
@@ -9374,22 +9374,22 @@ fn gk_resize_bilinear(s) {
     var inv_denx = _gk_cpy_param_f32(s, k, 5);
     var inv_deny = _gk_cpy_param_f32(s, k, 6);
     var sx = spv_binop(s, SPIRV_OP_FMUL, f32t,
-               spv_binop(s, SPIRV_OP_FMUL, f32t,
-                 spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t, gx), swm1), inv_denx);
+      spv_binop(s, SPIRV_OP_FMUL, f32t,
+        spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t, gx), swm1), inv_denx);
     var sy = spv_binop(s, SPIRV_OP_FMUL, f32t,
-               spv_binop(s, SPIRV_OP_FMUL, f32t,
-                 spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t, gy), shm1), inv_deny);
+      spv_binop(s, SPIRV_OP_FMUL, f32t,
+        spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t, gy), shm1), inv_deny);
 
     var fx0 = spv_ext_unary(s, f32t, GLSL_STD450_FLOOR, sx);
     var fy0 = spv_ext_unary(s, f32t, GLSL_STD450_FLOOR, sy);
     var x0 = spv_unop(s, SPIRV_OP_CONVERT_F_TO_S, u32t, fx0);
     var y0 = spv_unop(s, SPIRV_OP_CONVERT_F_TO_S, u32t, fy0);
     var x1 = spv_unop(s, SPIRV_OP_CONVERT_F_TO_S, u32t,
-               spv_ext_binary(s, f32t, GLSL_STD450_FMIN,
-                 spv_binop(s, SPIRV_OP_FADD, f32t, fx0, one), swm1));
+      spv_ext_binary(s, f32t, GLSL_STD450_FMIN,
+        spv_binop(s, SPIRV_OP_FADD, f32t, fx0, one), swm1));
     var y1 = spv_unop(s, SPIRV_OP_CONVERT_F_TO_S, u32t,
-               spv_ext_binary(s, f32t, GLSL_STD450_FMIN,
-                 spv_binop(s, SPIRV_OP_FADD, f32t, fy0, one), shm1));
+      spv_ext_binary(s, f32t, GLSL_STD450_FMIN,
+        spv_binop(s, SPIRV_OP_FADD, f32t, fy0, one), shm1));
     var fx = spv_binop(s, SPIRV_OP_FSUB, f32t, sx, fx0);
     var fy = spv_binop(s, SPIRV_OP_FSUB, f32t, sy, fy0);
 
@@ -9407,13 +9407,13 @@ fn gk_resize_bilinear(s) {
     var pu2 = spv_type_ptr(s, SPIRV_SC_STORAGE_BUFFER, u32t);
     var z0 = spv_const(s, load64(k + 8), 0);
     var w00 = spv_load(s, u32t, spv_access_chain2(s, pu2, load64(k + 32), z0,
-                spv_binop(s, SPIRV_OP_IADD, u32t, r0, x0)));
+        spv_binop(s, SPIRV_OP_IADD, u32t, r0, x0)));
     var w10 = spv_load(s, u32t, spv_access_chain2(s, pu2, load64(k + 32), z0,
-                spv_binop(s, SPIRV_OP_IADD, u32t, r0, x1)));
+        spv_binop(s, SPIRV_OP_IADD, u32t, r0, x1)));
     var w01 = spv_load(s, u32t, spv_access_chain2(s, pu2, load64(k + 32), z0,
-                spv_binop(s, SPIRV_OP_IADD, u32t, r1, x0)));
+        spv_binop(s, SPIRV_OP_IADD, u32t, r1, x0)));
     var w11 = spv_load(s, u32t, spv_access_chain2(s, pu2, load64(k + 32), z0,
-                spv_binop(s, SPIRV_OP_IADD, u32t, r1, x1)));
+        spv_binop(s, SPIRV_OP_IADD, u32t, r1, x1)));
 
     var mask = spv_const(s, u32t, 255);
     var out4[32];
@@ -9431,7 +9431,7 @@ fn gk_resize_bilinear(s) {
     var packed = _gk_pack4(s, k, &out4);
     var pu = spv_type_ptr(s, SPIRV_SC_STORAGE_BUFFER, u32t);
     spv_store(s, spv_access_chain2(s, pu, load64(k + 40),
-                                   spv_const(s, load64(k + 8), 0), idx), packed);
+        spv_const(s, load64(k + 8), 0), idx), packed);
 
     _gk_guard_close(s, lm);
     spv_fn_end(s);
@@ -10525,7 +10525,7 @@ fn _gp_run_1buf(ctx, buf, kind, params, groups, err_out) {
     # the downloaded Vec; here the buffer is already the right size and owned by
     # the caller, so an in-place read avoids an allocation and a copy.
     var back = gpu_buffer_read(m, gpu_buffer_handle(gb), 0,
-                               pixel_buffer_data(buf), pixel_buffer_len(buf));
+      pixel_buffer_data(buf), pixel_buffer_len(buf));
     gpu_buffer_free(ctx, gb);
     if (back != 0) { store64(err_out, RG_GPU_ERR_BUFFER_OP); return RG_ERR_OTHER; }
     store64(err_out, RG_GPU_ERR_NONE);
@@ -10543,7 +10543,7 @@ fn _gp_run_1buf(ctx, buf, kind, params, groups, err_out) {
 fn _gp_bind(dst, gb) {
     var obj = gpu_buffer_handle(gb);
     return native_buf_pair_write(dst, load64(obj + NATIVE_BUF_FIELD_HANDLE),
-                                      load64(obj + NATIVE_BUF_FIELD_VA));
+      load64(obj + NATIVE_BUF_FIELD_VA));
 }
 
 # A two-buffer operation: `src` is read, `dst` is read AND written.
@@ -10584,7 +10584,7 @@ fn _gp_run_2buf(ctx, src, dst, kind, params, groups, err_out) {
         return RG_ERR_OTHER;
     }
     var back = gpu_buffer_read(m, gpu_buffer_handle(dg), 0,
-                               pixel_buffer_data(dst), pixel_buffer_len(dst));
+      pixel_buffer_data(dst), pixel_buffer_len(dst));
     gpu_buffer_free(ctx, dg);
     gpu_buffer_free(ctx, sg);
     if (back != 0) { store64(err_out, RG_GPU_ERR_BUFFER_OP); return RG_ERR_OTHER; }
@@ -10710,13 +10710,13 @@ fn gpu_wipe(ctx, src, dst, progress, err_out) {
 #must_use
 fn gpu_flip_horizontal(ctx, buf, err_out) {
     return _gp_geom(ctx, buf, GP_K_FLIP_H, pixel_buffer_width(buf),
-                    pixel_buffer_height(buf), 0, 0, err_out);
+      pixel_buffer_height(buf), 0, 0, err_out);
 }
 
 #must_use
 fn gpu_flip_vertical(ctx, buf, err_out) {
     return _gp_geom(ctx, buf, GP_K_FLIP_V, pixel_buffer_width(buf),
-                    pixel_buffer_height(buf), 0, 0, err_out);
+      pixel_buffer_height(buf), 0, 0, err_out);
 }
 
 # Copy the rectangle (left, top) .. (right, bottom) into a new buffer.
