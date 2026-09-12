@@ -147,22 +147,30 @@ fn gpu_context_backend_name(c) { return load64(c + 40); }
 # the mabda context too — a context handed in by a launcher belongs to the
 # launcher.
 #
-# ⚠ THE ARGUMENT IS A TAGGED RESULT, NOT A CONTEXT. Every mabda context
+# ⚠ THE ARGUMENTS ARE A TAGGED RESULT, NOT A CONTEXT. Every mabda context
 # constructor returns `gpu_ok(ctx)` / `gpu_err_result(code)`, and the payload
 # must be unwrapped before use. Passing the result straight to `gpu_ctx_device`
-# dereferences the Result header as if it were a context: it does not fault
+# dereferences the payload as if it were a context: it does not fault
 # immediately, it returns plausible garbage — the first version of this module
 # reported a context created successfully with `backend=unknown`, then
 # segfaulted on the next run. A wrong answer that looks right is the failure
 # mode this whole port is built to avoid.
+#
+# ⚠ SINCE cyrius 6.6.0 / mabda 4.1.1 a Result is a `: stack` enum — a REGISTER
+# PAIR (tag, payload), not a heap box — so it CANNOT arrive in one parameter.
+# This takes BOTH halves and every caller must `var t, v = f();` first. The
+# pre-flip shape took one `res` and read it with the deleted `payload()`
+# accessor; passing `f()` straight in as one argument binds the TAG ALONE, so
+# an Ok context arrived as the constant 0 and an Err code arrived as 1 — the
+# `res == 0` guard below then reported NO_ADAPTER for every successful context
+# and MABDA error code 1 for every failure. CHANGELOG [ranga 6.6.2 migration].
 #must_use
-fn _gc_wrap(res, owns, err_out) {
-    if (res == 0) { store64(err_out, RG_GPU_ERR_NO_ADAPTER); return 0; }
-    if (is_err_result(res) == 1) {
-        store64(err_out, gpu_error_from_mabda(gpu_err_code(payload(res))));
+fn _gc_wrap(t, v, owns, err_out) {
+    if (is_err_result(t) == 1) {
+        store64(err_out, gpu_error_from_mabda(gpu_err_code(v)));
         return 0;
     }
-    var mctx = payload(res);
+    var mctx = v;
     if (mctx == 0) { store64(err_out, RG_GPU_ERR_NO_ADAPTER); return 0; }
     var c = fl_calloc(_GC_SIZE);
     if (c == 0) { store64(err_out, RG_GPU_ERR_DEVICE_REQUEST); return 0; }
@@ -202,13 +210,15 @@ fn _gc_backend_label(kind) {
 # Create a context on the native AMD backend (amdgpu DRM / GFX9).
 #must_use
 fn gpu_context_new_amd(err_out) {
-    return _gc_wrap(gpu_context_new_native(), 1, err_out);
+    var t, v = gpu_context_new_native();
+    return _gc_wrap(t, v, 1, err_out);
 }
 
 # Create a context on the native NVIDIA backend (nouveau DRM / SM75).
 #must_use
 fn gpu_context_new_nvidia(err_out) {
-    return _gc_wrap(gpu_context_new_native_nvidia(), 1, err_out);
+    var t, v = gpu_context_new_native_nvidia();
+    return _gc_wrap(t, v, 1, err_out);
 }
 
 # Adopt the context a C launcher pre-initialised on the wgpu path. The launcher
@@ -216,7 +226,8 @@ fn gpu_context_new_nvidia(err_out) {
 #must_use
 fn gpu_context_from_launcher(preinit_ptr, err_out) {
     if (preinit_ptr == 0) { store64(err_out, RG_GPU_ERR_NO_ADAPTER); return 0; }
-    return _gc_wrap(gpu_context_from_preinit(preinit_ptr), 0, err_out);
+    var t, v = gpu_context_from_preinit(preinit_ptr);
+    return _gc_wrap(t, v, 0, err_out);
 }
 
 fn gpu_context_free(c) {

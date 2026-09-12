@@ -568,7 +568,7 @@ gradient_radial(grnan, f32c(F64_ONE), f32c(F64_ONE), f32_from(_RG_NAN), C_RED, C
 assert_eq(px4(grnan, 4, 255, 0, 0, 255), 1, "NaN radius behaves as 1e-6, not as a NaN wipe");
 
 assert_eq(gradient_radial(argb1, c10, c10, c10, C_RED, C_BLUE), RG_ERR_INVALID_FORMAT,
-          "gradient_radial rejects Argb8");
+  "gradient_radial rejects Argb8");
 
 pixel_buffer_free(gr); pixel_buffer_free(gr2); pixel_buffer_free(gr3);
 pixel_buffer_free(grn); pixel_buffer_free(grnan);
@@ -658,9 +658,9 @@ composite_at(dsrc, ddst, 0, 0, f32c(0.5));
 assert_eq(px4(ddst, 0, 100, 0, 0, 100), 1, "composite_at uses div255: 200 x 127 -> 100, not 99");
 
 assert_eq(composite_at(argb1, dst, 0, 0, f32c(F64_ONE)), RG_ERR_INVALID_FORMAT,
-          "composite_at rejects an Argb8 source");
+  "composite_at rejects an Argb8 source");
 assert_eq(composite_at(src, argb1, 0, 0, f32c(F64_ONE)), RG_ERR_INVALID_FORMAT,
-          "composite_at rejects an Argb8 destination");
+  "composite_at rejects an Argb8 destination");
 
 pixel_buffer_free(dclip); pixel_buffer_free(dneg); pixel_buffer_free(dzero); pixel_buffer_free(dout);
 pixel_buffer_free(dspill);
@@ -714,9 +714,9 @@ composite_at_argb(asrc, za_dst, 50, 50, f32c(F64_ONE));
 assert_eq(px4(za_dst, 0, 0, 0, 0, 0), 1, "argb fully clipped writes nothing");
 
 assert_eq(composite_at_argb(src, adst, 0, 0, f32c(F64_ONE)), RG_ERR_INVALID_FORMAT,
-          "composite_at_argb rejects an Rgba8 source");
+  "composite_at_argb rejects an Rgba8 source");
 assert_eq(composite_at_argb(asrc, dst, 0, 0, f32c(F64_ONE)), RG_ERR_INVALID_FORMAT,
-          "composite_at_argb rejects an Rgba8 destination");
+  "composite_at_argb rejects an Rgba8 destination");
 
 pixel_buffer_free(adst); pixel_buffer_free(asrc);
 pixel_buffer_free(xa_dst); pixel_buffer_free(xa_src);

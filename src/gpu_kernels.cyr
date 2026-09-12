@@ -152,7 +152,7 @@ fn _gk_prologue(s) {
         var chan = packed;
         if (sh > 0) {
             chan = spv_binop(s, SPIRV_OP_SHR_LOGICAL, u32t, packed,
-                             spv_const(s, u32t, sh * 8));
+              spv_const(s, u32t, sh * 8));
         }
         var byte = spv_binop(s, SPIRV_OP_BITWISE_AND, u32t, chan, mask);
         var fl = spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t, byte);
@@ -433,12 +433,12 @@ fn _gk_guard_open2(s, k, b1, v1, b2, v2) {
     var boolt = load64(k + 16);
     var one = spv_const(s, u32t, 1);
     var d1 = spv_binop(s, SPIRV_OP_ISUB, u32t,
-               spv_binop(s, SPIRV_OP_ISUB, u32t, b1, one), v1);
+      spv_binop(s, SPIRV_OP_ISUB, u32t, b1, one), v1);
     var d2 = spv_binop(s, SPIRV_OP_ISUB, u32t,
-               spv_binop(s, SPIRV_OP_ISUB, u32t, b2, one), v2);
+      spv_binop(s, SPIRV_OP_ISUB, u32t, b2, one), v2);
     var both = spv_binop(s, SPIRV_OP_BITWISE_OR, u32t, d1, d2);
     var cond = spv_binop(s, SPIRV_OP_UGREATERTHAN, boolt,
-                         spv_const(s, u32t, 0x80000000), both);
+      spv_const(s, u32t, 0x80000000), both);
     var lwork = spv_id(s);
     var lmerge = spv_id(s);
     spv_selection_merge(s, lmerge);
@@ -500,16 +500,16 @@ fn gk_dissolve(s) {
             dc = spv_binop(s, SPIRV_OP_SHR_LOGICAL, u32t, dw, sh);
         }
         var sf = spv_binop(s, SPIRV_OP_FMUL, f32t,
-                   spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t,
-                     spv_binop(s, SPIRV_OP_BITWISE_AND, u32t, sc, mask)), inv255);
+          spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t,
+            spv_binop(s, SPIRV_OP_BITWISE_AND, u32t, sc, mask)), inv255);
         var df = spv_binop(s, SPIRV_OP_FMUL, f32t,
-                   spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t,
-                     spv_binop(s, SPIRV_OP_BITWISE_AND, u32t, dc, mask)), inv255);
+          spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t,
+            spv_binop(s, SPIRV_OP_BITWISE_AND, u32t, dc, mask)), inv255);
         var diff = spv_binop(s, SPIRV_OP_FSUB, f32t, df, sf);
         var mixed = spv_binop(s, SPIRV_OP_FADD, f32t, sf,
-                              spv_binop(s, SPIRV_OP_FMUL, f32t, diff, f));
+          spv_binop(s, SPIRV_OP_FMUL, f32t, diff, f));
         var scaled = spv_binop(s, SPIRV_OP_FADD, f32t,
-                       spv_binop(s, SPIRV_OP_FMUL, f32t, mixed, c255), chalf);
+          spv_binop(s, SPIRV_OP_FMUL, f32t, mixed, c255), chalf);
         var rounded = spv_ext_unary(s, f32t, GLSL_STD450_FLOOR, scaled);
         var lo = spv_ext_binary(s, f32t, GLSL_STD450_FMAX, rounded, czero);
         var hi = spv_ext_binary(s, f32t, GLSL_STD450_FMIN, lo, c255);
@@ -547,8 +547,8 @@ fn gk_wipe(s) {
     # conditions merge into one selection instead of nesting.
     var x = spv_binop(s, SPIRV_OP_UMOD, u32t, idx, width);
     var wf = spv_binop(s, SPIRV_OP_FMUL, f32t,
-                       spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t, width),
-                       _gk_cpy_param_f32(s, k, 3));
+      spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t, width),
+      _gk_cpy_param_f32(s, k, 3));
     var wipe_x = spv_unop(s, SPIRV_OP_CONVERT_F_TO_S, u32t, wf);
     # The store happens when idx is in range AND x >= wipe_x. The second is
     # written `x + 1 > wipe_x` because ULessThan is absent from mabda's map.
@@ -587,7 +587,7 @@ fn gk_crop(s) {
     var srow = spv_binop(s, SPIRV_OP_IADD, u32t, sy, gy);
     var scol = spv_binop(s, SPIRV_OP_IADD, u32t, sx, gx);
     var sidx = spv_binop(s, SPIRV_OP_IADD, u32t,
-                 spv_binop(s, SPIRV_OP_IMUL, u32t, srow, src_w), scol);
+      spv_binop(s, SPIRV_OP_IMUL, u32t, srow, src_w), scol);
     _gk_copy_word(s, k, sidx, idx);
 
     _gk_guard_close(s, lm);
@@ -613,7 +613,7 @@ fn gk_flip_horizontal(s) {
     var row = spv_binop(s, SPIRV_OP_IMUL, u32t, y, w);
     var sidx = idx;
     var mirrored = spv_binop(s, SPIRV_OP_ISUB, u32t,
-                     spv_binop(s, SPIRV_OP_ISUB, u32t, w, spv_const(s, u32t, 1)), x);
+      spv_binop(s, SPIRV_OP_ISUB, u32t, w, spv_const(s, u32t, 1)), x);
     var didx = spv_binop(s, SPIRV_OP_IADD, u32t, row, mirrored);
     _gk_copy_word(s, k, sidx, didx);
 
@@ -640,9 +640,9 @@ fn gk_flip_vertical(s) {
 
     var sidx = idx;
     var mrow = spv_binop(s, SPIRV_OP_ISUB, u32t,
-                 spv_binop(s, SPIRV_OP_ISUB, u32t, h, spv_const(s, u32t, 1)), y);
+      spv_binop(s, SPIRV_OP_ISUB, u32t, h, spv_const(s, u32t, 1)), y);
     var didx = spv_binop(s, SPIRV_OP_IADD, u32t,
-                 spv_binop(s, SPIRV_OP_IMUL, u32t, mrow, w), x);
+      spv_binop(s, SPIRV_OP_IMUL, u32t, mrow, w), x);
     _gk_copy_word(s, k, sidx, didx);
 
     _gk_guard_close(s, lm);
@@ -724,15 +724,15 @@ fn _gk_byte_f32(s, k, word, i, mask) {
         chan = spv_binop(s, SPIRV_OP_SHR_LOGICAL, u32t, word, spv_const(s, u32t, i * 8));
     }
     return spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, load64(k + 24),
-             spv_binop(s, SPIRV_OP_BITWISE_AND, u32t, chan, mask));
+      spv_binop(s, SPIRV_OP_BITWISE_AND, u32t, chan, mask));
 }
 
 # a + t * (b - a), the scalar form of WGSL's mix().
 #must_use
 fn _gk_lerp(s, f32t, a, b, t) {
     return spv_binop(s, SPIRV_OP_FADD, f32t, a,
-             spv_binop(s, SPIRV_OP_FMUL, f32t,
-               spv_binop(s, SPIRV_OP_FSUB, f32t, b, a), t));
+      spv_binop(s, SPIRV_OP_FMUL, f32t,
+        spv_binop(s, SPIRV_OP_FSUB, f32t, b, a), t));
 }
 
 # ── RESIZE NEAREST ────────
@@ -760,11 +760,11 @@ fn gk_resize_nearest(s) {
     var gx = spv_binop(s, SPIRV_OP_UMOD, u32t, idx, dst_w);
     var gy = spv_binop(s, SPIRV_OP_UDIV, u32t, idx, dst_w);
     var sx = spv_binop(s, SPIRV_OP_UDIV, u32t,
-               spv_binop(s, SPIRV_OP_IMUL, u32t, gx, src_w), dst_w);
+      spv_binop(s, SPIRV_OP_IMUL, u32t, gx, src_w), dst_w);
     var sy = spv_binop(s, SPIRV_OP_UDIV, u32t,
-               spv_binop(s, SPIRV_OP_IMUL, u32t, gy, src_h), dst_h);
+      spv_binop(s, SPIRV_OP_IMUL, u32t, gy, src_h), dst_h);
     var sidx = spv_binop(s, SPIRV_OP_IADD, u32t,
-                 spv_binop(s, SPIRV_OP_IMUL, u32t, sy, src_w), sx);
+      spv_binop(s, SPIRV_OP_IMUL, u32t, sy, src_w), sx);
     _gk_copy_word(s, k, sidx, idx);
 
     _gk_guard_close(s, lm);
@@ -821,22 +821,22 @@ fn gk_resize_bilinear(s) {
     var inv_denx = _gk_cpy_param_f32(s, k, 5);
     var inv_deny = _gk_cpy_param_f32(s, k, 6);
     var sx = spv_binop(s, SPIRV_OP_FMUL, f32t,
-               spv_binop(s, SPIRV_OP_FMUL, f32t,
-                 spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t, gx), swm1), inv_denx);
+      spv_binop(s, SPIRV_OP_FMUL, f32t,
+        spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t, gx), swm1), inv_denx);
     var sy = spv_binop(s, SPIRV_OP_FMUL, f32t,
-               spv_binop(s, SPIRV_OP_FMUL, f32t,
-                 spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t, gy), shm1), inv_deny);
+      spv_binop(s, SPIRV_OP_FMUL, f32t,
+        spv_unop(s, SPIRV_OP_CONVERT_U_TO_F, f32t, gy), shm1), inv_deny);
 
     var fx0 = spv_ext_unary(s, f32t, GLSL_STD450_FLOOR, sx);
     var fy0 = spv_ext_unary(s, f32t, GLSL_STD450_FLOOR, sy);
     var x0 = spv_unop(s, SPIRV_OP_CONVERT_F_TO_S, u32t, fx0);
     var y0 = spv_unop(s, SPIRV_OP_CONVERT_F_TO_S, u32t, fy0);
     var x1 = spv_unop(s, SPIRV_OP_CONVERT_F_TO_S, u32t,
-               spv_ext_binary(s, f32t, GLSL_STD450_FMIN,
-                 spv_binop(s, SPIRV_OP_FADD, f32t, fx0, one), swm1));
+      spv_ext_binary(s, f32t, GLSL_STD450_FMIN,
+        spv_binop(s, SPIRV_OP_FADD, f32t, fx0, one), swm1));
     var y1 = spv_unop(s, SPIRV_OP_CONVERT_F_TO_S, u32t,
-               spv_ext_binary(s, f32t, GLSL_STD450_FMIN,
-                 spv_binop(s, SPIRV_OP_FADD, f32t, fy0, one), shm1));
+      spv_ext_binary(s, f32t, GLSL_STD450_FMIN,
+        spv_binop(s, SPIRV_OP_FADD, f32t, fy0, one), shm1));
     var fx = spv_binop(s, SPIRV_OP_FSUB, f32t, sx, fx0);
     var fy = spv_binop(s, SPIRV_OP_FSUB, f32t, sy, fy0);
 
@@ -854,13 +854,13 @@ fn gk_resize_bilinear(s) {
     var pu2 = spv_type_ptr(s, SPIRV_SC_STORAGE_BUFFER, u32t);
     var z0 = spv_const(s, load64(k + 8), 0);
     var w00 = spv_load(s, u32t, spv_access_chain2(s, pu2, load64(k + 32), z0,
-                spv_binop(s, SPIRV_OP_IADD, u32t, r0, x0)));
+        spv_binop(s, SPIRV_OP_IADD, u32t, r0, x0)));
     var w10 = spv_load(s, u32t, spv_access_chain2(s, pu2, load64(k + 32), z0,
-                spv_binop(s, SPIRV_OP_IADD, u32t, r0, x1)));
+        spv_binop(s, SPIRV_OP_IADD, u32t, r0, x1)));
     var w01 = spv_load(s, u32t, spv_access_chain2(s, pu2, load64(k + 32), z0,
-                spv_binop(s, SPIRV_OP_IADD, u32t, r1, x0)));
+        spv_binop(s, SPIRV_OP_IADD, u32t, r1, x0)));
     var w11 = spv_load(s, u32t, spv_access_chain2(s, pu2, load64(k + 32), z0,
-                spv_binop(s, SPIRV_OP_IADD, u32t, r1, x1)));
+        spv_binop(s, SPIRV_OP_IADD, u32t, r1, x1)));
 
     var mask = spv_const(s, u32t, 255);
     var out4[32];
@@ -878,7 +878,7 @@ fn gk_resize_bilinear(s) {
     var packed = _gk_pack4(s, k, &out4);
     var pu = spv_type_ptr(s, SPIRV_SC_STORAGE_BUFFER, u32t);
     spv_store(s, spv_access_chain2(s, pu, load64(k + 40),
-                                   spv_const(s, load64(k + 8), 0), idx), packed);
+        spv_const(s, load64(k + 8), 0), idx), packed);
 
     _gk_guard_close(s, lm);
     spv_fn_end(s);

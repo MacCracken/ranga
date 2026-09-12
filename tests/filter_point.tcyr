@@ -52,12 +52,12 @@ fn _nseed(p) {
 }
 _nseed(_np);
 assert_eq(levels(_nb, f32_from(0), f32_from(F64_ONE), _nan32), RG_ERR_NONE,
-          "a NaN gamma is accepted, as Rust accepts it");
+  "a NaN gamma is accepted, as Rust accepts it");
 assert_eq(load8(_np), 0, "and blackens the image, as Rust does");
 assert_eq(load8(_np + 1), 0, "every channel");
 _nseed(_np);
 assert_eq(levels(_nb, f32_from(0), f32_from(F64_ONE), f32_from(0)), RG_ERR_OTHER,
-          "gamma 0 is RangaError::Other, not INVALID_PARAMETER");
+  "gamma 0 is RangaError::Other, not INVALID_PARAMETER");
 assert_eq(load8(_np + 1), 64, "and leaves the buffer untouched");
 # ⚠ f32::max DISCARDS NaN, so a NaN white point gives range = 1e-6 and the
 # image WHITENS. A bare comparison let the NaN through and blackened it — the
@@ -233,7 +233,7 @@ assert_eq(levels(b4, f32c(0.0), f32c(1.0), f32c(0.0)), RG_ERR_OTHER, "gamma 0 is
 var _lv = levels(b4, f32c(0.0), f32c(1.0), f32c(f64_neg(1.0)));
 assert_eq(_lv, RG_ERR_OTHER, "NEGATIVE gamma is Other too");
 assert_eq(levels(b4, f32c(0.0), f32c(1.0), f32_from(_RG_NAN)), RG_ERR_NONE,
-          "a NaN gamma is ACCEPTED, because Rust's `<= 0` is false for NaN");
+  "a NaN gamma is ACCEPTED, because Rust's `<= 0` is false for NaN");
 
 # A zero-width window must not divide by zero — the range is floored at 1e-6.
 put(b4, 1, 128, 128, 128, 255);

@@ -51,7 +51,7 @@ cie_xyz_free(rg);
 rg = spectral_xyz_to_cie_xyz(pk);
 Xyz_set_x(pk, 0.99);
 assert_eq(approx(cie_xyz_x(rg), 0.25, 0.000000001), 1,
-          "writing through the prakash struct does not reach the ranga copy");
+  "writing through the prakash struct does not reach the ranga copy");
 Xyz_set_x(pk, 0.25);
 
 # The layouts DO agree — both are 24 bytes, x@0 y@8 z@16 — and this is asserted
@@ -98,18 +98,18 @@ test_group("cct");
 # 5517 variant that also circulates — so the expected value is 6503.46, not
 # 6506.55. Computed independently in Python from prakash's actual coefficients.
 assert_eq(approx(spectral_cie_xyz_to_cct(rd65), 6503.461953, 0.01), 1,
-          "D65 gives a CCT of ~6503 K");
+  "D65 gives a CCT of ~6503 K");
 assert_eq(approx(spectral_cie_xyz_to_cct(rd50), 5002.115988, 0.01), 1,
-          "D50 gives a CCT of ~5002 K");
+  "D50 gives a CCT of ~5002 K");
 
 # The chromaticity is scale-invariant, so a uniformly scaled XYZ is the same
 # colour at a different luminance and must give the same temperature. This is
 # what catches a bridge that forgot to normalise by the sum.
 var scaled = cie_xyz_new(f64_mul(cie_xyz_x(rd65), 3.0),
-                         f64_mul(cie_xyz_y(rd65), 3.0),
-                         f64_mul(cie_xyz_z(rd65), 3.0));
+  f64_mul(cie_xyz_y(rd65), 3.0),
+  f64_mul(cie_xyz_z(rd65), 3.0));
 assert_eq(approx(spectral_cie_xyz_to_cct(scaled), 6503.461953, 0.01), 1,
-          "CCT is invariant under a uniform scale of XYZ");
+  "CCT is invariant under a uniform scale of XYZ");
 cie_xyz_free(scaled);
 
 # The black point. Dividing by the sum would be a division by zero; the guard
@@ -119,7 +119,7 @@ var black = cie_xyz_new(0, 0, 0);
 var bc = spectral_cie_xyz_to_cct(black);
 assert_eq(f64_eq(bc, bc), 1, "the black point gives a real number, not NaN");
 assert_eq(approx(bc, cct_from_xy(0, 0), 0.000001), 1,
-          "and it is what cct_from_xy(0, 0) returns, as in Rust");
+  "and it is what cct_from_xy(0, 0) returns, as in Rust");
 cie_xyz_free(black);
 assert_eq(spectral_cie_xyz_to_cct(0), 0, "a null CieXyz gives 0 rather than dereferencing");
 

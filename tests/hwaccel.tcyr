@@ -120,7 +120,7 @@ hw_report_free(bigok);
 # that a driver reporting 0 free does not veto the GPU.
 var zerofree = gpu_report(0, 0 - 1);
 assert_eq(hw_should_use_gpu_report(zerofree, 1920, 1080), 1,
-          "0 free MB reads as UNKNOWN, so the VRAM check is skipped");
+  "0 free MB reads as UNKNOWN, so the VRAM check is skipped");
 hw_report_free(zerofree);
 
 # Utilization. Rust's `if let Some(util) = ... && util > 90` — strictly greater,
@@ -141,13 +141,13 @@ hw_report_free(maxed);
 # every driver without a load counter.
 var noutil = gpu_report(4096, 0 - 1);
 assert_eq(hw_should_use_gpu_report(noutil, 1920, 1080), 1,
-          "unknown utilization does not veto the GPU");
+  "unknown utilization does not veto the GPU");
 hw_report_free(noutil);
 
 # The checks are independent: passing utilization does not excuse failing VRAM.
 var mixed = hw_report_new(1, 1, 0, 8192, 5, 0, 0 - 1, 8192);
 assert_eq(hw_should_use_gpu_report(mixed, 1920, 1080), 0,
-          "an idle GPU with too little VRAM still stays on the CPU");
+  "an idle GPU with too little VRAM still stays on the CPU");
 hw_report_free(mixed);
 
 # ================================================================

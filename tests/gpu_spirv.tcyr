@@ -96,7 +96,7 @@ assert_eq(spv_type_vec(s1, a, 4) == v3a, 0, "a different lane count is a differe
 var pa = spv_type_ptr(s1, SPIRV_SC_STORAGE_BUFFER, a);
 assert_eq(spv_type_ptr(s1, SPIRV_SC_STORAGE_BUFFER, a), pa, "pointers intern");
 assert_eq(spv_type_ptr(s1, SPIRV_SC_INPUT, a) == pa, 0,
-          "the same pointee in a different storage class is a different type");
+  "the same pointee in a different storage class is a different type");
 
 # Constants intern on (type, value) — the same literal under two types is two
 # constants, because SPIR-V constants carry their type.
@@ -186,13 +186,13 @@ assert_eq(at_fn > at_type, 1, "and the function body comes last");
 var idb = spirv_hdr_id_bound(p);
 var types = fl_calloc(idb * SPIRV_TYPE_REC);
 assert_eq(spirv_build_type_table(p, n, idb, idb, types) >= 0, 1,
-          "the type table rebuilds from the emitted stream");
+  "the type table rebuilds from the emitted stream");
 var consts = fl_calloc(idb * SPIRV_CONST_REC);
 assert_eq(spirv_build_const_table(p, n, idb, idb, consts) >= 0, 1,
-          "and so does the constant table");
+  "and so does the constant table");
 var deco = fl_calloc(idb * SPIRV_DECO_REC);
 assert_eq(spirv_build_decoration_table(p, n, idb, idb, deco) >= 0, 1,
-          "and the decoration table");
+  "and the decoration table");
 
 fl_free(p);
 spv_free(s2);
@@ -232,9 +232,9 @@ if (ctx != 0) {
         var bp[24];
         store64(&bp, 1);
         native_buf_pair_write(&bp + 8, load64(buf + NATIVE_BUF_FIELD_HANDLE),
-                                        load64(buf + NATIVE_BUF_FIELD_VA));
+          load64(buf + NATIVE_BUF_FIELD_VA));
         assert_eq(gpu_compute_dispatch(m, shmod, N / 64, 1, 1, &bp), 0,
-                  "the dispatch is accepted and submitted");
+          "the dispatch is accepted and submitted");
 
         var back = fl_alloc(N * 4);
         assert_eq(gpu_buffer_read(m, buf, 0, back, N * 4), 0, "the result reads back");

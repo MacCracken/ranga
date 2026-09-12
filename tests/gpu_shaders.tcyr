@@ -86,7 +86,7 @@ assert_eq(has(built, "1.0 - px.r"), 1, "and the body it was given");
 # The helpers come FIRST — WGSL requires a function to be declared before use,
 # so a build that appended them would produce a source wgpu rejects.
 assert_eq(str_index_of_cstr(built, "fn unpack_rgba") < str_index_of_cstr(built, "1.0 - px.r"), 1,
-          "with the helpers BEFORE the body, as WGSL requires");
+  "with the helpers BEFORE the body, as WGSL requires");
 assert_eq(str_len(built), 586 + 422, "and the total is exactly helpers plus body");
 
 # Building twice must not accumulate — each call returns a fresh Str.

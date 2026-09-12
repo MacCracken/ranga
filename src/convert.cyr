@@ -190,8 +190,8 @@ fn _cv_yuv420p_to_rgba(buf, kr, kgu, kgv, kb, err_out) {
 #must_use
 fn rgba_to_yuv420p(buf, err_out) {
     return _cv_rgba_to_yuv420p(buf, 77, 150, 29,
-                               (0 - 43), (0 - 85), 128,
-                               128, (0 - 107), (0 - 21), err_out);
+      (0 - 43), (0 - 85), 128,
+      128, (0 - 107), (0 - 21), err_out);
 }
 
 #must_use
@@ -202,8 +202,8 @@ fn yuv420p_to_rgba(buf, err_out) {
 #must_use
 fn rgba_to_yuv420p_bt709(buf, err_out) {
     return _cv_rgba_to_yuv420p(buf, 54, 183, 19,
-                               (0 - 29), (0 - 99), 128,
-                               128, (0 - 116), (0 - 12), err_out);
+      (0 - 29), (0 - 99), 128,
+      128, (0 - 116), (0 - 12), err_out);
 }
 
 #must_use
@@ -214,8 +214,8 @@ fn yuv420p_to_rgba_bt709(buf, err_out) {
 #must_use
 fn rgba_to_yuv420p_bt2020(buf, err_out) {
     return _cv_rgba_to_yuv420p(buf, 67, 174, 15,
-                               (0 - 18), (0 - 46), 64,
-                               64, (0 - 58), (0 - 6), err_out);
+      (0 - 18), (0 - 46), 64,
+      64, (0 - 58), (0 - 6), err_out);
 }
 
 #must_use

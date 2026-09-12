@@ -348,13 +348,13 @@ fn pixel_view_pixel_count(v) { return load64(v + 8) * load64(v + 16); }
 #must_use
 fn pixel_buffer_as_view(b, err_out) {
     return _pixel_view_make(bv_data(load64(b)), load64(b + 8), load64(b + 16),
-                            load64(b + 24), bv_len(load64(b)), err_out);
+      load64(b + 24), bv_len(load64(b)), err_out);
 }
 
 #must_use
 fn pixel_buffer_as_view_mut(b, err_out) {
     return _pixel_view_make(bv_data(load64(b)), load64(b + 8), load64(b + 16),
-                            load64(b + 24), bv_len(load64(b)), err_out);
+      load64(b + 24), bv_len(load64(b)), err_out);
 }
 
 # Copy a view into a new owned buffer. Rust's PixelBuffer::from_view.

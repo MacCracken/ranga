@@ -564,7 +564,7 @@ fn spv_finish(s, out_ptr) {
     var ty = load64(s + 16);
     var body = load64(s + 24);
     var total = _SV_HDR_WORDS + _sv_buf_len(pre) + _sv_buf_len(ann)
-              + _sv_buf_len(ty) + _sv_buf_len(body);
+    + _sv_buf_len(ty) + _sv_buf_len(body);
     var out = fl_alloc(total * 4);
     if (out == 0) { return 0; }
 

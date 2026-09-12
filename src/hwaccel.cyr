@@ -147,7 +147,7 @@ fn hw_probe_with(allow_exec) {
     }
 
     return hw_report_new(has_gpu, has_vulkan, name, mem_mb, free_mb, util, temp,
-                         _hw_bytes_to_mb(reg_total_accel_memory(reg)));
+      _hw_bytes_to_mb(reg_total_accel_memory(reg)));
 }
 
 # Rust's `probe()` — the full probe, processes and all.

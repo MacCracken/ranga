@@ -310,7 +310,7 @@ assert_eq(oklab_b(_ok_black), 0, "Oklab b of black is 0");
 # NaN is not equal to itself — the assertions above would pass on a wrong-but-
 # finite value, so test the property directly too.
 assert_eq(f64_eq(f32_to(oklab_l(_ok_black)), f32_to(oklab_l(_ok_black))), 1,
-          "and it is a real number, not NaN");
+  "and it is a real number, not NaN");
 # sRGB black takes the same path through srgba_to_oklab.
 var _ok_sblack = srgba_to_oklab(srgba_new(0, 0, 0, 255));
 assert_eq(oklab_l(_ok_sblack), 0, "sRGB black also gives L = 0");
@@ -318,7 +318,7 @@ assert_eq(oklab_l(_ok_sblack), 0, "sRGB black also gives L = 0");
 assert_eq(_rg_f32_cbrt(f32_from(0)), 0, "_rg_f32_cbrt(0) is 0");
 assert_eq(_rg_f32_cbrt(0x80000000), 0x80000000, "and -0.0 keeps its sign");
 assert_eq(_rg_f32_cbrt(f32_from(f64_from(8))), ganita_f32_cbrt(f32_from(f64_from(8))),
-          "while a nonzero input is unchanged from the stdlib routine");
+  "while a nonzero input is unchanged from the stdlib routine");
 
 # Doctest: linear red has 0 < l < 1.
 var lin_red = lin_rgba_new(f32_from(F64_ONE), f32_from(0), f32_from(0), f32_from(F64_ONE));

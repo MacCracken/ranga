@@ -202,7 +202,7 @@ fn _gp_run_1buf(ctx, buf, kind, params, groups, err_out) {
     # the downloaded Vec; here the buffer is already the right size and owned by
     # the caller, so an in-place read avoids an allocation and a copy.
     var back = gpu_buffer_read(m, gpu_buffer_handle(gb), 0,
-                               pixel_buffer_data(buf), pixel_buffer_len(buf));
+      pixel_buffer_data(buf), pixel_buffer_len(buf));
     gpu_buffer_free(ctx, gb);
     if (back != 0) { store64(err_out, RG_GPU_ERR_BUFFER_OP); return RG_ERR_OTHER; }
     store64(err_out, RG_GPU_ERR_NONE);
@@ -220,7 +220,7 @@ fn _gp_run_1buf(ctx, buf, kind, params, groups, err_out) {
 fn _gp_bind(dst, gb) {
     var obj = gpu_buffer_handle(gb);
     return native_buf_pair_write(dst, load64(obj + NATIVE_BUF_FIELD_HANDLE),
-                                      load64(obj + NATIVE_BUF_FIELD_VA));
+      load64(obj + NATIVE_BUF_FIELD_VA));
 }
 
 # A two-buffer operation: `src` is read, `dst` is read AND written.
@@ -261,7 +261,7 @@ fn _gp_run_2buf(ctx, src, dst, kind, params, groups, err_out) {
         return RG_ERR_OTHER;
     }
     var back = gpu_buffer_read(m, gpu_buffer_handle(dg), 0,
-                               pixel_buffer_data(dst), pixel_buffer_len(dst));
+      pixel_buffer_data(dst), pixel_buffer_len(dst));
     gpu_buffer_free(ctx, dg);
     gpu_buffer_free(ctx, sg);
     if (back != 0) { store64(err_out, RG_GPU_ERR_BUFFER_OP); return RG_ERR_OTHER; }
@@ -387,13 +387,13 @@ fn gpu_wipe(ctx, src, dst, progress, err_out) {
 #must_use
 fn gpu_flip_horizontal(ctx, buf, err_out) {
     return _gp_geom(ctx, buf, GP_K_FLIP_H, pixel_buffer_width(buf),
-                    pixel_buffer_height(buf), 0, 0, err_out);
+      pixel_buffer_height(buf), 0, 0, err_out);
 }
 
 #must_use
 fn gpu_flip_vertical(ctx, buf, err_out) {
     return _gp_geom(ctx, buf, GP_K_FLIP_V, pixel_buffer_width(buf),
-                    pixel_buffer_height(buf), 0, 0, err_out);
+      pixel_buffer_height(buf), 0, 0, err_out);
 }
 
 # Copy the rectangle (left, top) .. (right, bottom) into a new buffer.

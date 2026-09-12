@@ -256,7 +256,7 @@ memcpy(row_dst, one_dst, 4);
 blend_pixel(one_src, one_dst, BM_NORMAL, 255, out);
 blend_row_normal(row_src, row_dst, 1, 255);
 assert_eq(px4(row_dst, load8(out), load8(out + 1), load8(out + 2), load8(out + 3)), 1,
-          "blend_row_normal agrees with blend_pixel on the same input");
+  "blend_row_normal agrees with blend_pixel on the same input");
 
 # A zero-alpha source pixel is SKIPPED, leaving the destination byte-identical.
 store8(rs + 3, 0);

@@ -120,11 +120,11 @@ fn affine_then(sm, om) {
     var otx: f64 = load64(om + 32);
     var oty: f64 = load64(om + 40);
     return affine_new(sa * oa + sc * ob,
-                      sb * oa + sd * ob,
-                      sa * oc + sc * od,
-                      sb * oc + sd * od,
-                      sa * otx + sc * oty + stx,
-                      sb * otx + sd * oty + sty);
+      sb * oa + sd * ob,
+      sa * oc + sc * od,
+      sb * oc + sd * od,
+      sa * otx + sc * oty + stx,
+      sb * otx + sd * oty + sty);
 }
 
 # Apply to a point; writes the (x, y) pair as two f64 to `out` (16 bytes),
@@ -163,8 +163,8 @@ fn affine_inverse(m) {
     var ic: f64 = f64_neg(c) * s;
     var id: f64 = a * s;
     return affine_new(ia, ib, ic, id,
-                      f64_neg(ia * tx + ic * ty),
-                      f64_neg(ib * tx + id * ty));
+      f64_neg(ia * tx + ic * ty),
+      f64_neg(ib * tx + id * ty));
 }
 
 #must_use
@@ -646,8 +646,8 @@ fn perspective_inverse(p) {
     if (f64_lt(f64_abs(det), _TF_SINGULAR_EPS) == 1) { return 0; }
     var s: f64 = 1.0 / det;
     return perspective_new(i00 * s, i01 * s, i02 * s,
-                           i10 * s, i11 * s, i12 * s,
-                           i20 * s, i21 * s, i22 * s);
+      i10 * s, i11 * s, i12 * s,
+      i20 * s, i21 * s, i22 * s);
 }
 
 # Solve an 8x8 system by Gaussian elimination with PARTIAL PIVOTING.
@@ -762,8 +762,8 @@ fn perspective_from_quad(src, dst) {
         return 0;
     }
     var p = perspective_new(load64(x), load64(x + 8), load64(x + 16),
-                            load64(x + 24), load64(x + 32), load64(x + 40),
-                            load64(x + 48), load64(x + 56), 1.0);
+      load64(x + 24), load64(x + 32), load64(x + 40),
+      load64(x + 48), load64(x + 56), 1.0);
     fl_free(a); fl_free(b); fl_free(x);
     return p;
 }

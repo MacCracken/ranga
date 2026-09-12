@@ -362,7 +362,7 @@ if (ctx != 0) {
     var wv1 = spv_new();
     gk_wipe(wv1);
     eq6(run2(wv1, src, dst, pr), 100, 100, 100, 100, 100, 100,
-        "wipe at 1.0 leaves the destination entirely alone");
+      "wipe at 1.0 leaves the destination entirely alone");
 
     # --- flips on a 3x2 image ---
     # 1 2 3 / 4 5 6.  Horizontal gives 3 2 1 / 6 5 4; vertical gives 4 5 6 / 1 2 3.
@@ -392,7 +392,7 @@ if (ctx != 0) {
     var cr = spv_new();
     gk_crop(cr);
     eq6(run2(cr, src, dst, pr), 2, 3, 100, 100, 100, 100,
-        "crop takes the 2x1 window at (1, 0) and writes nothing else");
+      "crop takes the 2x1 window at (1, 0) and writes nothing else");
     # Shift the window down a row: (1, 1) of a 3-wide source is element 5.
     store32(pr + 20, 1);
     var cr2 = spv_new();
@@ -469,12 +469,12 @@ if (ctx != 0) {
     gk_resize_bilinear(bl);
     var bll = spv_finish(bl, outp);
     assert_eq(spirv_validate_stream(load64(outp), bll), 0,
-              "resize_bilinear emits a structurally valid SPIR-V module");
+      "resize_bilinear emits a structurally valid SPIR-V module");
     assert_eq(spirv_find_entry_point(load64(outp), bll) > 0, 1, "with a findable entry point");
     assert_eq(spirv_hdr_id_bound(load64(outp)) < 256, 1,
-              "and it is UNDER the 256-id cap, so size is not what stops it");
+      "and it is UNDER the 256-id cap, so size is not what stops it");
     assert_eq(gpu_shader_module_create_spirv(m, load64(outp), bll), 0,
-              "but mabda cannot yet lower it to GFX9 — flip this when it can; see CHANGELOG 2.0.0");
+      "but mabda cannot yet lower it to GFX9 — flip this when it can; see CHANGELOG 2.0.0");
 
     gpu_context_free(ctx);
 }

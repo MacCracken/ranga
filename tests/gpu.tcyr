@@ -33,30 +33,30 @@ assert_eq(RG_GPU_ERR_BUFFER_OP < 0, 1, "BufferOp is an error code");
 # RG_ prefix were ever dropped, last-definition-wins would silently give every
 # ranga call site mabda's positive value and flip the sign of every comparison.
 assert_eq(RG_GPU_ERR_DEVICE_REQUEST == GPU_ERR_DEVICE_REQUEST, 0,
-          "ranga's DeviceRequest is NOT mabda's — the RG_ prefix keeps them apart");
+  "ranga's DeviceRequest is NOT mabda's — the RG_ prefix keeps them apart");
 assert_eq(GPU_ERR_DEVICE_REQUEST > 0, 1, "mabda's is positive");
 assert_eq(RG_GPU_ERR_DEVICE_REQUEST < 0, 1, "ranga's is negative");
 
 # Rust asserted on the Display strings; these are the same messages.
 assert_eq(streq(gpu_error_message(RG_GPU_ERR_NO_ADAPTER), "no suitable GPU adapter found"), 1,
-          "NoAdapter carries Rust's message");
+  "NoAdapter carries Rust's message");
 assert_eq(streq(gpu_error_message(RG_GPU_ERR_DEVICE_REQUEST), "failed to request GPU device"), 1,
-          "DeviceRequest carries Rust's message");
+  "DeviceRequest carries Rust's message");
 assert_eq(streq(gpu_error_message(RG_GPU_ERR_BUFFER_OP), "GPU buffer operation failed"), 1,
-          "BufferOp carries Rust's message");
+  "BufferOp carries Rust's message");
 
 # Rust's `mabda_error_converts_to_gpu_error`.
 assert_eq(gpu_error_from_mabda(GPU_ERR_ADAPTER_NOT_FOUND), RG_GPU_ERR_NO_ADAPTER,
-          "mabda AdapterNotFound maps to NoAdapter");
+  "mabda AdapterNotFound maps to NoAdapter");
 assert_eq(gpu_error_from_mabda(GPU_ERR_DEVICE_REQUEST), RG_GPU_ERR_DEVICE_REQUEST,
-          "mabda DeviceRequest maps to DeviceRequest");
+  "mabda DeviceRequest maps to DeviceRequest");
 assert_eq(gpu_error_from_mabda(0), RG_GPU_ERR_NONE, "mabda success maps to NONE");
 # The catch-all arm: Rust folded EVERY other mabda variant into BufferOp, so a
 # shader compile failure surfaces as "buffer operation failed". Preserved.
 assert_eq(gpu_error_from_mabda(GPU_ERR_SHADER), RG_GPU_ERR_BUFFER_OP,
-          "an unrelated mabda error still collapses to BufferOp, as in Rust");
+  "an unrelated mabda error still collapses to BufferOp, as in Rust");
 assert_eq(gpu_error_from_mabda(GPU_ERR_TEXTURE), RG_GPU_ERR_BUFFER_OP,
-          "and so does every other variant");
+  "and so does every other variant");
 
 # Rust's `gpu_error_converts_to_ranga_error` — all three collapse to Other.
 assert_eq(gpu_error_to_ranga(RG_GPU_ERR_NO_ADAPTER), RG_ERR_OTHER, "NoAdapter becomes RangaError::Other");
@@ -87,14 +87,14 @@ if (ctx == 0) {
 
 if (ctx != 0) {
     assert_eq(streq(gpu_context_backend_name(ctx), "native-amd"), 1,
-              "the native AMD backend reports itself as native-amd");
+      "the native AMD backend reports itself as native-amd");
     # ⚠ This is the assertion that catches an unwrapped Result. Every mabda
     # context constructor returns a TAGGED RESULT, and dereferencing it as a
     # context does not fault — it returns plausible garbage, and the backend
     # name comes back "unknown" while everything looks fine. That is exactly
     # what happened during the port, and it segfaulted only on the NEXT run.
     assert_eq(streq(gpu_context_backend_name(ctx), "unknown"), 0,
-              "a backend of 'unknown' means the context Result was never unwrapped");
+      "a backend of 'unknown' means the context Result was never unwrapped");
     assert_eq(gpu_context_mabda(ctx) != 0, 1, "the unwrapped mabda context is non-null");
 
     # ⚠ adapter_name is a STUB, and this pins that rather than hiding it. Rust
@@ -103,7 +103,7 @@ if (ctx != 0) {
     # becomes real, this test fails and someone updates the contract — instead
     # of a consumer quietly branching on "unknown" forever.
     assert_eq(gpu_context_has_adapter_name(ctx), 0,
-              "adapter_name is still a placeholder — flip this when mabda can report one");
+      "adapter_name is still a placeholder — flip this when mabda can report one");
     assert_eq(streq(gpu_context_adapter_name(ctx), "unknown"), 1, "and reads 'unknown'");
 
     # A full round trip through GPU memory. The pattern is i*7 mod 256 so a
@@ -147,7 +147,7 @@ if (ctx != 0) {
     var gb2 = gpu_buffer_upload(ctx, pb, err);
     assert_eq(gb2 != 0, 1, "a second buffer uploads from the same context");
     assert_eq(gpu_buffer_handle(gb2) != gpu_buffer_handle(gb), 1,
-              "and gets a distinct GPU allocation");
+      "and gets a distinct GPU allocation");
 
     gpu_buffer_free(ctx, gb2);
     gpu_buffer_free(ctx, gb);

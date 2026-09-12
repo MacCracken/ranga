@@ -425,13 +425,13 @@ fn fill_checkerboard(buf, block_size, color_a, color_b) {
 # Write one interpolated pixel: `start + t * (end - start)` per channel, in f32.
 fn _write_lerp_px(dst, start, end, t) {
     store8(dst, _rg_f32_round_clamp_u8(_rg_f32_lerp(_rg_u8_to_f32(load8(start)),
-                                                    _rg_u8_to_f32(load8(end)), t)));
+          _rg_u8_to_f32(load8(end)), t)));
     store8(dst + 1, _rg_f32_round_clamp_u8(_rg_f32_lerp(_rg_u8_to_f32(load8(start + 1)),
-                                                        _rg_u8_to_f32(load8(end + 1)), t)));
+          _rg_u8_to_f32(load8(end + 1)), t)));
     store8(dst + 2, _rg_f32_round_clamp_u8(_rg_f32_lerp(_rg_u8_to_f32(load8(start + 2)),
-                                                        _rg_u8_to_f32(load8(end + 2)), t)));
+          _rg_u8_to_f32(load8(end + 2)), t)));
     store8(dst + 3, _rg_f32_round_clamp_u8(_rg_f32_lerp(_rg_u8_to_f32(load8(start + 3)),
-                                                        _rg_u8_to_f32(load8(end + 3)), t)));
+          _rg_u8_to_f32(load8(end + 3)), t)));
     return RG_ERR_NONE;
 }
 

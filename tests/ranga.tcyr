@@ -54,7 +54,7 @@ assert_eq(streq(ranga_error_message(RG_ERR_INVALID_FORMAT), "invalid format"), 1
 assert_eq(streq(ranga_error_message(RG_ERR_DIMENSION_MISMATCH), "dimension mismatch"), 1, "DimensionMismatch renders");
 assert_eq(streq(ranga_error_message(RG_ERR_BUFFER_TOO_SMALL), "buffer too small"), 1, "BufferTooSmall renders");
 assert_eq(streq(ranga_error_message(RG_ERR_UNSUPPORTED_CONVERSION), "unsupported conversion"), 1,
-          "UnsupportedConversion renders");
+  "UnsupportedConversion renders");
 assert_eq(streq(ranga_error_message(RG_ERR_INVALID_PARAMETER), "invalid parameter"), 1, "InvalidParameter renders");
 assert_eq(streq(ranga_error_message(RG_ERR_ALLOCATION), "allocation failed"), 1, "Allocation renders");
 assert_eq(streq(ranga_error_message(RG_ERR_PARSE), "parse error"), 1, "Parse renders");
@@ -89,14 +89,25 @@ assert_eq(_rg_pow(0, 0), F64_ONE, "pow(0, 0) is 1, as Rust's powf gives");
 assert_eq(_rg_f32_cbrt(f32_from(0)), 0, "cbrt(+0) is +0, not NaN");
 assert_eq(_rg_f32_cbrt(0x80000000), 0x80000000, "cbrt(-0) keeps its sign");
 
-# ⚠ INTEGRAL EXPONENTS ARE 2 ULP, NOT BROKEN. The general path is exp(y·ln x),
-# so pow(2,3) is not bit-identical to 8.0 — it differs by 1e-15. Printing that
-# through a truncating conversion makes it look like "7.999999", which is how it
-# got written up as a defect once. What matters is whether it can move a byte,
-# and it cannot: every one of the 256 inputs to a gamma-2.0 tone curve rounds to
-# the same u8 as exact x*x.
-assert_eq(f64_to(f64_mul(f64_abs(f64_sub(_rg_pow(f64_from(2), f64_from(3)), f64_from(8))), 1000000000000000.0)), 1,
-          "pow(2,3) is within 1e-15 of exact");
+# ⚠ INTEGRAL EXPONENTS ARE NOW EXACT. They used to be 2 ulp: the general path
+# is exp(y·ln x), so pow(2,3) was not bit-identical to 8.0 — it differed by
+# 1e-15. Printing that through a truncating conversion made it look like
+# "7.999999", which is how it got written up as a defect once. What mattered was
+# whether it could move a byte, and it could not: every one of the 256 inputs to
+# a gamma-2.0 tone curve rounds to the same u8 as exact x*x, which is what the
+# loop below still proves.
+#
+# ⚠ THIS ASSERTION WAS `assert_eq(..., 1)` AND IT CONTRADICTED ITS OWN MESSAGE.
+# "within 1e-15" is a BOUND; `== 1` pinned the error to EXACTLY one unit of
+# 1e-15 — it locked in the imprecision instead of bounding it. ganita 1.2.4
+# (vendored with the cyrius 6.6.2 bump) gave the integral-exponent case a
+# binary-exponentiation path that never takes a logarithm, so pow(2,3) is now
+# bit-identical to 8.0 and the error is 0. A test that fails because its
+# dependency got MORE accurate was asserting the wrong thing. It is a bound now,
+# so it passes at 0 and at the old 2 ulp, and still catches a real regression
+# (7.99 would come back as 10000000000000 units, not 0 or 1).
+assert_lte(f64_to(f64_mul(f64_abs(f64_sub(_rg_pow(f64_from(2), f64_from(3)), f64_from(8))), 1000000000000000.0)), 1,
+  "pow(2,3) is within 1e-15 of exact");
 var _pw_diff = 0;
 var _pw_i = 0;
 while (_pw_i < 256) {

@@ -136,7 +136,7 @@ fn _icc_read_u32_be(data, len, off, err_out) {
     if (off + 4 > len) { store64(err_out, RG_ERR_PARSE); return 0; }
     store64(err_out, RG_ERR_NONE);
     return (load8(data + off) << 24) | (load8(data + off + 1) << 16)
-         | (load8(data + off + 2) << 8) | load8(data + off + 3);
+    | (load8(data + off + 2) << 8) | load8(data + off + 3);
 }
 
 # Signed 32-bit, sign-extended from the 32-bit value.
@@ -562,8 +562,8 @@ fn icc_profile_apply(p, r, g, b, out) {
         # Column-major: component c of the output sums element c of each
         # primary's row.
         var v = f64_add(f64_add(f64_mul(load64(m + c * 8), rl),
-                                f64_mul(load64(m + 24 + c * 8), gl)),
-                        f64_mul(load64(m + 48 + c * 8), bl));
+            f64_mul(load64(m + 24 + c * 8), gl)),
+          f64_mul(load64(m + 48 + c * 8), bl));
         store64(out + c * 8, v);
         c = c + 1;
     }
@@ -776,7 +776,7 @@ fn _icc_apply_curve(curve, n, v) {
 # 255. Everything downstream of the byte layout is identical.
 #must_use
 fn _icc_lut_build(data, len, major, minor, cs_off, grid, in_start, in_entries,
-                  lut_start, scale16, err_out) {
+  lut_start, scale16, err_out) {
     var p = fl_calloc(_ILP_SIZE);
     if (p == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
     store64(p, major);
@@ -888,7 +888,7 @@ fn _icc_parse_mft2(data, len, off, size, major, minor, cs_off, err_out) {
         return 0;
     }
     return _icc_lut_build(data, len, major, minor, cs_off, grid, in_start,
-                          in_entries, lut_start, 1, err_out);
+      in_entries, lut_start, 1, err_out);
 }
 
 # mft1: 8-bit samples, and both tables are a fixed 256 entries — the entry
@@ -909,7 +909,7 @@ fn _icc_parse_mft1(data, len, off, size, major, minor, cs_off, err_out) {
         return 0;
     }
     return _icc_lut_build(data, len, major, minor, cs_off, grid, in_start,
-                          256, lut_start, 0, err_out);
+      256, lut_start, 0, err_out);
 }
 
 # Parse a LUT-based profile. Reads the A2B0 tag and dispatches on its type
