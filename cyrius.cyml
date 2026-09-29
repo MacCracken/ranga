@@ -14,7 +14,7 @@ description = "ranga — core image processing: colour spaces, blend modes, pixe
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/ranga"
 language = "cyrius"
-cyrius = "6.6.2"
+cyrius = "6.6.9"
 
 [build]
 entry = "src/main.cyr"

@@ -1,5 +1,5 @@
 # sync.cyr — portable process-internal mutex.
-# Usage: include "lib/atomic.cyr", "lib/alloc.cyr", then "lib/sync.cyr".
+# Usage: include "lib/sync.cyr" (it includes syscalls.cyr, alloc.cyr and atomic.cyr itself, 6.6.9).
 #
 # WHY THIS EXISTS (issue 2026-06-09-no-portable-mutex-stdlib.md, from patra):
 # the only stdlib mutex used to live inside lib/thread.cyr, bundled with the
@@ -20,19 +20,26 @@
 #   pointer (heap cell); callers may null-check it.
 #
 # BACKENDS (one active per build — selected like alloc.cyr, no #else in cyrius):
-#   Linux x86_64 / aarch64 : SYS_FUTEX 2-state lock, BLOCKS on contention
-#                            (mirrors lib/thread.cyr's proven mutex).
+#   Linux x86_64 / aarch64 : SYS_FUTEX 3-state lock (below, v6.5.9), BLOCKS on
+#                            contention; the uncontended path makes no syscall.
 #   Windows                : SRWLOCK — lib/sync_windows.cyr (blocks, fair-ish).
-#   macOS                  : atomic_cas SPINLOCK — lib/sync_macos.cyr. macOS has
-#                            no routed futex/__ulock/os_unfair_lock primitive
-#                            (see lib/alloc.cyr:37 + _macho_arm_routes), so the
-#                            macOS lock SPINS. Correct for short, low-contention
-#                            critical sections (the portable-lock use case); a
-#                            blocking macOS lock awaits __ulock backend routing.
+#   macOS                  : the same 3-state lock parked on Darwin `__ulock` —
+#                            lib/sync_macos.cyr (v6.5.44; it was an atomic_cas
+#                            spinlock until the Mach-O backends routed __ulock).
+# The "no syscall when uncontended" property is asserted on every crossos host by
+# tests/tcyr/crossos/sync_mutex_contended.tcyr, relative to a syscall timed in the
+# same run (CHANGELOG [6.6.6]).
 #
 # Provides: MUTEX_SIZE, mutex_new(), mutex_lock(m), mutex_unlock(m).
 # (No trylock: Windows SRWLOCK has no routed TryAcquire, so a non-blocking
 # acquire isn't portable yet — keep the surface to what every backend supports.)
+
+# 6.6.9: the usage line used to tell the caller to include atomic.cyr and alloc.cyr first; a
+# bare include was a hard error on Linux (`undefined variable 'SYS_FUTEX'` — the syscall peer
+# was never named at all) and left alloc / atomic_* undefined everywhere. CHANGELOG [6.6.9]
+include "lib/syscalls.cyr"
+include "lib/alloc.cyr"
+include "lib/atomic.cyr"
 
 var MUTEX_SIZE = 8;
 

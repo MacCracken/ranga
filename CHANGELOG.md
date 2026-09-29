@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+## [2.0.3] - 2026-09-28
+
+### Fixed
+
+- **`tests/gpu_kernels.tcyr`: the negative fade factor was -4.0, not -1.0.** The row
+  passed `f64_to_f32(0 - 1.0)`, and `0 - 1.0` is an INTEGER subtraction of 1.0's bit
+  pattern (an int-left operator takes its integer arm), which is -4.0. The row still
+  passed — any negative factor clamps to zero — but it did not test what its message
+  says ("white faded by -1 is black"). It is `f64_to_f32(-1.0)` now; unary minus flips
+  a float literal's sign bit since cyrius 6.6.8, which also reports the `0 - 1.0`
+  shape as `integer arithmetic with an f64 right operand`. Found by the cyrius 6.6.10
+  ecosystem scan (the only such code site in the ecosystem).
+
+### Changed
+
+- **Toolchain `6.6.2` → `6.6.9`.** `lib/` re-vendored with `cyrius deps` (the declared
+  stdlib subset), `cyrius.lock` refreshed, all four bundles regenerated with
+  `scripts/version-bump.sh` (reproducible; the `.deps` sidecars now list only the
+  leaves each bundle references). `src/` is untouched. Build, the full test suite
+  (19 files), bench and fuzz re-verified.
+
+
 ## [2.0.2] - 2026-09-11
 
 ### Changed

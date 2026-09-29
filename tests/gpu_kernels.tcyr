@@ -214,7 +214,7 @@ if (ctx != 0) {
 
     var s7 = spv_new();
     gk_fade(s7);
-    var r7 = run_kernel(m, s7, f64_to_f32(0 - 1.0) & 0xFFFFFFFF, 0);
+    var r7 = run_kernel(m, s7, f64_to_f32(-1.0) & 0xFFFFFFFF, 0);
     store32(want + 0, 0xFF000000);
     store32(want + 4, 0xFF000000);
     store32(want + 8, 0x28000000);
