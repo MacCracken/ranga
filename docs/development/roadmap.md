@@ -20,6 +20,23 @@ deferring the bump to the final milestone.
 _This file replaces the generic `v0.1.0 → v1.0` template the `cyrius port`
 scaffold wrote, which assumed a fresh project rather than a port._
 
+## Moving the cyrius pin to 6.6.5
+
+Nothing breaks at this bump, and the 6.6.5 cyrlint adds no new warnings or
+untracked deferrals here. cyrius 6.6.5 is not tagged yet, and nothing below
+can land against the pin until it is. The pin is 6.6.2 today, and this section
+lists only what 6.6.5 itself changes.
+
+- [ ] The *Lint* step's comment (`.github/workflows/ci.yml:67`) goes stale:
+      "`cyrius lint` takes ONE path". From 6.6.5 `lint` takes 1..N files, so
+      the form it replaced would now lint all 41. The per-file loop can stay.
+      See the cyrius CHANGELOG [6.6.5] entry "The whole CLI took flags as file
+      names, dropped flags written after the operand, and dropped extra
+      operands", which names ranga's CI.
+- [ ] At the bump, re-run `cyrius deps` — the aarch64 syscall peer moved
+      SYS_UNLINKAT 35 → 263, so an un-re-vendored peer's sys_unlink would run
+      nanosleep.
+
 ## 2.0.0 criteria
 
 - [ ] Rust → Cyrius surface parity verified (function-level diff against `rust-old/`)
@@ -704,3 +721,41 @@ shipping a stale `dist/`).
 - WASM / WebGPU — blocked on the Cyrius WASM backend
 - Retiring `rust-old/` — kept 1–3 releases past 2.0.0, then deleted per the
   AGNOS standard (only after Cyrius has equal or better coverage and benchmarks)
+
+## Moving the cyrius pin to 6.6.6
+
+**Current pin: `cyrius = "6.6.2"` (cyrius.cyml:17). Bump it; nothing else needs
+to change.**
+
+Checked against the 6.6.6 change list, in ranga's own sources (`src/`,
+`programs/`, `tests/` — vendored `lib/` excluded): no `O_APPEND` / `O_TRUNC` at
+all, so the Windows append/truncate data-corruption fix is a non-event; zero
+`struct` declarations, so the new different-struct-copy compile error and the
+by-value >8 B deep-copy change cannot apply; no `async` fns, no `operator` fns,
+no `ret2`/`rethi` pair returns, no top-level `{ }` blocks, no `: cstring`
+parameters, no duplicate global `var` declarations, no locally defined `vec_*`
+(and `assert` + `vec` are both already in `[deps] stdlib`, so assert.cyr's new
+transitive `include "lib/vec.cyr"` cannot collide). `lib/regression.cyr` is not
+vendored — the only mention is a comment at
+`lib/syscalls_linux_common.cyr:208` — so the new exec deadline is irrelevant.
+
+**SIMD is safe for the same reason it is in prakash:** 6.6.6 makes "a
+SIMD-returning fn returning anything else" a compile error, and ranga's SIMD is
+memory-form — `iv_add` / `iv_sub` / `iv_mul` / `iv_dp8` over pointers in
+`src/simd_u8.cyr`, `src/pixel.cyr`, `src/convert.cyr` and
+`src/gpu_pipeline.cyr`. There is no `: f32v*` / `: f64v*` / `: iv*` type
+annotation anywhere, so no function returns a SIMD value.
+
+**Measured:** `cyrius build` under 6.6.2 and under 6.6.6 both exit 0 and emit
+**zero** warnings or errors.
+
+**Verify after bumping:** `cyrius deps` to re-vendor (6.6.6's `lib/io.cyr` is
+rewritten and now self-sufficient), then `cyrius build`, `cyrius test`,
+`cyrius lint` and `cyrius distlib` across all four profiles
+(`ranga`, `ranga-gpu`, `ranga-hwaccel`, `ranga-spectral`).
+
+> Note for whoever edits this next: ranga carries both `ROADMAP.md` at the repo
+> root and this file. This note was appended here, to
+> `docs/development/roadmap.md`. The root `ROADMAP.md` does not mention the
+> cyrius pin at all — worth collapsing one into the other so the next pin note
+> has one home.
