@@ -24,6 +24,14 @@
   (19 files), bench and fuzz re-verified.
 
 
+### Fixed (lock)
+
+- `cyrius.lock` is resolved the way CI resolves (`--features spectral,hwaccel,gpu`). The pin move
+  re-locked with the default feature set, which dropped the seven feature deps' commit pins and left
+  `lib/flags.cyr` — reachable only through those features — hashed at its 6.6.0–6.6.4 content, so CI's
+  `cyrius deps --features …` refused it under the unchanged 6.6.9 pin. Re-locked with the features:
+  the seven commit pins are back unchanged and `lib/flags.cyr` carries the 6.6.9 content. src/ untouched.
+
 ## [2.0.2] - 2026-09-11
 
 ### Changed
