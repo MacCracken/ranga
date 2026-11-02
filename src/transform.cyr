@@ -163,21 +163,27 @@ fn affine_inverse(m) {
     var ib: f64 = f64_neg(b) * s;
     var ic: f64 = f64_neg(c) * s;
     var id: f64 = a * s;
-    return affine_new(ia, ib, ic, id,
-      f64_neg(ia * tx + ic * ty),
-      f64_neg(ib * tx + id * ty));
+    # The translation uses Rust's evaluation order, (c*ty - d*tx) * inv. The
+    # algebraically equal -(ia*tx + ic*ty) rounds differently, and a 1-ULP
+    # difference in tx moves Nearest samples to another source column.
+    var itx: f64 = (c * ty - d * tx) * s;
+    var ity: f64 = (b * tx - a * ty) * s;
+    return affine_new(ia, ib, ic, id, itx, ity);
 }
 
 #must_use
 fn affine_is_identity(m) {
     var a: f64 = load64(m);
     var d: f64 = load64(m + 24);
-    if (f64_ge(f64_abs(a - 1.0), _TF_IDENTITY_EPS) == 1) { return 0; }
-    if (f64_ge(f64_abs(load64(m + 8)), _TF_IDENTITY_EPS) == 1) { return 0; }
-    if (f64_ge(f64_abs(load64(m + 16)), _TF_IDENTITY_EPS) == 1) { return 0; }
-    if (f64_ge(f64_abs(d - 1.0), _TF_IDENTITY_EPS) == 1) { return 0; }
-    if (f64_ge(f64_abs(load64(m + 32)), _TF_IDENTITY_EPS) == 1) { return 0; }
-    if (f64_ge(f64_abs(load64(m + 40)), _TF_IDENTITY_EPS) == 1) { return 0; }
+    # Rust's form: identity only if EVERY term is within the epsilon. Each test is
+    # written "not < eps", never ">= eps", because a NaN fails both comparisons
+    # and must count as not-identity.
+    if (f64_lt(f64_abs(a - 1.0), _TF_IDENTITY_EPS) == 0) { return 0; }
+    if (f64_lt(f64_abs(load64(m + 8)), _TF_IDENTITY_EPS) == 0) { return 0; }
+    if (f64_lt(f64_abs(load64(m + 16)), _TF_IDENTITY_EPS) == 0) { return 0; }
+    if (f64_lt(f64_abs(d - 1.0), _TF_IDENTITY_EPS) == 0) { return 0; }
+    if (f64_lt(f64_abs(load64(m + 32)), _TF_IDENTITY_EPS) == 0) { return 0; }
+    if (f64_lt(f64_abs(load64(m + 40)), _TF_IDENTITY_EPS) == 0) { return 0; }
     return 1;
 }
 
@@ -304,7 +310,11 @@ fn resize(buf, new_w, new_h, filter, err_out) {
             while (dx < new_w) {
                 var sx = dx * sw / new_w;
                 if (sx > sw - 1) { sx = sw - 1; }
-                memcpy(dp + (dy * new_w + dx) * 4, sp + (sy * sw + sx) * 4, 4);
+                # One 32-bit copy, not a memcpy CALL per pixel. Calls in a hot loop
+                # are real calls, and this one also made the loop's speed depend on
+                # code layout: unrelated growth in error.cyr and color.cyr took it
+                # from 13 to 22 ms at 2.2.0 until it was flattened.
+                store32(dp + (dy * new_w + dx) * 4, load32(sp + (sy * sw + sx) * 4));
                 dx = dx + 1;
             }
             dy = dy + 1;
@@ -444,11 +454,14 @@ fn flip_vertical(buf, err_out) {
 # Inverse mapping: for each DESTINATION pixel, find where it came from. Sampling
 # at (dx + 0.5, dy + 0.5) hits pixel centres.
 #
-# ⚠ The out-of-bounds test here is the POSITIVE form, deliberately, and differs
-# from perspective_transform's negated form. An affine inverse with a checked
-# determinant cannot produce NaN, so the positive test is safe and reads better;
-# a perspective divide CAN, and there the positive form would fail to skip.
-# Do not unify the two.
+# ⚠ The out-of-bounds test here is the POSITIVE form, as in Rust's
+# affine_transform, and differs from perspective_transform's negated form. An
+# affine inverse CAN be NaN: a NaN matrix entry passes the determinant check,
+# because NaN is not < eps. NaN coordinates then fail every skip test and are
+# sampled, which is also what Rust does. Rust's `as usize` turns them into index
+# 0, and Cyrius's f64_to gives 0 for NaN too (since at least 6.6.9). So the read
+# stays in bounds and matches Rust: scripts/oracle, group affine_nonfinite, with
+# NaN and inf matrices on a 1x1 source. Do not unify the two forms.
 #must_use
 fn affine_transform(buf, m, out_w, out_h, filter, err_out) {
     var rc = _tf_validate_rgba8(buf);

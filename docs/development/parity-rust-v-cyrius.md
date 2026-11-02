@@ -14,6 +14,15 @@
 > ([`../audit/2026-11-02-audit.md`](../audit/2026-11-02-audit.md)) fixed two of the
 > ICC items below and one undocumented trig divergence. A cross-toolchain diff also
 > confirmed that every remaining SUSPECT item predates the 6.6.9 → 6.7.18 bumps.
+>
+> **Updated for 2.2.0.** All 18 CPU-side SUSPECT items are resolved:
+> - 16 now match Rust bit for bit;
+> - 2 are accepted by [ADR 002](../adr/002-f32-transcendentals-follow-correct-rounding-not-glibc.md)
+>   (f32 transcendentals; glibc's are not correctly rounded).
+>
+> [`scripts/oracle`](../../scripts/oracle/README.md) now measures this on every run,
+> and the six remaining SUSPECT items are all GPU (roadmap 2.5.x). Rows below that
+> 2.2.0 changed are marked "(2.2.0)".
 
 ## How each item is classified
 
@@ -34,11 +43,11 @@ item is either ported or given an ADR. Nothing stays SUSPECT.
 
 | Area (Rust files) | Items | PARITY | IMPROVED | DIV-DOC | PARTIAL | MISSING | SUSPECT |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| error, lib, pixel, color, convert | 88 | 48 | 3 | 15 | 7 | 4 | 11 |
-| filter, transform, histogram | 73 | 51 | 1 | 4 | 0 | 11 | 6 |
-| composite, blend, icc, spectral, hwaccel | 70 | 56 | 1 | 5 | 3 | 4 | 1 |
+| error, lib, pixel, color, convert | 88 | 58 | 3 | 16 | 7 | 4 | 0 |
+| filter, transform, histogram | 73 | 57 | 1 | 4 | 0 | 11 | 0 |
+| composite, blend, icc, spectral, hwaccel | 70 | 57 | 1 | 5 | 3 | 4 | 0 |
 | gpu (context, buffer, shaders, pipeline) | 72 | 39 | 0 | 4 | 9 | 14 | 6 |
-| **Total** | **303** | **194** | **5** | **28** | **19** | **33** | **24** |
+| **Total** | **303** | **211** | **5** | **29** | **19** | **33** | **6** |
 
 An item is a pub fn (impl methods included), struct, enum, const, or trait impl/derive.
 Each derive counts once per type. The M7 audit counted 318 under a looser
@@ -46,7 +55,7 @@ convention, so the two totals are not comparable line for line.
 
 ## Findings that matter most
 
-1. **Several byte outputs are not bit-exact against Rust.** The old audit said "every u8
+1. **Several byte outputs were not bit-exact against Rust (fixed in 2.2.0).** The old audit said "every u8
    output path is byte-exact", and that is false. The common cause is computing in f64
    and narrowing once at the end, where Rust works in f32 throughout.
    `src/color.cyr:195-200` names this exact pattern as wrong, for `srgb_to_linear`,
@@ -57,8 +66,11 @@ convention, so the two totals are not comparable line for line.
 
    Most of the values involved are half-step inputs that sampled sweeps never hit. For
    example, f32 `0x3f010101` through `rgbaf32_to_rgba8` gives Rust 129 and the port
-   128.
-2. **`affine_inverse` reassociates the translation.** Rust computes
+   gave 128.
+
+   2.2.0 rewrote every one of them in f32, in Rust's order. The oracle's transition
+   search confirms each matches Rust on every f32 in [0, 1].
+2. **`affine_inverse` reassociated the translation (fixed in 2.2.0).** Rust computes
    `tx = (c*ty - d*tx) * inv`, and the port computes `-(ia*tx + ic*ty)`. For a plain
    scale+translate (`a=0.6, d=2.5, tx=ty=-1.9`), tx is `0x4009555555555555` in Rust
    and `…554` in the port, and an entire column of Nearest samples in
@@ -67,8 +79,8 @@ convention, so the two totals are not comparable line for line.
    2.1.2).** Since cyrius 6.6.7, `fl_alloc(0)` and `fl_calloc(0)` return 0. From
    2.0.3 to 2.1.1, a profile with zero tags, and an `mft2` LUT with zero input
    entries, failed with `RG_ERR_ALLOCATION`. Rust returns InvalidFormat for the
-   first and parses the second, using identity curves. Both now match Rust. Still
-   open: the parser rejects grid size 1, which Rust handles.
+   first and parses the second, using identity curves. Both now match Rust. Grid
+   size 1, which Rust handles, is accepted since 2.2.0.
 4. **The GPU "wgpu fallback" never runs.** ranga carries all 21 WGSL sources but
    dispatches none of them, and mabda 4.2.0's context-aware wgpu dispatch is a stub
    (see [architecture note 001](../architecture/001-mabda-native-gpu-constraints.md)).
@@ -107,14 +119,15 @@ convention, so the two totals are not comparable line for line.
   pointers carry no mutability.
 - **Checked only:** panicking variants (`buffer_size`) collapse into the checked ones.
   `pixel_format_checked_buffer_size` is bounded by i64, not usize.
-- **Overflow error code:** `pixel_buffer_new` reports a size overflow as
-  `RG_ERR_ALLOCATION`, where Rust reports `BufferTooSmall`. ⚠ This has needed an ADR
-  since M7, and none exists yet.
 - **No i16 wrap in the YUV inverses** ([ADR 001](../adr/001-yuv-inverse-does-not-reproduce-rusts-i16-wrap.md)).
-  ⚠ The ADR names only the BT.601 inverse, but `yuv420p_to_rgba_bt709`,
-  `yuv420p_to_rgba_bt2020` and `nv12_to_rgba` diverge the same way, and their tests pin
-  the diverged values. The ADR's "all five failed to reproduce" line is also wrong:
-  three of them reproduce.
+  This covers all four inverses: `yuv420p_to_rgba`, `yuv420p_to_rgba_bt709`,
+  `yuv420p_to_rgba_bt2020` and `nv12_to_rgba`. The ADR names them all since 2.2.0, and
+  its wrong "all five failed to reproduce" note is corrected.
+- **f32 transcendentals follow correct rounding**
+  ([ADR 002](../adr/002-f32-transcendentals-follow-correct-rounding-not-glibc.md)).
+  `oklch_to_oklab` and `color_temperature` differ from Rust-on-glibc by ≤ 2 ULP. The
+  differences come from glibc's `sinf`/`cosf`/`powf`/`logf`, which are not correctly
+  rounded. The oracle enforces the bound.
 - **Grayscale coefficients:** GPU grayscale is BT.709 and CPU grayscale is BT.601,
   inherited from Rust.
 - **Derives:** `Debug` has no Cyrius equivalent. ⚠ The old rationale, "an i64 is already
@@ -137,38 +150,28 @@ convention, so the two totals are not comparable line for line.
 
 | Rust item | Port | Status | What is wrong or missing |
 | --- | --- | --- | --- |
-| `linear_to_srgb` | color.cyr:224 | SUSPECT | Computed in f64 with an f64 exponent of 1/2.4. 7 of 7 probed half-step inputs differ by 1. An emulation estimates ~219 affected f32 inputs in [0,1]. |
-| `From<LinRgba> for Srgba` | `lin_rgba_to_srgba` :270 | SUSPECT | Alpha rounded in f64, and RGB goes through `linear_to_srgb`. |
-| `From<Srgba> for Hsl` | `srgba_to_hsl` :398 | SUSPECT | On a 52³ grid, h differs by up to 22 ULP and s by up to 15 ULP. `hue_shift` inherits this. |
-| `From<Hsl> for Srgba` | `hsl_to_srgba` :467 | SUSPECT | f64 path, and its `s < 1e-6` compare is f64 where Rust's is f32. Bytes differ. |
-| `cmyk_to_srgb` | `cmyk_to_srgba` :519 | SUSPECT | Byte output computed in f64. 1,086 k values differ even with c=m=y=0. |
-| `srgb_to_cmyk` | `srgba_to_cmyk` :529 | SUSPECT | f32 fields differ by up to 248 ULP. |
-| `From<Oklab> for Oklch`, reverse | `oklab_to_oklch` :744, `oklch_to_oklab` :758 | SUSPECT | f64 trig. The header at :564 claims f32 throughout. |
-| `color_temperature` | :781 | SUSPECT | f64 path. 4,205 of 5,572 kelvin values differ by up to 233 ULP. |
-| `rgbaf32_to_rgba8` | convert.cyr:427 | SUSPECT | `v*255+0.5` computed in f64. 128 half-step f32 values in [0,1] round the other way. |
-| `BufferPool::new` | pixel.cyr:398 | SUSPECT | Allocates `max_buffers*8` slots up front. `buffer_pool_new(1<<40)` returns 0, and acquire/release scan O(max). |
+| `linear_to_srgb`, `From<LinRgba> for Srgba`, `From<Srgba> for Hsl`, `From<Hsl> for Srgba`, `cmyk_to_srgb`, `srgb_to_cmyk`, `From<Oklab> for Oklch`, `rgbaf32_to_rgba8` | color.cyr, convert.cyr | PARITY (2.2.0) | Were SUSPECT: f64 where Rust is f32. Rewritten in f32 in Rust's order; bit-exact over the oracle's grids and, for the byte paths, every f32 in [0, 1]. |
+| `From<Oklch> for Oklab`, `color_temperature` | color.cyr | DIV-DOC (2.2.0) | Were SUSPECT. Now f32 as in Rust; the residual ≤ 2 ULP is glibc's libm rounding, accepted by ADR 002. |
+| `BufferPool::new` (and acquire/release) | pixel.cyr | PARITY (2.2.0) | Was SUSPECT: eager `max_buffers` slots. Now a growable array with swap_remove, like Rust's Vec. |
 | `LinRgba`, `Hsl`, `CieXyz`, `CieLab`, `Cmyk`, `Oklab`, `Oklch` | color.cyr | PARTIAL ×7 | Getters only; Rust's pub fields are writable. The Hsl and Cmyk layouts are not in the module header. |
 | `PixelBuffer::into_data` | — | MISSING | No way to take the bytevec and free only the header. |
 | serde on `PixelFormat`, `ColorSpace` and the 8 colour structs | — | MISSING ×3 | No codec. |
-| `PixelBuffer::new` overflow | pixel.cyr:154 | DIV-DOC | Needs the ADR flagged since M7. |
-| `yuv420p_to_rgba_bt709` / `_bt2020`, `nv12_to_rgba` | convert.cyr | DIV-DOC | Diverge by ADR 001's i16 wrap, but the ADR does not name them. |
+| `PixelBuffer::new` overflow | pixel.cyr | PARITY (2.2.0) | Was DIV-DOC without an ADR. Now BUFFER_TOO_SMALL, as Rust's. |
+| `yuv420p_to_rgba_bt709` / `_bt2020`, `nv12_to_rgba` | convert.cyr | DIV-DOC | ADR 001's i16 wrap; named in the ADR since 2.2.0. |
 
-**Also found (no Rust counterpart, worth fixing):**
-- `convert.cyr:103` ignores `_cv_y_row`'s return value. A failed 16-byte allocation
-  hands back an uninitialised Y plane with `RG_ERR_NONE`.
-- `buffer_pool_acquire` does not guard against a negative size.
-- `bytevec.cyr`'s 19 `bv_*` functions sit in the unprefixed global namespace.
+**Also found (no Rust counterpart):**
+- **Fixed in 2.2.0:**
+  - `convert.cyr` ignored `_cv_y_row`'s return value, so a failed 16-byte allocation
+    handed back an uninitialised Y plane with `RG_ERR_NONE`.
+  - `buffer_pool_acquire` did not guard against a negative size.
+- **Open (roadmap 2.4.x):** `bytevec.cyr`'s 19 `bv_*` functions sit in the unprefixed
+  global namespace.
 
 ### filter, transform, histogram
 
 | Rust item | Port | Status | What is wrong or missing |
 | --- | --- | --- | --- |
-| `levels` | filter_point.cyr:222 | SUSPECT | pow and tail computed in f64. `(black 0, white 0.8, γ1)` maps 106 to 132; Rust gives 133 (the f32 product is exactly 132.5). 17 of 9,900 settings differ. |
-| `hue_shift` | filter_point.cyr:413 | SUSPECT | ±1 on 7–23% of pixels at 10°, 45° and −90°, mostly from `srgba_to_hsl`. At ±1e9° results diverge outright, because Rust's f32 add swallows the hue. |
-| `bilateral` | filter_kernel.cyr:705 | SUSPECT | f64 coefficients and exp give ±1 on up to 67 of 1,564 bytes. σ ≤ 0 returns INVALID_PARAMETER where Rust returns `Other`; a NaN σ is rejected where Rust returns Ok. |
-| `Affine::inverse` | transform.cyr:151 | SUSPECT | tx/ty reassociated: 8 of 15 inverses differ in bits, and samples flip. |
-| `affine_transform` | transform.cyr:452 | SUSPECT | Inherits the inverse error. A model flips at least one Nearest sample in 561 of 20,000 random transforms. |
-| `Affine::is_identity` | transform.cyr:171 | SUSPECT | A NaN field passes (returns 1); Rust returns false. |
+| `levels`, `hue_shift`, `bilateral`, `Affine::inverse`, `affine_transform`, `Affine::is_identity` | filter_point.cyr, filter_kernel.cyr, transform.cyr | PARITY (2.2.0) | Were SUSPECT: f64 where Rust is f32 (levels, hue_shift, bilateral), a reassociated inverse, a NaN-passing identity test. Also bilateral's σ ≤ 0 → OTHER and NaN σ proceeding. Bit-exact on every oracle case. |
 | `Affine::rotate` | transform.cyr:100 | PARITY (2.1.2) | The review counted this as parity with a documented NaN for \|θ\| ≥ 2^63. That guard had outlived the toolchain fault it worked around, so `rotate(1e20)` was NaN where Rust is finite. 2.1.2 delegates every finite angle; the item is not counted twice. |
 | `Lut3d` Clone | — | MISSING | Heap-owning, and there is no `lut3d_clone`. |
 | `Affine`: Clone, Copy, PartialEq, Serialize, Deserialize | — | MISSING ×5 | No `affine_clone` / `affine_eq`, and no codec. |
@@ -176,13 +179,16 @@ convention, so the two totals are not comparable line for line.
 | `Lut3d::from_cube` | — | DIV-DOC | Listed "not ported" with no reason. |
 
 **Also found:**
-- `lut3d_new` has no overflow guard on `size³·12`.
-- `flood_fill`'s fixed w·h stack has no capacity check.
-- Bilinear sampling of a 1-pixel-wide or 1-pixel-tall source can read up to 12 bytes past
-  the buffer when the inverse is non-finite. `transform.cyr:446-449` claims it cannot
-  produce NaN.
-- `xorshift64_*` is public in the port but was private in Rust, which makes it a new API
-  commitment.
+- **Fixed in 2.2.0:**
+  - `lut3d_new` had no overflow guard on `size³·12`.
+  - `flood_fill`'s fixed `w·h` stack had no capacity check; it now grows.
+- **Did not reproduce:** the reported bilinear over-read on a 1-pixel source with a
+  non-finite inverse. Cyrius's `f64_to` saturates NaN to 0, as Rust's `as usize`
+  does, so NaN coordinates read pixel 0 in both. The oracle's `affine_nonfinite` group
+  (NaN and inf matrices, 1×1 and 20×20 sources) is byte-identical to Rust. The comment
+  claiming the inverse "cannot produce NaN" was wrong, and is corrected.
+- **Open (roadmap 2.4.x):** `xorshift64_*` is public in the port but was private in
+  Rust, which makes it a new API commitment.
 
 ### composite, blend, icc, spectral, hwaccel
 
@@ -195,7 +201,7 @@ That is counted as PARITY.
 | Rust item | Port | Status | What is wrong or missing |
 | --- | --- | --- | --- |
 | `IccProfile::from_bytes` | icc.cyr:451 | PARITY (2.1.2) | Zero tags gave `RG_ERR_ALLOCATION` from 2.0.3 to 2.1.1; it is now InvalidFormat, as in Rust. |
-| `IccLutProfile::from_bytes` | icc.cyr | SUSPECT | Grid 1 is rejected by `grid < 2`, where Rust handles it. The mft2-with-0-entries case was fixed in 2.1.2. |
+| `IccLutProfile::from_bytes` | icc.cyr | PARITY (2.2.0) | Grid 1 is accepted (a constant LUT), as in Rust; grid 0 stays rejected. mft2 with 0 entries was fixed in 2.1.2. |
 | `IccProfile`, `IccLutProfile` structs | getters | PARTIAL ×2 | Read-only; there is no way to build a profile. |
 | `ToneCurve` | `TC_*` | PARTIAL | Table entries have no accessor (raw `load64(t+16)` only). |
 | serde on `BlendMode`, `ToneCurve` | — | MISSING ×4 | No codec. BlendMode's wire form is the variant name ("ColorDodge"), not `blend_mode_name`. |
@@ -204,8 +210,10 @@ That is counted as PARITY.
 - `src/blend.cyr:143` (`one - ganita_f32_min(..)`, whose callee is declared `: i64`) was
   correct but fragile. It became `_bl_sub(one, …)` in 2.1.2, and all 65,536 ColorBurn
   inputs still match Rust.
-- ICC returns `RG_ERR_PARSE` for some malformed input and `RG_ERR_INVALID_FORMAT` for
-  the rest; Rust uses InvalidFormat throughout.
+- ICC returned `RG_ERR_PARSE` for some malformed input and `RG_ERR_INVALID_FORMAT` for
+  the rest, while Rust uses InvalidFormat throughout. Since 2.2.0 the public parsers
+  report INVALID_FORMAT for all of it, and the split survives only in the internal
+  `_icc_*_parse` functions, for tests.
 - prakash renamed three of the 20 spectral re-exports, so they are not callable under
   their Rust names: `CIE_1931_2DEG` → `cie_1931_table()` and `VISIBLE_MIN/MAX_NM` →
   `spec_visible_min/max_nm()`.
@@ -277,14 +285,12 @@ Listed so the corrections are not lost:
 
 ## Re-running the oracle
 
-The measurements above were taken with throwaway harnesses. To repeat them:
+`./scripts/oracle/run.sh` (since 2.2.0) builds a Rust driver against `rust-old/` and a
+Cyrius probe against `src/`, runs both on identical inputs, and diffs the results:
+2.1 million values in 41 groups. It exits non-zero on any difference that is not
+accepted by an ADR within a bound. See
+[`scripts/oracle/README.md`](../../scripts/oracle/README.md).
 
-1. Build `rust-old/` with `CARGO_TARGET_DIR` pointed at a scratch directory, using
-   `cargo --release` (it builds in seconds).
-2. Write a small Rust driver and a Cyrius probe that print the same calls over the same
-   inputs.
-3. Diff the two outputs.
-
-Making this a checked-in tool is the first item of 2.2.x in the roadmap. `rust-old/`
-is due to be deleted eventually, and this oracle, plus the golden vectors captured from
-it, is what has to outlive it.
+`rust-old/` is due to be deleted eventually (roadmap 2.x). Before that, the outputs
+this oracle produces have to be captured as golden vectors in `tests/`, so that the
+evidence outlives the crate it came from.

@@ -12,10 +12,11 @@
 # arithmetic-carrying helpers take `: f32` parameters.
 #
 # exp(). The Gaussian and bilateral weights evaluate exp(-d^2 / 2*sigma^2),
-# which reaches -inf for a large distance. Rust yields a 0.0 weight there; the
-# bare f64_exp builtin yields NaN, which then poisons the whole accumulator for
-# that pixel. Every exp here goes through _rg_exp from error.cyr. This is the
-# single reason that shim exists.
+# which reaches -inf for a large distance. Rust yields a 0.0 weight there. The
+# bare f64_exp builtin used to yield NaN, which poisons the whole accumulator for
+# that pixel. The Gaussian kernel goes through _rg_exp from error.cyr for that
+# reason. bilateral uses ganita_f32_exp, which answers +/-inf and NaN itself,
+# because Rust computes its weights with f32 `exp` (since 2.2.0).
 #
 # ERROR MODEL. Functions that allocate a new buffer (gaussian_blur, box_blur,
 # unsharp_mask, median, bilateral) use the err_out pointer convention and return
@@ -346,6 +347,11 @@ var _FK_LUT_SIZE = 16;
 #must_use
 fn lut3d_new(size) {
     if (size < 2) { return 0; }
+    # size^3 * 3 channels * 4 bytes must not overflow i64. Rust has no upper bound
+    # (an absurd size just fails to allocate), but here a wrapped product would be
+    # a smaller allocation that lut3d_set then writes past. 916015 is the largest
+    # size whose byte count fits, and it is far beyond any allocatable LUT.
+    if (size > 916015) { return 0; }
     var l = fl_alloc(_FK_LUT_SIZE);
     if (l == 0) { return 0; }
     var n = size * size * size * 3;
@@ -705,12 +711,14 @@ fn median(buf, radius, err_out) {
 fn bilateral(buf, radius, sigma_space, sigma_color, err_out) {
     var rc = _fk_validate_rgba8(buf);
     if (rc != RG_ERR_NONE) { store64(err_out, rc); return 0; }
+    # Rust: `if sigma_space <= 0.0 || sigma_color <= 0.0 { Err(Other) }`. A NaN
+    # sigma fails that test and PROCEEDS. Its weights are NaN, `sum_w > 0.0` fails,
+    # and every pixel is copied unchanged. Up to 2.1.2 the port rejected NaN, and
+    # reported INVALID_PARAMETER where Rust reports Other.
     var ss = f32_to(sigma_space);
     var sc = f32_to(sigma_color);
-    if (f64_eq(ss, ss) == 0) { store64(err_out, RG_ERR_INVALID_PARAMETER); return 0; }
-    if (f64_eq(sc, sc) == 0) { store64(err_out, RG_ERR_INVALID_PARAMETER); return 0; }
-    if (f64_le(ss, 0) == 1) { store64(err_out, RG_ERR_INVALID_PARAMETER); return 0; }
-    if (f64_le(sc, 0) == 1) { store64(err_out, RG_ERR_INVALID_PARAMETER); return 0; }
+    if (f64_le(ss, 0) == 1) { store64(err_out, RG_ERR_OTHER); return 0; }
+    if (f64_le(sc, 0) == 1) { store64(err_out, RG_ERR_OTHER); return 0; }
     if (radius < 0) { store64(err_out, RG_ERR_INVALID_PARAMETER); return 0; }
     if (radius == 0) {
         var cl = pixel_buffer_clone(buf);
@@ -722,8 +730,15 @@ fn bilateral(buf, radius, sigma_space, sigma_color, err_out) {
     var w = pixel_buffer_width(buf);
     var h = pixel_buffer_height(buf);
     var diameter = 2 * radius + 1;
-    var space_coeff = f64_div(f64_neg(0.5), f64_mul(ss, ss));
-    var color_coeff = f64_div(f64_neg(0.5), f64_mul(sc, sc));
+    # Both coefficients and every exp are SINGLE precision, as in Rust:
+    # `-0.5 / (sigma * sigma)` in f32 and f32 `exp`. Up to 2.1.2 they were f64, and
+    # up to 67 of 1,564 bytes in an oracle image came out one count off
+    # (scripts/oracle, group bilateral).
+    var nhalf: f32 = f32_from(f64_neg(0.5));
+    var ssf: f32 = sigma_space;
+    var scf: f32 = sigma_color;
+    var space_coeff: f32 = nhalf / (ssf * ssf);
+    var color_coeff: f32 = nhalf / (scf * scf);
 
     var sw_tab = fl_alloc(diameter * diameter * 4);
     if (sw_tab == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
@@ -731,9 +746,9 @@ fn bilateral(buf, radius, sigma_space, sigma_color, err_out) {
     while (ky <= radius) {
         var kx = 0 - radius;
         while (kx <= radius) {
-            var d2 = kx * kx + ky * ky;
-            var e = _rg_exp(f64_mul(f64_from(d2), space_coeff));
-            store32(sw_tab + ((ky + radius) * diameter + (kx + radius)) * 4, f32_from(e));
+            var d2: f32 = f32_from(f64_from(kx * kx + ky * ky));
+            var sarg: f32 = d2 * space_coeff;
+            store32(sw_tab + ((ky + radius) * diameter + (kx + radius)) * 4, ganita_f32_exp(sarg));
             kx = kx + 1;
         }
         ky = ky + 1;
@@ -774,7 +789,8 @@ fn bilateral(buf, radius, sigma_space, sigma_color, err_out) {
                     var dg: f32 = sg - cg;
                     var db: f32 = sb - cb;
                     var cd: f32 = dr * dr + dg * dg + db * db;
-                    var cw: f32 = f32_from(_rg_exp(f64_mul(f32_to(cd), color_coeff)));
+                    var carg: f32 = cd * color_coeff;
+                    var cw: f32 = ganita_f32_exp(carg);
                     var weight: f32 = spw * cw;
                     sum_r = sum_r + sr * weight;
                     sum_g = sum_g + sg * weight;
@@ -845,9 +861,14 @@ fn flood_fill(buf, seed_x, seed_y, fill_color, tolerance) {
     # Stack of (x, y) pairs. Named qstack because `stack` is a RESERVED WORD in
     # Cyrius (v5.5.36's `stack var buf[N]` stack-local array qualifier) — using
     # it as an identifier produces "expected '(', got ')'" pointing at an
-    # unrelated line several statements later. Worst case is one entry per row per span; w*h is a
-    # safe upper bound and matches Rust's unbounded Vec in practice.
-    var qstack = fl_alloc(w * h * 16);
+    # unrelated line several statements later.
+    #
+    # It GROWS like Rust's Vec. w*h entries is not a bound: a run in row y can be
+    # pushed from row y-1 and again from row y+1 before it is visited, so a
+    # comb-shaped region pushes more entries than it has pixels. Up to 2.1.2 the
+    # stack was a fixed w*h with no capacity check.
+    var qcap = w * h;
+    var qstack = fl_alloc(qcap * 16);
     if (qstack == 0) { fl_free(visited); return RG_ERR_ALLOCATION; }
     var sp2 = 0;
     store64(qstack, seed_x);
@@ -896,6 +917,17 @@ fn flood_fill(buf, seed_x, seed_y, fill_color, tolerance) {
                         var nx = left;
                         while (nx <= right) {
                             if (_fk_span_ok(p, visited, w, nx, ny, s0, s1, s2, s3, tolerance) == 1) {
+                                if (sp2 >= qcap) {
+                                    var grown = fl_alloc(qcap * 2 * 16);
+                                    if (grown == 0) {
+                                        fl_free(qstack); fl_free(visited);
+                                        return RG_ERR_ALLOCATION;
+                                    }
+                                    memcpy(grown, qstack, sp2 * 16);
+                                    fl_free(qstack);
+                                    qstack = grown;
+                                    qcap = qcap * 2;
+                                }
                                 store64(qstack + sp2 * 16, nx);
                                 store64(qstack + sp2 * 16 + 8, ny);
                                 sp2 = sp2 + 1;

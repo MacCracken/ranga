@@ -883,6 +883,33 @@ assert_eq(approx(load64(ly), 0, 0.000001), 1, "and the other channels stay at th
 icc_lut_profile_free(m4p);
 bv_free(m4bv);
 
+# --- grid sizes 0 and 1 ---
+# A grid of 1 is a CONSTANT LUT. Rust parses it, and apply lands every input on the
+# single cell: `s = grid - 1 = 0`, so every index is 0 and every fraction is 0. Up
+# to 2.1.2 the port rejected it along with 0. A grid of 0 stays rejected: Rust's
+# `grid_size - 1` underflows there and panics, so rejecting it is the documented
+# hardening.
+var g1bv = build_lut_profile(1, 1, llen);
+var g1d = bv_data(g1bv);
+# The single CLUT cell sits right after the 2-entry input curves.
+_icc_write_u16_be(g1d, 208, 16384);
+_icc_write_u16_be(g1d, 210, 8192);
+_icc_write_u16_be(g1d, 212, 4096);
+var g1p = icc_lut_profile_from_bytes(g1d, load64(llen), err);
+assert_eq(load64(err), RG_ERR_NONE, "a grid of 1 parses, as in Rust");
+assert_eq(g1p != 0, 1, "and returns a profile");
+if (g1p != 0) {
+    icc_lut_profile_apply(g1p, 0.9, 0.1, 0.5, lx, ly, lz);
+    assert_eq(approx(load64(lx), 0.25000381, 0.000001), 1, "a grid-1 LUT is constant: channel 0 is the cell");
+    assert_eq(approx(load64(ly), 0.12500191, 0.000001), 1, "channel 1 is the cell");
+    assert_eq(approx(load64(lz), 0.06250095, 0.000001), 1, "channel 2 is the cell, whatever the input");
+    icc_lut_profile_free(g1p);
+}
+store8(g1d + 144 + 10, 0);
+assert_eq(icc_lut_profile_from_bytes(g1d, load64(llen), err), 0, "a grid of 0 is rejected");
+assert_eq(load64(err), RG_ERR_INVALID_FORMAT, "as INVALID_FORMAT");
+bv_free(g1bv);
+
 # --- the grid cap, isolated from the buffer bound ---
 # A grid of 65 in a buffer too small to hold it is rejected either way, so the
 # cap needs a profile that is otherwise completely well-formed. This one is:
@@ -946,7 +973,13 @@ assert_eq(load64(err) == RG_ERR_NONE, 0, "the error code is still set from the l
 # inside the table loops report PARSE. The distinction matters because the
 # pre-check runs BEFORE the LUT allocation, and a hostile profile declaring a
 # 64-cell grid should not get 1.6 MB allocated on its way to being rejected.
+#
+# The public entry reports every malformed profile as INVALID_FORMAT, as Rust does.
+# The internal parse keeps the PARSE / INVALID_FORMAT split that tells the checks
+# apart, so the distinction below goes through `_icc_lut_profile_parse`.
 assert_eq(icc_lut_profile_from_bytes(lbd, ltotal - 4, err), 0, "a truncated LUT profile is rejected");
+assert_eq(load64(err), RG_ERR_INVALID_FORMAT, "and the public entry reports INVALID_FORMAT, as Rust");
+assert_eq(_icc_lut_profile_parse(lbd, ltotal - 4, err), 0, "the internal parse rejects it too");
 assert_eq(load64(err), RG_ERR_PARSE,
   "a plain truncation is caught by the tag table, which bounds offset + size first");
 # To reach the mft2 pre-check the tag must FIT the shortened buffer while the
@@ -956,7 +989,9 @@ assert_eq(load64(err), RG_ERR_PARSE,
 # which is the point of having it, since a hostile profile declaring a 64-cell
 # grid should not get 1.6 MB allocated on its way to being rejected.
 _icc_write_u32_be(lbd, 140, ltotal - 4 - 144);
-assert_eq(icc_lut_profile_from_bytes(lbd, ltotal - 4, err), 0, "a LUT extending past the buffer is rejected");
+# Through the internal parse, so that INVALID_FORMAT here can only come from the
+# pre-check and not from a folded PARSE.
+assert_eq(_icc_lut_profile_parse(lbd, ltotal - 4, err), 0, "a LUT extending past the buffer is rejected");
 assert_eq(load64(err), RG_ERR_INVALID_FORMAT,
   "the LUT overrun is caught by the mft2 pre-check, before the allocation");
 _icc_write_u32_be(lbd, 140, ltotal - 144);

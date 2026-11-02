@@ -146,8 +146,8 @@ fn _hist_u8_to_f32(n) {
 }
 
 # Rust's `x.clamp(0.0, 255.0) as u8`. `as` TRUNCATES toward zero, so any
-# round-half-up term has to be added by the caller before this — matching
-# color.cyr's `_f64_to_u8_round`, which is the same shape at f64 width.
+# round-half-up term has to be added by the caller before this. error.cyr's
+# `_rg_f32_sat_u8` is the same cast. This one clamps through ganita first.
 #must_use
 fn _hist_f32_to_u8(x) {
     return f64_to(f32_to(ganita_f32_clamp(x, _HIST_F32_ZERO, _HIST_F32_255)));

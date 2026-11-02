@@ -1,0 +1,631 @@
+# probe.cyr -- the Cyrius side of ranga's differential oracle.
+# See scripts/oracle/README.md.
+#
+# Mirrors scripts/oracle/rust/src/main.rs group by group. It uses the same xorshift64
+# generator, the same inputs and the same output lines:
+#   group<TAB>key<TAB>type<TAB>value
+# Floats are passed as exact bit patterns wherever Rust writes a literal, so neither
+# side's literal rounding can make the two disagree. Build it from the repository
+# root (scripts/oracle/run.sh does), so `src/` resolves.
+
+include "src/error.cyr"
+include "src/bytevec.cyr"
+include "src/simd_u8.cyr"
+include "src/pixel.cyr"
+include "src/color.cyr"
+include "src/convert.cyr"
+include "src/filter_point.cyr"
+include "src/filter_kernel.cyr"
+include "src/transform.cyr"
+include "src/blend.cyr"
+
+# ── buffered output ────────
+var _OB = 0;
+var _ON = 0;
+var _OCAP = 1048576;
+
+fn o_flush() {
+    var off = 0;
+    while (off < _ON) {
+        var w = sys_write(1, _OB + off, _ON - off);
+        if (w <= 0) { _ON = 0; return 0; }
+        off = off + w;
+    }
+    _ON = 0;
+    return 0;
+}
+fn o_byte(c) {
+    if (_ON >= _OCAP) { o_flush(); }
+    store8(_OB + _ON, c);
+    _ON = _ON + 1;
+    return 0;
+}
+fn o_str(s) {
+    var i = 0;
+    while (load8(s + i) != 0) { o_byte(load8(s + i)); i = i + 1; }
+    return 0;
+}
+fn o_dec(n) {
+    if (n < 0) { o_byte(45); n = 0 - n; }
+    if (n >= 10) { o_dec(n / 10); }
+    o_byte(48 + n % 10);
+    return 0;
+}
+fn o_hex(v, nd) {
+    var i = nd - 1;
+    while (i >= 0) {
+        var d = (v >> (i * 4)) & 15;
+        if (d < 10) { o_byte(48 + d); }
+        if (d >= 10) { o_byte(87 + d); }
+        i = i - 1;
+    }
+    return 0;
+}
+fn o_g(g) { o_str(g); o_byte(9); return 0; }
+fn o_t(t) { o_byte(9); o_str(t); o_byte(9); return 0; }
+fn o_nl() { o_byte(10); return 0; }
+fn o_bytes(p, n) {
+    var i = 0;
+    while (i < n) { o_hex(load8(p + i), 2); i = i + 1; }
+    return 0;
+}
+# A whole line with a decimal key.
+fn o_f32k(g, k, v) { o_g(g); o_dec(k); o_t("f32"); o_hex(v & 0xFFFFFFFF, 8); o_nl(); return 0; }
+fn o_f64k(g, k, v) { o_g(g); o_dec(k); o_t("f64"); o_hex(v, 16); o_nl(); return 0; }
+fn o_codek(g, k, c) { o_g(g); o_dec(k); o_t("code"); o_dec(c); o_nl(); return 0; }
+# Keys "a,b,c".
+fn o_k3(a, b, c) { o_dec(a); o_byte(44); o_dec(b); o_byte(44); o_dec(c); return 0; }
+
+# ── the shared generator: xorshift64, as in the Rust driver ────────
+var _RNG = 0;
+fn rng_next() {
+    _RNG = _RNG ^ (_RNG << 13);
+    _RNG = _RNG ^ (_RNG >> 7);
+    _RNG = _RNG ^ (_RNG << 17);
+    return _RNG;
+}
+fn rng_byte() { return rng_next() >> 56; }
+fn rng_f32() { return f32_from(f64_div(f64_from(rng_next() >> 40), 16777216.0)); }
+fn rng_f64() { return f64_div(f64_from(rng_next() >> 11), 9007199254740992.0); }
+
+fn _o_fmul(a: f32, b: f32) { return a * b; }
+fn _o_fdiv(a: f32, b: f32) { return a / b; }
+fn i2f(n) { return f32_from(f64_from(n)); }
+
+var ERR = 0;
+
+# ── transition search (see the Rust driver's `transitions`) ────────
+# `which` selects the function under test; x is an f32 bit pattern in [0, 1].
+fn t_eval(which, x) {
+    if (which == 1) { return linear_to_srgb(x); }
+    if (which == 2) {
+        var c = lin_rgba_new(0, 0, 0, x);
+        var s = lin_rgba_to_srgba(c);
+        var v = srgba_a(s);
+        srgba_free(s); lin_rgba_free(c);
+        return v;
+    }
+    if (which == 3) {
+        var c3 = lin_rgba_new(x, 0, 0, i2f(1));
+        var s3 = lin_rgba_to_srgba(c3);
+        var v3 = srgba_r(s3);
+        srgba_free(s3); lin_rgba_free(c3);
+        return v3;
+    }
+    if (which == 4) {
+        var b = pixel_buffer_zeroed(1, 1, PF_RGBAF32, ERR);
+        var d = pixel_buffer_data(b);
+        store32(d, x); store32(d + 4, x); store32(d + 8, x); store32(d + 12, x);
+        var o = rgbaf32_to_rgba8(b, ERR);
+        var v4 = load8(pixel_buffer_data(o));
+        pixel_buffer_free(o); pixel_buffer_free(b);
+        return v4;
+    }
+    if (which == 5) {
+        var h = hsl_new(0, 0, x);
+        var s5 = hsl_to_srgba(h);
+        var v5 = srgba_r(s5);
+        srgba_free(s5); hsl_free(h);
+        return v5;
+    }
+    if (which == 6) {
+        var k = cmyk_new(0, 0, 0, x);
+        var s6 = cmyk_to_srgba(k);
+        var v6 = srgba_r(s6);
+        srgba_free(s6); cmyk_free(k);
+        return v6;
+    }
+    return 0;
+}
+fn t_hit(which, rising, k, x) {
+    var v = t_eval(which, x);
+    if (rising == 1) { return v >= k; }
+    return v <= 255 - k;
+}
+fn transitions(g, which, rising) {
+    var k = 1;
+    while (k <= 255) {
+        o_g(g); o_dec(k); o_t("x");
+        if (t_hit(which, rising, k, 0x3F800000) == 0) {
+            o_str("none");
+        } else {
+            var lo = 0;
+            var hi = 0x3F800000;
+            while (lo < hi) {
+                var mid = lo + (hi - lo) / 2;
+                if (t_hit(which, rising, k, mid) == 1) { hi = mid; } else { lo = mid + 1; }
+            }
+            o_hex(lo, 8);
+        }
+        o_nl();
+        k = k + 1;
+    }
+    return 0;
+}
+
+fn rgba_img(w, h) { return pixel_buffer_zeroed(w, h, PF_RGBA8, ERR); }
+fn rand_img(seed, w, h) {
+    _RNG = seed;
+    var b = rgba_img(w, h);
+    var d = pixel_buffer_data(b);
+    var i = 0;
+    while (i < w * h * 4) { store8(d + i, rng_byte()); i = i + 1; }
+    return b;
+}
+fn grad_img() {
+    var b = rgba_img(20, 20);
+    var d = pixel_buffer_data(b);
+    var y = 0;
+    while (y < 20) {
+        var x = 0;
+        while (x < 20) {
+            var p = d + (y * 20 + x) * 4;
+            store8(p, (x * 12) & 255);
+            store8(p + 1, (y * 12) & 255);
+            store8(p + 2, ((x + y) * 6) & 255);
+            store8(p + 3, 255);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return b;
+}
+
+# ── groups ────────
+fn g_srgb_to_linear() {
+    var c = 0;
+    while (c < 256) { o_f32k("srgb_to_linear", c, srgb_to_linear(c)); c = c + 1; }
+    return 0;
+}
+
+fn g_hsl() {
+    transitions("hsl_to_srgba.grey", 5, 1);
+    var r = 0;
+    while (r < 256) {
+        var g = 0;
+        while (g < 256) {
+            var b = 0;
+            while (b < 256) {
+                var c = srgba_new(r, g, b, 255);
+                var h = srgba_to_hsl(c);
+                o_g("srgba_to_hsl.h"); o_k3(r, g, b); o_t("f32"); o_hex(hsl_h(h), 8); o_nl();
+                o_g("srgba_to_hsl.s"); o_k3(r, g, b); o_t("f32"); o_hex(hsl_s(h), 8); o_nl();
+                o_g("srgba_to_hsl.l"); o_k3(r, g, b); o_t("f32"); o_hex(hsl_l(h), 8); o_nl();
+                var back = hsl_to_srgba(h);
+                o_g("hsl_roundtrip"); o_k3(r, g, b); o_t("u8");
+                o_hex(srgba_r(back), 2); o_hex(srgba_g(back), 2); o_hex(srgba_b(back), 2); o_nl();
+                srgba_free(back); hsl_free(h); srgba_free(c);
+                b = b + 5;
+            }
+            g = g + 5;
+        }
+        r = r + 5;
+    }
+    _RNG = 0x9E3779B97F4A7C15;
+    var i = 0;
+    while (i < 20000) {
+        var hh = _o_fmul(rng_f32(), i2f(360));
+        var ss = rng_f32();
+        var ll = rng_f32();
+        var hc = hsl_new(hh, ss, ll);
+        var sc = hsl_to_srgba(hc);
+        o_g("hsl_to_srgba"); o_dec(i); o_t("u8");
+        o_hex(srgba_r(sc), 2); o_hex(srgba_g(sc), 2); o_hex(srgba_b(sc), 2); o_nl();
+        srgba_free(sc); hsl_free(hc);
+        i = i + 1;
+    }
+    var eps = fl_alloc(40);
+    store64(eps, 0x358637bd); store64(eps + 8, 0x358637be); store64(eps + 16, 0x358637bc);
+    store64(eps + 24, 0x35800000); store64(eps + 32, 0x36000000);
+    var e = 0;
+    while (e < 5) {
+        var he = hsl_new(0, load64(eps + e * 8), 0x3F000000);
+        var se = hsl_to_srgba(he);
+        o_g("hsl_to_srgba.eps"); o_dec(e); o_t("u8");
+        o_hex(srgba_r(se), 2); o_hex(srgba_g(se), 2); o_hex(srgba_b(se), 2); o_nl();
+        srgba_free(se); hsl_free(he);
+        e = e + 1;
+    }
+    fl_free(eps);
+    return 0;
+}
+
+fn g_cmyk() {
+    transitions("cmyk_to_srgba.k", 6, 0);
+    _RNG = 0xD1B54A32D192ED03;
+    var i = 0;
+    while (i < 20000) {
+        var c = rng_f32();
+        var m = rng_f32();
+        var y = rng_f32();
+        var k = rng_f32();
+        var v = cmyk_new(c, m, y, k);
+        var s = cmyk_to_srgba(v);
+        o_g("cmyk_to_srgba"); o_dec(i); o_t("u8");
+        o_hex(srgba_r(s), 2); o_hex(srgba_g(s), 2); o_hex(srgba_b(s), 2); o_nl();
+        srgba_free(s); cmyk_free(v);
+        i = i + 1;
+    }
+    var mm = 0;
+    while (mm < 256) {
+        var x = 0;
+        while (x <= mm) {
+            var px = srgba_new(x, mm, 0, 255);
+            var cm = srgba_to_cmyk(px);
+            o_g("srgba_to_cmyk.c"); o_dec(x); o_byte(44); o_dec(mm); o_t("f32"); o_hex(cmyk_c(cm), 8); o_nl();
+            o_g("srgba_to_cmyk.m"); o_dec(x); o_byte(44); o_dec(mm); o_t("f32"); o_hex(cmyk_m(cm), 8); o_nl();
+            o_g("srgba_to_cmyk.y"); o_dec(x); o_byte(44); o_dec(mm); o_t("f32"); o_hex(cmyk_y(cm), 8); o_nl();
+            o_g("srgba_to_cmyk.k"); o_dec(x); o_byte(44); o_dec(mm); o_t("f32"); o_hex(cmyk_k(cm), 8); o_nl();
+            cmyk_free(cm); srgba_free(px);
+            x = x + 1;
+        }
+        mm = mm + 1;
+    }
+    return 0;
+}
+
+fn g_oklch() {
+    var r = 0;
+    while (r < 256) {
+        var g = 0;
+        while (g < 256) {
+            var b = 0;
+            while (b < 256) {
+                var c = srgba_new(r, g, b, 255);
+                var lab = srgba_to_oklab(c);
+                var lch = oklab_to_oklch(lab);
+                o_g("oklab_to_oklch.c"); o_k3(r, g, b); o_t("f32"); o_hex(oklch_c(lch), 8); o_nl();
+                o_g("oklab_to_oklch.h"); o_k3(r, g, b); o_t("f32"); o_hex(oklch_h(lch), 8); o_nl();
+                var back = oklch_to_oklab(lch);
+                o_g("oklch_to_oklab.a"); o_k3(r, g, b); o_t("f32"); o_hex(oklab_a(back), 8); o_nl();
+                o_g("oklch_to_oklab.b"); o_k3(r, g, b); o_t("f32"); o_hex(oklab_b(back), 8); o_nl();
+                oklab_free(back); oklch_free(lch); oklab_free(lab); srgba_free(c);
+                b = b + 5;
+            }
+            g = g + 5;
+        }
+        r = r + 5;
+    }
+    return 0;
+}
+
+fn g_color_temperature() {
+    var out = fl_alloc(16);
+    var k = 1000;
+    while (k <= 40000) {
+        color_temperature(i2f(k), out);
+        var i = 0;
+        while (i < 3) {
+            o_g("color_temperature"); o_dec(k); o_byte(46); o_dec(i); o_t("f32");
+            o_hex(load32(out + i * 4), 8); o_nl();
+            i = i + 1;
+        }
+        k = k + 7;
+    }
+    fl_free(out);
+    return 0;
+}
+
+fn g_levels() {
+    var bks = fl_alloc(48); var wks = fl_alloc(56); var gks = fl_alloc(64);
+    store64(bks, 0); store64(bks + 8, 1); store64(bks + 16, 2); store64(bks + 24, 5);
+    store64(bks + 32, 10); store64(bks + 40, 25);
+    store64(wks, 50); store64(wks + 8, 60); store64(wks + 16, 75); store64(wks + 24, 80);
+    store64(wks + 32, 90); store64(wks + 40, 99); store64(wks + 48, 100);
+    store64(gks, 25); store64(gks + 8, 50); store64(gks + 16, 80); store64(gks + 24, 100);
+    store64(gks + 32, 150); store64(gks + 40, 220); store64(gks + 48, 281); store64(gks + 56, 400);
+    var hundred = i2f(100);
+    var bi = 0;
+    while (bi < 6) {
+        var wi = 0;
+        while (wi < 7) {
+            var gi = 0;
+            while (gi < 8) {
+                var bk = load64(bks + bi * 8);
+                var wk = load64(wks + wi * 8);
+                var gk = load64(gks + gi * 8);
+                var b = rgba_img(256, 1);
+                var d = pixel_buffer_data(b);
+                var v = 0;
+                while (v < 256) {
+                    store8(d + v * 4, v); store8(d + v * 4 + 1, v); store8(d + v * 4 + 2, v);
+                    store8(d + v * 4 + 3, 255);
+                    v = v + 1;
+                }
+                var rc = levels(b, _o_fdiv(i2f(bk), hundred), _o_fdiv(i2f(wk), hundred),
+                  _o_fdiv(i2f(gk), hundred));
+                o_g("levels.code"); o_k3(bk, wk, gk); o_t("code"); o_dec(rc); o_nl();
+                o_g("levels"); o_k3(bk, wk, gk); o_t("u8");
+                v = 0;
+                while (v < 256) { o_hex(load8(d + v * 4), 2); v = v + 1; }
+                o_nl();
+                pixel_buffer_free(b);
+                gi = gi + 1;
+            }
+            wi = wi + 1;
+        }
+        bi = bi + 1;
+    }
+    fl_free(bks); fl_free(wks); fl_free(gks);
+    levels_nan("nan_gamma", 0, i2f(1), 0x7FC00000);
+    levels_nan("nan_black", 0x7FC00000, i2f(1), i2f(1));
+    levels_nan("nan_white", 0, 0x7FC00000, i2f(1));
+    return 0;
+}
+
+# NaN parameters: Rust guards only `gamma <= 0.0`, so each of these proceeds.
+fn levels_nan(key, bk, wk, gk) {
+    var b = rgba_img(256, 1);
+    var d = pixel_buffer_data(b);
+    var v = 0;
+    while (v < 256) {
+        store8(d + v * 4, v); store8(d + v * 4 + 1, v); store8(d + v * 4 + 2, v);
+        store8(d + v * 4 + 3, 255);
+        v = v + 1;
+    }
+    var rc = levels(b, bk, wk, gk);
+    o_g("levels.code"); o_str(key); o_t("code"); o_dec(rc); o_nl();
+    o_g("levels"); o_str(key); o_t("u8");
+    v = 0;
+    while (v < 256) { o_hex(load8(d + v * 4), 2); v = v + 1; }
+    o_nl();
+    pixel_buffer_free(b);
+    return 0;
+}
+
+fn g_hue_shift() {
+    var degs = fl_alloc(72);
+    store64(degs, 0); store64(degs + 8, 0x41200000); store64(degs + 16, 0x42340000);
+    store64(degs + 24, 0xC2B40000); store64(degs + 32, 0x42F00000); store64(degs + 40, 0x43B40000);
+    store64(degs + 48, 0x44356000); store64(degs + 56, 0x4E6E6B28); store64(degs + 64, 0xCE6E6B28);
+    var i = 0;
+    while (i < 9) {
+        var b = rand_img(0xA5A55A5A12345678, 64, 64);
+        var rc = hue_shift(b, load64(degs + i * 8));
+        o_codek("hue_shift.code", i, rc);
+        o_g("hue_shift"); o_dec(i); o_t("u8"); o_bytes(pixel_buffer_data(b), 64 * 64 * 4); o_nl();
+        pixel_buffer_free(b);
+        i = i + 1;
+    }
+    fl_free(degs);
+    return 0;
+}
+
+fn bil_emit(img, key, radius, ss, sc) {
+    store64(ERR, 0);
+    var out = bilateral(img, radius, ss, sc, ERR);
+    o_g("bilateral.code"); o_str(key); o_t("code");
+    if (out == 0) { o_dec(load64(ERR)); } else { o_dec(0); }
+    o_nl();
+    if (out != 0) {
+        o_g("bilateral"); o_str(key); o_t("u8"); o_bytes(pixel_buffer_data(out), 23 * 17 * 4); o_nl();
+        pixel_buffer_free(out);
+    }
+    return 0;
+}
+
+fn g_bilateral() {
+    var img = rand_img(6, 23, 17);
+    var key = fl_alloc(16);
+    var scs = fl_alloc(24);
+    store64(scs, 0x40A00000); store64(scs + 8, 0x41200000); store64(scs + 16, 0x41F00000);
+    var names = fl_alloc(24);
+    store64(names, "5"); store64(names + 8, "10"); store64(names + 16, "30");
+    var radius = 1;
+    while (radius <= 3) {
+        var i = 0;
+        while (i < 3) {
+            # Key "radius,sc" with sc printed as Rust's f32 Display does (5, 10, 30).
+            store8(key, 48 + radius); store8(key + 1, 44);
+            var nm = load64(names + i * 8);
+            var j = 0;
+            while (load8(nm + j) != 0) { store8(key + 2 + j, load8(nm + j)); j = j + 1; }
+            store8(key + 2 + j, 0);
+            bil_emit(img, key, radius, 0x40200000, load64(scs + i * 8));
+            i = i + 1;
+        }
+        radius = radius + 2;
+    }
+    bil_emit(img, "ss0", 2, 0, 0x41F00000);
+    bil_emit(img, "ssneg", 2, 0xBF800000, 0x41F00000);
+    bil_emit(img, "ssnan", 2, 0x7FC00000, 0x41F00000);
+    fl_free(names); fl_free(scs); fl_free(key);
+    pixel_buffer_free(img);
+    return 0;
+}
+
+fn g_affine() {
+    var n = 206;
+    var affs = fl_alloc(n * 8);
+    store64(affs, affine_new(0.6, 0.0, 0.0, 2.5, f64_neg(1.9), f64_neg(1.9)));
+    store64(affs + 8, affine_new(0.8, 0.0, 0.0, 0.4, f64_neg(1.9), 0.75));
+    store64(affs + 16, affine_new(2.0, 0.0, 0.0, 2.0, 0.25, 0.25));
+    store64(affs + 24, affine_new(1.1, 0.0, 0.0, 1.1, 0.7, 0.3));
+    store64(affs + 32, affine_rotate(0x3FF921FB54442D18));
+    store64(affs + 40, affine_rotate(0.5));
+    _RNG = 0x0123456789ABCDEF;
+    var i = 6;
+    while (i < n) {
+        var a = f64_add(0.2, f64_mul(3.0, rng_f64()));
+        var d = f64_add(0.2, f64_mul(3.0, rng_f64()));
+        var b = f64_sub(rng_f64(), 0.5);
+        var c = f64_sub(rng_f64(), 0.5);
+        var tx = f64_sub(f64_mul(20.0, rng_f64()), 10.0);
+        var ty = f64_sub(f64_mul(20.0, rng_f64()), 10.0);
+        store64(affs + i * 8, affine_new(a, b, c, d, tx, ty));
+        i = i + 1;
+    }
+    var img = grad_img();
+    i = 0;
+    while (i < n) {
+        var m = load64(affs + i * 8);
+        var inv = affine_inverse(m);
+        if (inv == 0) {
+            o_g("affine_inverse.a"); o_dec(i); o_t("x"); o_str("singular"); o_nl();
+        } else {
+            o_f64k("affine_inverse.a", i, affine_a(inv));
+            o_f64k("affine_inverse.b", i, affine_b(inv));
+            o_f64k("affine_inverse.c", i, affine_c(inv));
+            o_f64k("affine_inverse.d", i, affine_d(inv));
+            o_f64k("affine_inverse.tx", i, affine_tx(inv));
+            o_f64k("affine_inverse.ty", i, affine_ty(inv));
+            affine_free(inv);
+        }
+        if (i < 40) {
+            var fi = 0;
+            while (fi < 3) {
+                store64(ERR, 0);
+                var out = affine_transform(img, m, 30, 30, fi, ERR);
+                o_g("affine_transform.code"); o_dec(i); o_byte(46); o_dec(fi); o_t("code");
+                if (out == 0) { o_dec(load64(ERR)); } else { o_dec(0); }
+                o_nl();
+                if (out != 0) {
+                    o_g("affine_transform"); o_dec(i); o_byte(46); o_dec(fi); o_t("u8");
+                    o_bytes(pixel_buffer_data(out), 30 * 30 * 4); o_nl();
+                    pixel_buffer_free(out);
+                }
+                fi = fi + 1;
+            }
+        }
+        affine_free(m);
+        i = i + 1;
+    }
+    # Non-finite matrices (see the Rust driver).
+    var tiny = rgba_img(1, 1);
+    store8(pixel_buffer_data(tiny), 10); store8(pixel_buffer_data(tiny) + 1, 20);
+    store8(pixel_buffer_data(tiny) + 2, 30); store8(pixel_buffer_data(tiny) + 3, 40);
+    affine_nonfinite("nan_a", affine_new(0x7FF8000000000000, 0.0, 0.0, 1.0, 0.0, 0.0), img, tiny);
+    affine_nonfinite("nan_tx", affine_new(1.0, 0.0, 0.0, 1.0, 0x7FF8000000000000, 0.0), img, tiny);
+    affine_nonfinite("inf_d", affine_new(1.0, 0.0, 0.0, 0x7FF0000000000000, 0.0, 0.0), img, tiny);
+    pixel_buffer_free(tiny);
+    pixel_buffer_free(img);
+    fl_free(affs);
+    var id = affine_new(1.0, 0.0, 0.0, 1.0, 0.0, 0.0);
+    o_g("affine_is_identity"); o_str("identity"); o_t("u8"); o_hex(affine_is_identity(id), 2); o_nl();
+    affine_free(id);
+    var na = affine_new(0x7FF8000000000000, 0.0, 0.0, 1.0, 0.0, 0.0);
+    o_g("affine_is_identity"); o_str("nan_a"); o_t("u8"); o_hex(affine_is_identity(na), 2); o_nl();
+    affine_free(na);
+    var nt = affine_new(1.0, 0.0, 0.0, 1.0, 0x7FF8000000000000, 0.0);
+    o_g("affine_is_identity"); o_str("nan_tx"); o_t("u8"); o_hex(affine_is_identity(nt), 2); o_nl();
+    affine_free(nt);
+    var ti = affine_new(1.0, 0.0, 0.0, 1.0, 0.0000000001, 0.0);
+    o_g("affine_is_identity"); o_str("tiny"); o_t("u8"); o_hex(affine_is_identity(ti), 2); o_nl();
+    affine_free(ti);
+    var sm = affine_new(1.0, 0.0, 0.0, 1.0, 0.00000001, 0.0);
+    o_g("affine_is_identity"); o_str("small"); o_t("u8"); o_hex(affine_is_identity(sm), 2); o_nl();
+    affine_free(sm);
+    return 0;
+}
+
+fn affine_nonfinite(name, m, img, tiny) {
+    var fi = 0;
+    while (fi < 3) {
+        var k = 0;
+        while (k < 2) {
+            var im = img;
+            var iname = "grad";
+            if (k == 1) { im = tiny; iname = "1x1"; }
+            store64(ERR, 0);
+            var out = affine_transform(im, m, 3, 2, fi, ERR);
+            o_g("affine_nonfinite.code"); o_str(name); o_byte(46); o_str(iname); o_byte(46); o_dec(fi);
+            o_t("code");
+            if (out == 0) { o_dec(load64(ERR)); } else { o_dec(0); }
+            o_nl();
+            if (out != 0) {
+                o_g("affine_nonfinite"); o_str(name); o_byte(46); o_str(iname); o_byte(46); o_dec(fi);
+                o_t("u8"); o_bytes(pixel_buffer_data(out), 3 * 2 * 4); o_nl();
+                pixel_buffer_free(out);
+            }
+            k = k + 1;
+        }
+        fi = fi + 1;
+    }
+    affine_free(m);
+    return 0;
+}
+
+fn g_blend() {
+    var src = fl_alloc(8);
+    var dst = fl_alloc(8);
+    var out = fl_alloc(8);
+    var mi = 0;
+    while (mi < 12) {
+        var s = 0;
+        while (s < 256) {
+            store8(src, s); store8(src + 1, 255 - s); store8(src + 2, (s * 7) & 255); store8(src + 3, 200);
+            var d = 0;
+            while (d < 256) {
+                store8(dst, d); store8(dst + 1, (d * 3) & 255); store8(dst + 2, 255 - d); store8(dst + 3, 255);
+                blend_pixel(src, dst, mi, 200, out);
+                o_g("blend_pixel"); o_dec(mi); o_byte(46); o_dec(s); o_byte(46); o_dec(d); o_t("u8");
+                o_bytes(out, 4); o_nl();
+                d = d + 1;
+            }
+            s = s + 1;
+        }
+        mi = mi + 1;
+    }
+    fl_free(src); fl_free(dst); fl_free(out);
+    return 0;
+}
+
+# ── main: run every group, or only those named on the command line ────────
+fn want(nargs, name) {
+    if (nargs <= 1) { return 1; }
+    var i = 1;
+    while (i < nargs) {
+        if (streq(argv(i), name) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    args_init();
+    _OB = fl_alloc(_OCAP);
+    ERR = fl_alloc(8);
+    var nargs = argc();
+    if (want(nargs, "srgb_to_linear") == 1) { g_srgb_to_linear(); }
+    if (want(nargs, "linear_to_srgb") == 1) { transitions("linear_to_srgb", 1, 1); }
+    if (want(nargs, "lin_to_srgba") == 1) {
+        transitions("lin_to_srgba.a", 2, 1);
+        transitions("lin_to_srgba.r", 3, 1);
+    }
+    if (want(nargs, "rgbaf32_to_rgba8") == 1) { transitions("rgbaf32_to_rgba8", 4, 1); }
+    if (want(nargs, "hsl") == 1) { g_hsl(); }
+    if (want(nargs, "cmyk") == 1) { g_cmyk(); }
+    if (want(nargs, "oklch") == 1) { g_oklch(); }
+    if (want(nargs, "color_temperature") == 1) { g_color_temperature(); }
+    if (want(nargs, "levels") == 1) { g_levels(); }
+    if (want(nargs, "hue_shift") == 1) { g_hue_shift(); }
+    if (want(nargs, "bilateral") == 1) { g_bilateral(); }
+    if (want(nargs, "affine") == 1) { g_affine(); }
+    if (want(nargs, "blend") == 1) { g_blend(); }
+    o_flush();
+    return 0;
+}
+
+var r = main();
+sys_exit_group(r);

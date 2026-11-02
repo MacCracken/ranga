@@ -453,8 +453,22 @@ fn icc_profile_free(p) {
 
 # Parse a full ICC profile from `data` (`len` bytes). Returns 0 with a code
 # through err_out on any malformed input.
+#
+# Rust reports EVERY malformed profile as InvalidFormat. The parser below
+# distinguishes RG_ERR_PARSE (a read or tag running past the data) from
+# RG_ERR_INVALID_FORMAT (a structural check), and the public entry folds PARSE
+# into INVALID_FORMAT. So a caller written against Rust sees one code. Up to 2.1.2
+# both codes escaped. Tests that need to know WHICH check fired call the
+# `_icc_*_parse` functions directly.
 #must_use
 fn icc_profile_from_bytes(data, len, err_out) {
+    var p = _icc_profile_parse(data, len, err_out);
+    if (p == 0 && load64(err_out) == RG_ERR_PARSE) { store64(err_out, RG_ERR_INVALID_FORMAT); }
+    return p;
+}
+
+#must_use
+fn _icc_profile_parse(data, len, err_out) {
     if (len < _ICC_MIN_PROFILE_SIZE) {
         store64(err_out, RG_ERR_INVALID_FORMAT);
         return 0;
@@ -864,14 +878,14 @@ fn _icc_lut_check_channels(data, off, err_out) {
     if (load8(data + off + 8) != 3) { store64(err_out, RG_ERR_INVALID_FORMAT); return 0; }
     if (load8(data + off + 9) != 3) { store64(err_out, RG_ERR_INVALID_FORMAT); return 0; }
     var grid = load8(data + off + 10);
-    # ⚠ ZERO IS AS INVALID AS 65. Rust checks only `> 64`, and a grid_size of 0
-    # then makes `grid_size - 1` underflow: Rust panics on the subtraction in
-    # debug and indexes wildly in release, while this port computed
-    # `f64_from(0 - 1)` as a scale and read below the LUT allocation. The input
-    # is an untrusted byte from a file, so both behaviours are reachable from a
-    # malformed profile. Rejecting it is a deliberate divergence from Rust and
-    # strictly safer — there is no such thing as a zero-point LUT axis.
-    if (grid < 2) { store64(err_out, RG_ERR_INVALID_FORMAT); return 0; }
+    # ⚠ A grid of ZERO IS AS INVALID AS 65. Rust checks only `> 64`, and a
+    # grid_size of 0 then makes `grid_size - 1` underflow. Rust panics there (Vec
+    # indexing is bounds-checked even in release), while an unguarded port would
+    # compute `f64_from(0 - 1)` as a scale and read below the LUT allocation. The
+    # byte comes from an untrusted file. Rejecting 0 is the documented hardening.
+    # A grid of 1 is valid, as in Rust: a constant LUT, where apply lands every
+    # input on the single cell. It was rejected along with 0 up to 2.1.2.
+    if (grid < 1) { store64(err_out, RG_ERR_INVALID_FORMAT); return 0; }
     if (grid > _ICC_MAX_GRID) { store64(err_out, RG_ERR_INVALID_FORMAT); return 0; }
     store64(err_out, RG_ERR_NONE);
     return grid;
@@ -930,6 +944,15 @@ fn _icc_parse_mft1(data, len, off, size, major, minor, cs_off, err_out) {
 # this — an mAB profile is rejected as an unsupported type, exactly as in Rust.
 #must_use
 fn icc_lut_profile_from_bytes(data, len, err_out) {
+    var p = _icc_lut_profile_parse(data, len, err_out);
+    if (p == 0 && load64(err_out) == RG_ERR_PARSE) { store64(err_out, RG_ERR_INVALID_FORMAT); }
+    return p;
+}
+
+# The detailed parse behind icc_lut_profile_from_bytes. See icc_profile_from_bytes
+# for why the public entry folds RG_ERR_PARSE into RG_ERR_INVALID_FORMAT.
+#must_use
+fn _icc_lut_profile_parse(data, len, err_out) {
     if (len < _ICC_MIN_PROFILE_SIZE) {
         store64(err_out, RG_ERR_INVALID_FORMAT);
         return 0;

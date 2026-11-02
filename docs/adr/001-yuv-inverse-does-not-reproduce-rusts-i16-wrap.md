@@ -46,10 +46,25 @@ unaffected — the divergence only appears where Rust's intermediate exceeded
   saturated colours after a YUV round trip.** They are improvements, but they
   are differences, and anything pinning golden images will need regenerating.
 - The port can no longer claim bit-identical YUV output against the Rust line.
-  `docs/development/parity-rust-v-cyrius.md` records it as the sole intentional
-  behavioural divergence.
+  `docs/development/parity-rust-v-cyrius.md` records it among the deliberate
+  divergences. It is not the only one: ADR 002 and the ICC grid-0 hardening are
+  others.
 - If bug-compatibility is ever genuinely needed, it belongs behind an explicit
   opt-in rather than as the default.
+
+## Scope: all four YUV inverses
+
+The same i16 arithmetic, and so the same wrap, is in every YUV→RGB inverse Rust
+1.0.1 ships. This ADR covers all four:
+- `yuv420p_to_rgba` (BT.601);
+- `yuv420p_to_rgba_bt709`;
+- `yuv420p_to_rgba_bt2020`;
+- `nv12_to_rgba`.
+
+The port computes each one wide and clamps at the end. Its tests pin the
+non-wrapped values (`tests/convert.tcyr`). A parity review on 2026-11-02 confirmed
+that every difference in these four functions is explained by the i16-wrap model.
+Until 2.2.0, the ADR named only the first of them.
 
 ## A second instance
 
@@ -60,10 +75,17 @@ the same reason, and this ADR covers both.
 
 ## How this was found
 
-The final pre-tag parity sweep. Worth recording that the same sweep produced
-five other "confirmed divergences" — in `linear_to_srgb`, `rgbaf32_to_rgba8`,
-`cmyk_to_srgba`, `levels` and `affine_transform` — and **all five failed to
-reproduce** when measured against the real crate rather than reasoned about:
-14,013 inputs through `linear_to_srgb` alone, byte-identical. Only this one and
-a one-count blend rounding difference survived measurement, and the blend one
-was fixed rather than accepted.
+The final pre-tag parity sweep. The same sweep produced five other "confirmed
+divergences": in `linear_to_srgb`, `rgbaf32_to_rgba8`, `cmyk_to_srgba`, `levels`
+and `affine_transform`. This ADR first recorded that **all five failed to
+reproduce**, on the strength of sampled measurement (14,013 inputs through
+`linear_to_srgb`, byte-identical).
+
+**That was wrong, and the correction matters more than the original claim.** All
+five do reproduce. Each differs from Rust only on inputs next to a rounding
+boundary, which a sample of 14,013 out of ~10^9 f32 values does not hit. The
+2026-11-02 parity review found them with the real crate, and `scripts/oracle` now
+checks them exhaustively. Its transition search compares every output boundary in
+[0, 1]. All five are fixed in 2.2.0. They were not accepted divergences, since
+ranga had simply computed in f64 where Rust computed in f32, or in a different
+order. The two divergences this ADR accepts, the i16 wraps, are unchanged.

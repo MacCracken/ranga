@@ -5,8 +5,8 @@
 # RG_ERR_NONE (0) on success or a negative RG_ERR_* code on failure. Where a
 # function also returns a value, it takes an `err_out` pointer and writes the
 # code there. The detailed context Rust carried in the variant payloads
-# (expected/actual sizes, format names) is logged at the failure site rather
-# than carried in the return value.
+# (expected/actual sizes, format names) is not carried anywhere: an i64 code has
+# no room for it, and nothing logs it. See ranga_error_message.
 #
 # Rust variant                          -> code
 #   InvalidFormat(String)               -> RG_ERR_INVALID_FORMAT
@@ -27,9 +27,11 @@ var RG_ERR_DIMENSION_MISMATCH     = (0 - 2);
 var RG_ERR_BUFFER_TOO_SMALL       = (0 - 3);
 # The requested conversion between formats is not supported.
 var RG_ERR_UNSUPPORTED_CONVERSION = (0 - 4);
-# A parameter is outside the valid range. Covers the cases 1.0.0 hardening
-# turned from silent misbehaviour into errors: bilateral sigma = 0 (was a
-# -inf coefficient) and levels gamma = 0 (was powf(infinity)).
+# A parameter is outside the valid range, in a way Rust's types could not
+# express: a negative radius or size (Rust takes u32/usize), or an unknown
+# BlendMode/ScaleFilter value. Rust has no such variant. Where Rust returns
+# Other for a bad value (bilateral sigma <= 0, levels gamma <= 0), the port
+# returns RG_ERR_OTHER as well (since 2.2.0 for bilateral).
 var RG_ERR_INVALID_PARAMETER      = (0 - 5);
 # An allocation was refused — the request exceeds ALLOC_MAX, the size
 # computation overflowed, or the heap is exhausted. Distinct from
@@ -53,11 +55,13 @@ var RG_ERR_OTHER                  = (0 - 8);
 # no payload. So these are the format strings with the placeholders removed
 # rather than the full Rust messages, and that loss is real: Rust's own tests
 # assert on the interpolated values. Recording it plainly beats a message that
-# implies detail it does not have.
+# implies detail it does not have. Other(String) is "{0}" in Rust, all payload, so
+# it renders as the bare "error". (Up to 2.1.2 InvalidFormat read "invalid format",
+# not Rust's "invalid pixel format".)
 #must_use
 fn ranga_error_message(code) {
     if (code == RG_ERR_NONE) { return "no error"; }
-    if (code == RG_ERR_INVALID_FORMAT) { return "invalid format"; }
+    if (code == RG_ERR_INVALID_FORMAT) { return "invalid pixel format"; }
     if (code == RG_ERR_DIMENSION_MISMATCH) { return "dimension mismatch"; }
     if (code == RG_ERR_BUFFER_TOO_SMALL) { return "buffer too small"; }
     if (code == RG_ERR_UNSUPPORTED_CONVERSION) { return "unsupported conversion"; }
@@ -201,4 +205,31 @@ fn _rg_sin(x) {
 fn _rg_cos(x) {
     if (f64_lt(f64_abs(x), _RG_INF) == 0) { return _RG_NAN; }
     return f64_cos(x);
+}
+
+# ── f32 -> byte, the way Rust writes it ────────
+# Rust's colour code ends every f32 -> byte conversion with
+# `x.clamp(0.0, 255.0) as u8`, and the cast SATURATES: NaN gives 0, anything
+# below 0 gives 0, anything at or above 255 gives 255. Cyrius's f64_to saturates
+# to the i64 range (NaN gives 0, +/-inf give the i64 limits; probed at 6.6.9 and
+# 6.7.18), not to a byte, so every such site clamps through here.
+#must_use
+fn _rg_f32_sat_u8(v) {
+    var d = f32_to(v);
+    if (f64_eq(d, d) == 0) { return 0; }
+    if (f64_lt(d, 0) == 1) { return 0; }
+    if (f64_ge(d, 255.0) == 1) { return 255; }
+    return f64_to(d);
+}
+
+# `(v * 255.0 + 0.5).clamp(0.0, 255.0) as u8` in SINGLE precision, as Rust writes
+# it. Widening v to f64 first is more accurate and therefore WRONG: where the f32
+# product lands exactly on k + 0.5, Rust rounds up and an f64 product stays just
+# below. f32 0x3f010101 (the f32 nearest 128.5/255) gives 129 in Rust and gave
+# 128 through f64 up to 2.1.2: one input next to each of the 128 half-steps in
+# [0, 1] (scripts/oracle).
+#must_use
+fn _rg_f32_round_u8(v: f32) {
+    var x: f32 = v * f32_from(255.0) + f32_from(0.5);
+    return _rg_f32_sat_u8(x);
 }

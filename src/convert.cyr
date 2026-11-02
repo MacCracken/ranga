@@ -2,10 +2,10 @@
 # Ported from rust-old/src/convert.rs (1272 lines). Private prefix: _cv_
 #
 # SIMD. Rust carries SSE2 and NEON kernels for the Y-row and YUV-inverse loops,
-# each behind a complete scalar fallback. This module ports the SCALAR
-# fallbacks; the vector kernels need `asm { }` blocks (plan §3 items 3-5) and
-# land separately. `_cv_y_row` and `_cv_yuv_row_to_rgba` are the dispatch
-# points, so a vector path slots in without touching any caller.
+# each behind a complete scalar fallback. The Y row is vectorised here too:
+# `_cv_y_row` runs simd_u8's hand-encoded SSE2 luma kernel, two pixels per
+# iteration, with a scalar tail. The YUV inverse is still scalar, behind the
+# `_cv_yuv_row_to_rgba` dispatch point (roadmap 2.6.x).
 #
 # ARITHMETIC. Every conversion here is fixed-point INTEGER — coefficients
 # scaled by 256 and shifted back. There is no float anywhere except the two
@@ -100,7 +100,14 @@ fn _cv_rgba_to_yuv420p(buf, cr, cg, cb, ur, ug, ub, vr, vg, vb, err_out) {
 
     var y = 0;
     while (y < h) {
-        _cv_y_row(sp + y * w * 4, dp + y * w, w, cr, cg, cb);
+        # The row kernel allocates a 16-byte coefficient vector. If that fails,
+        # the Y plane is incomplete and must not be returned as a success (up to
+        # 2.1.2 this result was ignored).
+        if (_cv_y_row(sp + y * w * 4, dp + y * w, w, cr, cg, cb) != RG_ERR_NONE) {
+            pixel_buffer_free(out);
+            store64(err_out, RG_ERR_ALLOCATION);
+            return 0;
+        }
         y = y + 1;
     }
 
@@ -438,17 +445,9 @@ fn rgbaf32_to_rgba8(buf, err_out) {
     while (i < n) {
         var c = 0;
         while (c < 4) {
-            var v = f32_to(load32(sp + i * 16 + c * 4));
-            # `(v * 255.0 + 0.5).clamp(0.0, 255.0) as u8` — round-half-up, and
-            # a NaN saturates to 0 the way Rust's `as u8` does.
-            var b = 0;
-            if (f64_eq(v, v) == 1) {
-                var scaled = f64_add(f64_mul(v, 255.0), 0.5);
-                if (f64_lt(scaled, 0) == 1) { scaled = 0; }
-                if (f64_gt(scaled, 255.0) == 1) { scaled = 255.0; }
-                b = f64_to(scaled);
-            }
-            store8(dp + i * 4 + c, b);
+            # `(v * 255.0 + 0.5).clamp(0.0, 255.0) as u8`, in f32 as in Rust. A NaN
+            # saturates to 0, as Rust's `as u8` does.
+            store8(dp + i * 4 + c, _rg_f32_round_u8(load32(sp + i * 16 + c * 4)));
             c = c + 1;
         }
         i = i + 1;

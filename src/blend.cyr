@@ -2,11 +2,10 @@
 # Ported from rust-old/src/blend.rs (839 lines). Private prefix: _bl_
 #
 # SIMD. Rust carries SSE2, AVX2 and NEON kernels for the Normal-mode row
-# blenders, each behind a complete scalar fallback. This module ports the SCALAR
-# fallbacks; the vector kernels need `asm { }` blocks (cyrius-port-plan.md §3
-# items 3-5) and land separately. Behaviour is identical either way — that is
-# why the fallbacks exist. `blend_row_normal` is the dispatch point, so the
-# vector paths slot in there without touching any caller.
+# blenders, each behind a complete scalar fallback. `blend_row_normal` runs the
+# hand-encoded SSE2 kernel from simd_u8 (two pixels per iteration) with a scalar
+# tail, and is byte-identical to Rust. The ARGB row is scalar only. Behaviour is
+# identical either way, which is why the fallbacks exist.
 #
 # PRECISION. The 12 blend modes are f32 in Rust and f32 here, using
 # `: f32`-annotated locals and typed-parameter helpers. The Porter-Duff
@@ -262,9 +261,10 @@ fn blend_row_normal_scalar(src, dst, n, opacity) {
 
 # Dispatch point for the Normal-mode row blend.
 #
-# The length guard is a RUNTIME check, not a debug assertion: 1.0.0 upgraded it
-# precisely because a mismatched row length in release silently read out of
-# bounds. A bad call is a no-op, matching Rust's early return.
+# Rust returns early when the two slices differ in length, a runtime check that
+# 1.0.0 added because a mismatched row read out of bounds in release. Raw
+# pointers carry no length, so here the caller's `n` is trusted, and only a
+# negative n is refused (a no-op, like Rust's early return).
 fn blend_row_normal(src, dst, n, opacity) {
     if (n < 0) { return RG_ERR_NONE; }
 

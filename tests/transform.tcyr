@@ -161,6 +161,31 @@ assert_eq(affine_inverse(sing), 0, "a singular affine returns 0 (Rust's None)");
 var zero = affine_new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
 assert_eq(affine_inverse(zero), 0, "the zero matrix is singular");
 
+# The inverse's translation must use Rust's evaluation order,
+# tx = (c*ty - d*tx) * inv and ty = (b*tx - a*ty) * inv. Up to 2.1.2 the port
+# computed -(ia*tx + ic*ty), which agrees in exact arithmetic but rounds
+# differently: 99 of 206 oracle transforms got a different tx, and Nearest sampling
+# then took whole columns from the wrong source pixel. The expected bits are Rust
+# 1.0.1's, from scripts/oracle.
+var st = affine_new(0.6, 0.0, 0.0, 2.5, f64_neg(1.9), f64_neg(1.9));
+var stinv = affine_inverse(st);
+assert_eq(affine_tx(stinv), 0x4009555555555555, "scale+translate inverse tx matches Rust bit for bit");
+assert_eq(affine_ty(stinv), 0x3FE851EB851EB851, "and ty");
+var quarter = affine_rotate(0x3FF921FB54442D18);
+var quarter_inv = affine_inverse(quarter);
+assert_eq(affine_tx(quarter_inv), 0x8000000000000000, "a quarter turn's inverse tx is -0.0, as in Rust");
+assert_eq(affine_ty(quarter_inv), 0, "and its ty is +0.0, not -0.0");
+affine_free(st); affine_free(stinv); affine_free(quarter); affine_free(quarter_inv);
+
+# is_identity is "every term within 1e-9", so a NaN term is NOT identity, as in
+# Rust. Up to 2.1.2 the port tested ">= 1e-9 means not identity", which a NaN
+# fails, so a NaN matrix counted as the identity.
+var nan_a = affine_new(0x7FF8000000000000, 0.0, 0.0, 1.0, 0.0, 0.0);
+assert_eq(affine_is_identity(nan_a), 0, "a NaN scale is not the identity");
+var nan_t = affine_new(1.0, 0.0, 0.0, 1.0, 0x7FF8000000000000, 0.0);
+assert_eq(affine_is_identity(nan_t), 0, "a NaN translation is not the identity");
+affine_free(nan_a); affine_free(nan_t);
+
 affine_free(idm); affine_free(tr); affine_free(sc); affine_free(rot);
 affine_free(comp); affine_free(inv); affine_free(sing); affine_free(zero);
 

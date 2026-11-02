@@ -1,0 +1,16 @@
+# The Rust side of the differential oracle (scripts/oracle/README.md).
+# It depends on the frozen Rust 1.0.1 crate by path and never builds inside it.
+[package]
+name = "ranga-oracle"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+ranga = { path = "../../../rust-old" }
+
+[profile.release]
+debug = false
+
+# Standalone: not a member of any enclosing workspace.
+[workspace]

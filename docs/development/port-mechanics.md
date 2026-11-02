@@ -327,6 +327,32 @@ inline rather than through `_fk_fma` / `_fk_u8_to_f32`:
 
 Keep the helpers for clarity everywhere else; flatten the innermost loop.
 
+A call in a hot loop also makes the loop's speed depend on **code layout**. In 2.2.0,
+`resize`'s Nearest path called `memcpy(dst, src, 4)` once per pixel. Unrelated growth
+in `error.cyr` and `color.cyr` moved the loop and took `resize_nearest_1080p_to_720p`
+from 13 ms to 22 ms, with no change to `transform.cyr`. A single
+`store32(dst, load32(src))` made it 4.3 ms, and the layout effect disappeared.
+
+### Compute in Rust's precision, not more
+
+If Rust computes in f32, compute in f32, with Rust's literals, evaluation order and
+rounding point. Widening to f64 is more accurate and therefore **wrong**. Next to
+every rounding boundary the f64 result rounds the other way. For example,
+`(v * 255.0 + 0.5) as u8` for the f32 nearest 128.5/255 is 129 in f32 and 128 in
+f64.
+
+At 2.1.2, eleven colour and filter functions had exactly this bug, and all of them
+passed their tests. The affected inputs are a few hundred in a billion, and a
+hand-picked or sampled input never lands on one. Two other rules belong with this one:
+- Keep Rust's association: `(c*ty - d*tx) * inv` and `-(ia*tx + ic*ty)` are equal in
+  exact arithmetic and differ in floating point.
+- Get f32 literal bits from rustc. `f32_from(<decimal>)` rounds twice. That happens to
+  be harmless for every constant ranga uses, which was checked.
+
+The way to find these is `scripts/oracle`. For a byte output of one float input,
+binary-search the f32 at which each output level starts, on both sides. Comparing
+those 255 boundaries covers every f32 in [0, 1].
+
 ### Check the allocator before blaming your own code
 
 `fl_calloc` zeroes byte-at-a-time on top of an `mmap` the kernel already zeroed —

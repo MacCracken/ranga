@@ -104,6 +104,15 @@ assert_eq(ranga_is_err(ovf), 1, "u32::MAX square overflows");
 assert_eq(ranga_is_err(pixel_format_checked_buffer_size(PF_RGBA8, (0 - 1), 10)), 1, "negative width rejected");
 assert_eq(ranga_is_err(pixel_format_checked_buffer_size(99, 10, 10)), 1, "unknown format rejected");
 
+# PixelBuffer::new maps an overflowing size to BufferTooSmall { need: usize::MAX }
+# in Rust, so the port's pixel_buffer_new reports RG_ERR_BUFFER_TOO_SMALL. Up to
+# 2.1.2 it passed the checked size's RG_ERR_ALLOCATION through, which PD:140 had
+# flagged since M7 as a divergence needing an ADR. Matching Rust needs no ADR.
+var ovbv = bv_new(4);
+assert_eq(pixel_buffer_new(ovbv, 4294967295, 4294967295, PF_RGBA8, err), 0, "an overflowing PixelBuffer is rejected");
+assert_eq(load64(err), RG_ERR_BUFFER_TOO_SMALL, "as BUFFER_TOO_SMALL, as Rust's PixelBuffer::new does");
+bv_free(ovbv);
+
 assert_eq(pixel_format_bytes_per_pixel(PF_RGBA8), 4, "Rgba8 is 4 bpp");
 assert_eq(pixel_format_bytes_per_pixel(PF_RGB8), 3, "Rgb8 is 3 bpp");
 assert_eq(pixel_format_bytes_per_pixel(PF_RGBAF32), 16, "RgbaF32 is 16 bpp");
@@ -276,6 +285,44 @@ buffer_pool_free(p2);
 buffer_pool_clear(pool);
 assert_eq(buffer_pool_len(pool), 0, "clear empties the pool");
 buffer_pool_free(pool);
+
+# Rust's pool is a Vec that starts empty, so `BufferPool::new(huge)` costs nothing.
+# Up to 2.1.2 the port allocated all max_buffers slots up front:
+# buffer_pool_new(1 << 40) returned 0, and every acquire/release scanned max slots.
+var hp = buffer_pool_new(1 << 40);
+assert_eq(hp != 0, 1, "a pool with a huge max_buffers is created, as in Rust");
+if (hp != 0) {
+    buffer_pool_release(hp, bv_zeroed(64));
+    assert_eq(buffer_pool_len(hp), 1, "and holds a released buffer");
+    var hb = buffer_pool_acquire(hp, 32);
+    assert_eq(bv_len(hb), 32, "and hands it back resized");
+    assert_eq(buffer_pool_len(hp), 0, "leaving the pool empty");
+    bv_free(hb);
+    buffer_pool_free(hp);
+}
+
+# Best-fit takes the FIRST of equally small buffers, and removal is a swap_remove,
+# as in Rust: the last buffer moves into the freed position. Capacities 100, 50,
+# 50, 200: acquire(40) takes the first 50 (index 1), and 200 moves into index 1.
+var sp = buffer_pool_new(8);
+var c100 = bv_zeroed(100); var c50a = bv_zeroed(50); var c50b = bv_zeroed(50); var c200 = bv_zeroed(200);
+buffer_pool_release(sp, c100); buffer_pool_release(sp, c50a);
+buffer_pool_release(sp, c50b); buffer_pool_release(sp, c200);
+var got = buffer_pool_acquire(sp, 40);
+assert_eq(got, c50a, "best fit is the first of the equally small buffers");
+var got2 = buffer_pool_acquire(sp, 40);
+assert_eq(got2, c50b, "then the other 50");
+var got3 = buffer_pool_acquire(sp, 150);
+assert_eq(got3, c200, "a larger request finds the 200 wherever swap_remove moved it");
+assert_eq(buffer_pool_len(sp), 1, "one buffer left");
+bv_free(got); bv_free(got2); bv_free(got3);
+buffer_pool_free(sp);
+
+# A negative size has no Rust counterpart (usize). It is refused rather than
+# turned into a huge allocation.
+var np = buffer_pool_new(2);
+assert_eq(buffer_pool_acquire(np, (0 - 1)), 0, "a negative size is refused");
+buffer_pool_free(np);
 bv_free(b2);
 
 var exit_code = assert_summary();

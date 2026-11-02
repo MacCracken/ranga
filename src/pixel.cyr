@@ -154,6 +154,11 @@ var _PB_SIZE = 32;
 #must_use
 fn pixel_buffer_new(bv, width, height, format, err_out) {
     var want = pixel_format_checked_buffer_size(format, width, height);
+    # Rust: `checked_buffer_size(..).ok_or(BufferTooSmall { need: usize::MAX, .. })`.
+    # An overflowing size is BUFFER_TOO_SMALL here, as there. The checked size
+    # itself reports it as ALLOCATION, which is right for zeroed/uninit, where Rust
+    # panics instead of returning a code.
+    if (want == RG_ERR_ALLOCATION) { store64(err_out, RG_ERR_BUFFER_TOO_SMALL); return 0; }
     if (ranga_is_err(want) == 1) { store64(err_out, want); return 0; }
     if (bv_len(bv) != want) {
         store64(err_out, RG_ERR_DIMENSION_MISMATCH);
@@ -390,23 +395,22 @@ fn pixel_view_free(v) {
 # Recycles pixel-sized allocations across frames. Backed by fl_alloc, so a
 # released 1080p buffer is a real munmap rather than a leak.
 #
-#   +0  slots       pointer to max_buffers i64 bytevec handles (0 = empty slot)
-#   +8  count       occupied slots
-#   +16 max_buffers capacity
-var _BP_SIZE = 24;
+# A growable array, like Rust's `Vec<Vec<u8>>`: it starts empty, grows by
+# doubling up to max_buffers, and removes with swap_remove. Up to 2.1.2 all
+# max_buffers slots were allocated at creation, so buffer_pool_new(1 << 40)
+# failed, and every acquire/release scanned max_buffers slots rather than len.
+#
+#   +0  slots       pointer to `cap` i64 bytevec handles, the first `len` live
+#   +8  len         buffers held
+#   +16 max_buffers the most the pool keeps (release past it frees the buffer)
+#   +24 cap         slots allocated
+var _BP_SIZE = 32;
 
 #must_use
 fn buffer_pool_new(max_buffers) {
     if (max_buffers < 0) { return 0; }
-    var p = fl_alloc(_BP_SIZE);
+    var p = fl_calloc(_BP_SIZE);
     if (p == 0) { return 0; }
-    var slots = 0;
-    if (max_buffers > 0) {
-        slots = fl_calloc(max_buffers * 8);
-        if (slots == 0) { fl_free(p); return 0; }
-    }
-    store64(p, slots);
-    store64(p + 8, 0);
     store64(p + 16, max_buffers);
     return p;
 }
@@ -420,34 +424,34 @@ fn buffer_pool_is_empty(p) {
     return 0;
 }
 
-# Acquire a zeroed buffer of at least `size` bytes.
+# Acquire a zeroed buffer of `size` bytes.
 #
-# BEST-FIT, not first-fit: scan every occupied slot and take the SMALLEST one
-# that fits. 1.0.0 changed this from first-fit deliberately — first-fit hands a
-# 4K-sized buffer to a thumbnail request and then has nothing left for the next
-# 4K frame. Falls back to a fresh allocation when nothing fits.
+# BEST-FIT, not first-fit: scan every held buffer and take the SMALLEST one that
+# fits, the first of equals (Rust's `min_by_key`). 1.0.0 changed this from
+# first-fit deliberately. First-fit hands a 4K-sized buffer to a thumbnail request
+# and then has nothing left for the next 4K frame. The chosen buffer is removed
+# with swap_remove, as in Rust. Falls back to a fresh allocation when nothing
+# fits. A negative size, which a Rust usize cannot express, is refused with 0.
 #must_use
 fn buffer_pool_acquire(p, size) {
+    if (size < 0) { return 0; }
     var slots = load64(p);
-    var max = load64(p + 16);
+    var len = load64(p + 8);
     var best = (0 - 1);
     var best_cap = 0;
     var i = 0;
-    while (i < max) {
-        var h = load64(slots + i * 8);
-        if (h != 0) {
-            var cap = bv_cap(h);
-            if (cap >= size) {
-                if (best < 0) { best = i; best_cap = cap; }
-                if (cap < best_cap) { best = i; best_cap = cap; }
-            }
+    while (i < len) {
+        var cap = bv_cap(load64(slots + i * 8));
+        if (cap >= size) {
+            if (best < 0) { best = i; best_cap = cap; }
+            if (cap < best_cap) { best = i; best_cap = cap; }
         }
         i = i + 1;
     }
     if (best >= 0) {
         var buf = load64(slots + best * 8);
-        store64(slots + best * 8, 0);
-        store64(p + 8, load64(p + 8) - 1);
+        store64(slots + best * 8, load64(slots + (len - 1) * 8));
+        store64(p + 8, len - 1);
         bv_clear(buf);
         bv_resize_zero(buf, size);
         return buf;
@@ -456,31 +460,39 @@ fn buffer_pool_acquire(p, size) {
 }
 
 # Return a buffer for reuse. If the pool is full the buffer is FREED, not
-# leaked — Rust dropped it here, and dropping is what fl_free does.
+# leaked: Rust dropped it here, and dropping is what fl_free does. If growing the
+# slot array fails, the buffer is freed too, and RG_ERR_ALLOCATION is returned.
 fn buffer_pool_release(p, buf) {
     if (buf == 0) { return RG_ERR_NONE; }
-    var slots = load64(p);
+    var len = load64(p + 8);
     var max = load64(p + 16);
-    var i = 0;
-    while (i < max) {
-        if (load64(slots + i * 8) == 0) {
-            store64(slots + i * 8, buf);
-            store64(p + 8, load64(p + 8) + 1);
-            return RG_ERR_NONE;
+    if (len >= max) { bv_free(buf); return RG_ERR_NONE; }
+    var cap = load64(p + 24);
+    if (len == cap) {
+        var ncap = cap * 2;
+        if (ncap < 4) { ncap = 4; }
+        if (ncap > max) { ncap = max; }
+        var ns = fl_alloc(ncap * 8);
+        if (ns == 0) { bv_free(buf); return RG_ERR_ALLOCATION; }
+        var old = load64(p);
+        if (old != 0) {
+            memcpy(ns, old, len * 8);
+            fl_free(old);
         }
-        i = i + 1;
+        store64(p, ns);
+        store64(p + 24, ncap);
     }
-    bv_free(buf);
+    store64(load64(p) + len * 8, buf);
+    store64(p + 8, len + 1);
     return RG_ERR_NONE;
 }
 
 fn buffer_pool_clear(p) {
     var slots = load64(p);
-    var max = load64(p + 16);
+    var len = load64(p + 8);
     var i = 0;
-    while (i < max) {
-        var h = load64(slots + i * 8);
-        if (h != 0) { bv_free(h); store64(slots + i * 8, 0); }
+    while (i < len) {
+        bv_free(load64(slots + i * 8));
         i = i + 1;
     }
     store64(p + 8, 0);

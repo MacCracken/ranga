@@ -2,6 +2,112 @@
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-11-02
+
+Milestone 2.2.x, "bit-exact again". `scripts/oracle` runs the frozen Rust 1.0.1 crate
+and the port on identical inputs: 2.1 million values across 41 groups, every u8
+output, the transition points of every monotone f32 → byte conversion, and the f32
+and f64 fields. At 2.1.2, 27 groups differed. At 2.2.0 none does, apart from three
+accepted within 2 ULPs by ADR 002. Every CPU-side SUSPECT item from the 2026-11-02
+parity review is fixed or ADR'd. The six that remain are GPU items, scheduled for
+2.5.x. Each behavioural fix has a test that fails on 2.1.2: 32 new assertions.
+
+### Added
+
+- **`scripts/oracle/`: the differential oracle.** It contains:
+  - a Rust driver depending on `rust-old/` by path, which never builds inside it or
+    modifies it;
+  - a Cyrius probe;
+  - `compare.py`;
+  - `run.sh`, which exits non-zero on any unaccepted difference.
+
+  Byte outputs of one f32 input are compared by **transition search**. Both sides
+  binary-search the f32 at which each output level begins, which pins the output on
+  every f32 in [0, 1] at about 7,700 evaluations per function. See
+  `scripts/oracle/README.md`.
+- **ADR 002: f32 transcendentals follow correct rounding, not the oracle host's
+  libm.** Rust's f32 `sin`/`cos`/`powf`/`ln` are glibc's here, and glibc's are not
+  correctly rounded. `oklch_to_oklab` (1,419 and 1,830 of 140,608 values) and
+  `color_temperature` (6 of 16,716) differ from Rust by ≤ 2 ULP. An independent
+  correctly rounded model reproduces ranga's value at every differing point checked
+  and Rust's at none. The oracle accepts these three groups only within that bound.
+
+### Fixed: computations now match Rust 1.0.1 bit for bit
+
+- **Colour, single precision as in Rust:**
+  - `linear_to_srgb` and `lin_rgba_to_srgba` (alpha and RGB);
+  - `rgbaf32_to_rgba8`;
+  - `srgba_to_hsl` / `hsl_to_srgba`, including the f32 `1e-6` threshold;
+  - `cmyk_to_srgba` / `srgba_to_cmyk`;
+  - `oklab_to_oklch`, with f32 sqrt, atan2 and to_degrees, and an exact f32
+    `rem_euclid`.
+
+  All of these ran in f64 or widened before the final `* 255 + 0.5`. The f64
+  results were more accurate and therefore wrong, rounding the other way next to
+  each half-step: f32 `0x3f010101` gave 128 where Rust gives 129. `linear_to_srgb`
+  had 171 of 255 output boundaries off by up to 4 ULPs, and `srgba_to_cmyk.c` was
+  off by up to 248 ULPs.
+- **`levels`:** the LUT is built in f32. 7 of 336 settings were one count off.
+  NaN black, white and gamma are checked too.
+- **`bilateral`:**
+  - the coefficients and `exp` are f32;
+  - σ ≤ 0 returns `RG_ERR_OTHER`, as Rust's `Other` (it was `INVALID_PARAMETER`);
+  - a NaN σ proceeds and copies each pixel unchanged, as in Rust. The port used to
+    reject it.
+- **`hue_shift`:** inherits the HSL fix, and does its `(h + degrees).rem_euclid(360)`
+  in f32. At ±1e9° the f32 add swallows the hue, as in Rust.
+- **`affine_inverse`:** computes the translation in Rust's evaluation order. 99 of
+  206 inverses had a different `tx`, and Nearest sampling then took whole columns
+  from the wrong source pixel.
+- **`affine_is_identity`:** a NaN term is not the identity.
+- **ICC grid size 1** (a constant LUT) is accepted, as in Rust. Grid 0 is still
+  rejected.
+- **ICC errors:** the public parsers report every malformed profile as
+  `RG_ERR_INVALID_FORMAT`, as Rust does. The internal `_icc_*_parse` functions keep
+  the PARSE / INVALID_FORMAT split for tests.
+- **`pixel_buffer_new`:** an overflowing size is `RG_ERR_BUFFER_TOO_SMALL`, as Rust's
+  `PixelBuffer::new`, rather than `RG_ERR_ALLOCATION`.
+- **`ranga_error_message(RG_ERR_INVALID_FORMAT)`** reads "invalid pixel format",
+  which is Rust's text without its payload.
+
+### Fixed: robustness
+
+- **`BufferPool` is a growable array, like Rust's `Vec`.**
+  - `buffer_pool_new(1 << 40)` no longer fails.
+  - Acquire and release scan `len` buffers, not `max_buffers` slots.
+  - Removal is a `swap_remove`, as in Rust.
+  - A negative `acquire` size is refused.
+- **The RGBA → YUV converters** no longer return an incomplete Y plane as a success
+  when the row kernel's scratch allocation fails.
+- **`lut3d_new`** refuses sizes whose byte count would overflow i64 (above 916015).
+- **`flood_fill`'s stack grows** instead of assuming `w*h` entries is a bound, which
+  it is not: a run can be pushed from both neighbouring rows.
+
+### Performance
+
+- **`resize_nearest_1080p_to_720p` went from 13.0 ms to 4.3 ms.** The inner loop
+  called `memcpy(.., 4)` per pixel, and that call made the loop's speed depend on
+  code layout: unrelated growth in `error.cyr` and `color.cyr` took it to 22 ms
+  during this release. It is now a single 32-bit load/store. Against Rust 1.0.1's
+  1.59 ms that is about 2.7× (it was 7.8×). The other benchmarks are within ±10% of
+  2.1.2 (median ratio 1.01), and every run is in `bench-history.csv`.
+
+### Changed
+
+- **ADR 001** names all four YUV inverses it covers:
+  - BT.601, BT.709, BT.2020 and NV12;
+  - its "all five failed to reproduce" note is corrected: all five did reproduce and
+    are fixed here.
+- **Stale source comments corrected:**
+  - `error.cyr`'s `INVALID_PARAMETER` scope and its "logged" claim;
+  - `f64_to`, which saturates NaN to 0 (probed at 6.6.9 and 6.7.18);
+  - the affine NaN-coordinate note (NaN matrices sample index 0, exactly as Rust's
+    `as usize`; checked by the oracle on a 1×1 source);
+  - the SIMD headers in `convert.cyr` and `blend.cyr`;
+  - `blend_row_normal`'s length guard;
+  - a `histogram.cyr` cross-reference.
+- **Bundles** regenerated. The sidecars are unchanged.
+
 ## [2.1.2] - 2026-11-02
 
 Closes out the toolchain bumps from 2.0.3 to 2.1.1 (cyrius 6.6.9 → 6.7.18) with a

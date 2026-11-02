@@ -19,4 +19,7 @@ Decisions about ranga — what we chose, the context, and the consequences we ac
 
 ## Index
 
-_No ADRs yet. Add the first as `0001-kebab-case-title.md`._
+- [001 — The YUV→RGB inverse does not reproduce Rust's i16 wrap](001-yuv-inverse-does-not-reproduce-rusts-i16-wrap.md)
+- [002 — f32 transcendentals follow correct rounding, not the oracle host's libm](002-f32-transcendentals-follow-correct-rounding-not-glibc.md)
+
+The first two ADRs use three-digit numbers. New ones continue that series (`003-…`).

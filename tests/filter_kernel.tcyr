@@ -217,6 +217,10 @@ var lut = lut3d_new(2);
 assert_eq(lut != 0, 1, "lut3d_new(2) succeeds");
 assert_eq(lut3d_size(lut), 2, "lut size");
 assert_eq(lut3d_new(1), 0, "a LUT smaller than 2 is rejected");
+# Past 916015, size^3 * 12 bytes no longer fits an i64. The size is refused before
+# the product is formed, rather than relying on a wrapped product happening to be
+# refused by the allocator.
+assert_eq(lut3d_new(916016), 0, "a LUT size whose byte count overflows i64 is rejected");
 var ri = 0;
 while (ri < 2) {
     var gi = 0;
@@ -435,24 +439,35 @@ fill(bl1, 120);
 # BOTH sigmas are guarded independently, and the guard is `<= 0` not `== 0` —
 # a negative sigma would invert the Gaussian into a growth function. Each needs
 # its own case, because either guard alone would mask the other.
+#
+# The code is OTHER, as Rust's `RangaError::Other`. Up to 2.1.2 the port reported
+# INVALID_PARAMETER here, which Rust has no variant for.
 assert_eq(bilateral(bl1, 1, f32c(0.0), f32c(10.0), err), 0, "sigma_space 0 is rejected");
-assert_eq(load64(err), RG_ERR_INVALID_PARAMETER, "sigma_space 0 is INVALID_PARAMETER");
+assert_eq(load64(err), RG_ERR_OTHER, "sigma_space 0 is OTHER, as in Rust");
 assert_eq(bilateral(bl1, 1, f32c(10.0), f32c(0.0), err), 0, "sigma_color 0 is rejected");
+assert_eq(load64(err), RG_ERR_OTHER, "sigma_color 0 is OTHER, as in Rust");
 assert_eq(bilateral(bl1, 1, f32c(f64_neg(1.0)), f32c(10.0), err), 0, "NEGATIVE sigma_space is rejected too");
 assert_eq(bilateral(bl1, 1, f32c(10.0), f32c(f64_neg(1.0)), err), 0, "NEGATIVE sigma_color is rejected too");
-assert_eq(bilateral(bl1, 1, f32_from(_RG_NAN), f32c(10.0), err), 0, "NaN sigma_space is rejected");
 
-# A denormal-scale sigma is legal (it passes the > 0 guard) and must not
-# produce NaN. In f32 the smallest positive value is ~1.4e-45, whose square is
-# still comfortably representable in f64, so the exp argument stays finite and
-# underflows to a 0 weight rather than reaching -inf.
-#
-# That means _rg_exp is DEFENSIVE at both exp sites in this module, not
-# load-bearing: replacing it with the bare f64_exp passes the whole suite,
-# because neither the gaussian kernel (|arg| <= 4.5 for any radius) nor the
-# bilateral colour term (arg finite for any f32 sigma) can reach -inf. It is
-# kept because the cost is nil and the invariant is not obvious. Saying so is
-# better than inventing an assertion that cannot fail.
+# A NaN sigma is NOT rejected. Rust's guard is `sigma <= 0.0`, which is false for
+# NaN, so Rust proceeds: every weight is NaN, `sum_w > 0.0` fails, and each pixel
+# is copied unchanged. Up to 2.1.2 the port rejected it. The image here is
+# non-uniform, so a copy is distinguishable from a filtered result.
+var bln = mkbuf(3, 3);
+put(bln, 0, 10, 200, 30, 255); put(bln, 4, 250, 5, 90, 128); put(bln, 8, 0, 0, 255, 7);
+var nanout = bilateral(bln, 1, f32_from(_RG_NAN), f32c(10.0), err);
+assert_eq(load64(err), RG_ERR_NONE, "NaN sigma_space proceeds, as in Rust");
+assert_eq(chan(nanout, 4, 0), 250, "and copies the centre pixel's red unchanged");
+assert_eq(chan(nanout, 4, 1), 5, "its green");
+assert_eq(chan(nanout, 0, 1), 200, "and a corner pixel's green");
+assert_eq(chan(nanout, 8, 3), 7, "alpha is always copied");
+pixel_buffer_free(nanout);
+pixel_buffer_free(bln);
+
+# A tiny sigma_color is legal: it passes the > 0 guard. Since 2.2.0 the
+# coefficients are f32, as in Rust. 1e-8 squared is 1e-16, still a normal f32, so
+# the coefficient is finite. On a uniform image every colour difference is 0, so
+# each colour weight is exp(0) = 1 and the image comes back unchanged.
 var tiny = bilateral(bl1, 1, f32c(3.0), f32_from(0.00000001), err);
 assert_eq(load64(err), RG_ERR_NONE, "a denormal-scale sigma_color is accepted");
 assert_eq(chan(tiny, 5, 0), 120, "a tiny sigma_color gives a self-only weight, not NaN");

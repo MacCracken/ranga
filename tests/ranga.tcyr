@@ -50,7 +50,8 @@ assert_eq(ranga_is_ok(RG_ERR_BUFFER_TOO_SMALL), 0, "an error is not ok");
 # whole Display/Error surface missing while the GPU code space already had the
 # idiom (gpu_error_message).
 assert_eq(streq(ranga_error_message(RG_ERR_NONE), "no error"), 1, "success has a message");
-assert_eq(streq(ranga_error_message(RG_ERR_INVALID_FORMAT), "invalid format"), 1, "InvalidFormat renders");
+# Rust's text is "invalid pixel format: {0}"; the payload has nowhere to go.
+assert_eq(streq(ranga_error_message(RG_ERR_INVALID_FORMAT), "invalid pixel format"), 1, "InvalidFormat renders");
 assert_eq(streq(ranga_error_message(RG_ERR_DIMENSION_MISMATCH), "dimension mismatch"), 1, "DimensionMismatch renders");
 assert_eq(streq(ranga_error_message(RG_ERR_BUFFER_TOO_SMALL), "buffer too small"), 1, "BufferTooSmall renders");
 assert_eq(streq(ranga_error_message(RG_ERR_UNSUPPORTED_CONVERSION), "unsupported conversion"), 1,

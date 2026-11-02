@@ -103,9 +103,10 @@ fn brightness(buf, offset) {
     # `(offset * 255.0) as i16` — truncation toward zero, not rounding.
     #
     # ⚠ Rust's float-to-int `as` cast SATURATES, so a NaN offset becomes 0 and
-    # brightness is a complete no-op. Cyrius's f64_to returns i64::MIN instead,
-    # which the port then applied as a shift and blackened the image. Measured
-    # against the real crate: Rust leaves the buffer untouched.
+    # brightness is a complete no-op. When this was written, Cyrius's f64_to gave
+    # i64::MIN for NaN and blackened the image. At 6.6.9 and later it gives 0, but
+    # the explicit NaN return keeps the no-op independent of that. Measured against
+    # the real crate: Rust leaves the buffer untouched.
     var od = f32_to(offset);
     if (f64_eq(od, od) == 0) { return RG_ERR_NONE; }
     var shift = f64_to(f64_mul(od, 255.0));
@@ -246,28 +247,30 @@ fn levels(buf, black, white, gamma) {
     var rngd = f32_to(rng);
     if (f64_eq(rngd, rngd) == 0) { rng = floor6; }
     if (f64_lt(f32_to(rng), 0.000001) == 1) { rng = floor6; }
-    var invg: f64 = f64_div(F64_ONE, gd);
+    # The LUT is built in SINGLE precision, as Rust's: `i as f32 / 255.0`, an f32
+    # `1.0 / gamma`, `powf`, then the f32 `* 255.0 + 0.5` and saturating cast. Up to
+    # 2.1.2 the exponent, the power and the tail ran in f64, and 7 of 336 oracle
+    # settings came out one count off. For (black 0, white 0.8, gamma 1), input 106
+    # gave 132 where Rust gives 133, because the f32 product is exactly 132.5
+    # (scripts/oracle, group levels).
+    var one: f32 = f32_from(1.0);
+    var g32: f32 = gamma;
+    var invg: f32 = one / g32;
+    var k255: f32 = f32_from(255.0);
 
     var lut = fl_alloc(256);
     if (lut == 0) { return RG_ERR_ALLOCATION; }
     var i = 0;
     while (i < 256) {
-        var v: f32 = f32_from(f64_div(f64_from(i), 255.0));
+        var v: f32 = f32_from(f64_from(i)) / k255;
         var mapped: f32 = (v - bl) / rng;
-        var md = f32_to(mapped);
-        if (f64_lt(md, 0) == 1) { md = 0; }
-        if (f64_gt(md, F64_ONE) == 1) { md = F64_ONE; }
-        # powf is done in f64 through the Rust-semantics shim: a fully black
-        # channel is mapped == 0.0, and the bare ganita_f64_pow returns NaN for
-        # a zero base where Rust returns 0.0.
-        var corrected: f64 = _rg_pow(md, invg);
-        # `* 255.0 + 0.5` then clamp then truncate — round-half-up, unlike the
-        # bare truncation used by contrast/saturation. Rust differs between
-        # these two sites and the port keeps the difference.
-        var scaled: f64 = f64_add(f64_mul(corrected, 255.0), 0.5);
-        if (f64_lt(scaled, 0) == 1) { scaled = 0; }
-        if (f64_gt(scaled, 255.0) == 1) { scaled = 255.0; }
-        store8(lut + i, f64_to(scaled));
+        # `.clamp(0.0, 1.0)` keeps a NaN, as Rust's does.
+        if (mapped < f32_from(0.0)) { mapped = f32_from(0.0); }
+        if (mapped > one) { mapped = one; }
+        var corrected: f32 = ganita_f32_pow(mapped, invg);
+        # Round-half-up, unlike the bare truncation used by contrast/saturation.
+        # Rust differs between these two sites and the port keeps the difference.
+        store8(lut + i, _rg_f32_round_u8(corrected));
         i = i + 1;
     }
 
@@ -413,7 +416,7 @@ fn invert(buf) {
 fn hue_shift(buf, degrees) {
     var rc = _fp_validate_rgba8(buf);
     if (rc != RG_ERR_NONE) { return rc; }
-    var deg: f64 = f32_to(degrees);
+    var deg: f32 = degrees;
     var p = pixel_buffer_data(buf);
     var n = pixel_buffer_pixel_count(buf);
     var tmp = srgba_new(0, 0, 0, 255);
@@ -424,8 +427,13 @@ fn hue_shift(buf, degrees) {
         srgba_set(tmp, load8(q), load8(q + 1), load8(q + 2), load8(q + 3));
         var hsl = srgba_to_hsl(tmp);
         if (hsl == 0) { srgba_free(tmp); return RG_ERR_ALLOCATION; }
-        var h: f64 = f32_to(hsl_h(hsl));
-        store32(hsl, f32_from(_rg_rem_euclid(f64_add(h, deg), 360.0)));
+        # Rust: `hsl.h = (hsl.h + degrees).rem_euclid(360.0)`, all in f32. The f32 add
+        # matters: at 1e9 degrees it swallows the hue entirely, which an f64 add did
+        # not, and the remainder is f32 `%`, which is exact (scripts/oracle,
+        # group hue_shift).
+        var h: f32 = hsl_h(hsl);
+        var sum: f32 = h + deg;
+        store32(hsl, _c_f32_rem_euclid(sum, f32_from(360.0)));
         var back = hsl_to_srgba(hsl);
         hsl_free(hsl);
         if (back == 0) { srgba_free(tmp); return RG_ERR_ALLOCATION; }

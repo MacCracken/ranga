@@ -224,37 +224,29 @@ fn _c_srgb_to_linear(cf: f32) {
 fn linear_to_srgb(c) {
     var v = f32_to(c);
     # ⚠ NON-FINITE INPUT IS HANDLED UP FRONT, because the transfer function
-    # cannot carry it. Rust's is total: `powf(+inf, 1/2.4)` is `+inf`, so the
-    # scale-and-clamp saturates to 255, and `-inf * 12.92` saturates to 0.
-    # Cyrius's `f64_exp(+inf)` returns NaN rather than +inf — the same builtin
-    # quirk as `exp(-inf)`, which ganita 1.1.4 works around inside pow's
-    # zero-base branch but not for infinity — so the power path turns +inf into
-    # NaN and the whole thing collapsed to 0. Measured against the real crate:
-    # Rust gives 255 here.
+    # cannot carry it. Rust's is total: NaN fails `c <= 0.0031308`, `powf(NaN)` is
+    # NaN, and the saturating cast gives 0. `powf(+inf, 1/2.4)` is +inf, so the
+    # result saturates to 255. ganita's pow goes through `exp`, which is not
+    # trusted with an infinite argument. Above 1e6 the Rust result is 255 whatever
+    # the power gives (s > 300).
     if (f64_eq(v, v) == 0) { return 0; }
     if (f64_gt(v, 1000000.0) == 1) { return 255; }
-    var s = 0;
-    if (f64_le(v, 0.0031308) == 1) {
-        s = f64_mul(v, 12.92);
+    return _c_linear_to_srgb(c);
+}
+
+# Single precision throughout, as Rust's `linear_to_srgb(c: f32)`: the f32
+# literals, `powf(1.0 / 2.4)` with the exponent itself rounded to f32, and an f32
+# multiply-add before the saturating cast. Up to 2.1.2 this ran in f64 with an
+# f64 exponent, and 171 of the 255 output boundaries in [0, 1] sat 1 to 4 ULPs
+# away from Rust's (scripts/oracle, group linear_to_srgb).
+fn _c_linear_to_srgb(cf: f32) {
+    var s: f32 = cf * f32_from(12.92);
+    if (cf > f32_from(0.0031308)) {
+        var inv: f32 = f32_from(1.0) / f32_from(2.4);
+        var p: f32 = ganita_f32_pow(cf, inv);
+        s = f32_from(1.055) * p - f32_from(0.055);
     }
-    if (f64_le(v, 0.0031308) == 0) {
-        var third = f64_div(F64_ONE, 2.4);
-        s = f64_sub(f64_mul(1.055, _rg_pow(v, third)), 0.055);
-    }
-    var scaled = f64_add(f64_mul(s, 255.0), 0.5);
-    # ⚠ NON-FINITE MUST BE HANDLED FIRST. Rust ends with `.clamp(0.0, 255.0)
-    # as u8`, and a float-to-int `as` cast in Rust SATURATES: NaN gives 0, +inf
-    # gives 255, -inf gives 0. Cyrius's f64_to does not — it returns i64::MIN
-    # for anything it cannot represent. Both comparisons below are false for
-    # NaN, so without this guard the function fell through and returned
-    # -9223372036854775808 from something whose contract is a byte. Measured
-    # against the real crate: NaN and +inf both returned i64::MIN where Rust
-    # gives 0 and 255.
-    if (f64_eq(scaled, scaled) == 0) { return 0; }
-    if (f64_lt(scaled, 0) == 1) { return 0; }
-    if (f64_gt(scaled, 255.0) == 1) { return 255; }
-    if (f64_ge(scaled, 255.0) == 1) { return 255; }
-    return f64_to(scaled);
+    return _rg_f32_round_u8(s);
 }
 
 # ── Srgba <-> LinRgba ────────
@@ -271,13 +263,8 @@ fn lin_rgba_to_srgba(c) {
     # Alpha is linear, not gamma-encoded — it goes through the plain scale,
     # not linear_to_srgb. Running alpha through the transfer function is a
     # classic compositing bug; the Rust original is explicit about it.
-    var av = f64_add(f64_mul(f32_to(load32(c + 12)), 255.0), 0.5);
-    var a = 0;
-    if (f64_gt(av, 255.0) == 1) { a = 255; }
-    if (f64_gt(av, 255.0) == 0) {
-        if (f64_lt(av, 0) == 1) { a = 0; }
-        if (f64_lt(av, 0) == 0) { a = f64_to(av); }
-    }
+    # `(c.a * 255.0 + 0.5).clamp(0.0, 255.0) as u8`, in f32 as in Rust.
+    var a = _rg_f32_round_u8(load32(c + 12));
     return srgba_new(linear_to_srgb(load32(c)),
       linear_to_srgb(load32(c + 4)),
       linear_to_srgb(load32(c + 8)),
@@ -392,102 +379,92 @@ fn hsl_s(c) { return load32(c + 4); }
 fn hsl_l(c) { return load32(c + 8); }
 fn hsl_free(c) { if (c != 0) { fl_free(c); } return RG_ERR_NONE; }
 
-var _RG_EPS6 = 0.000001;   # 1e-6, the achromatic threshold Rust uses
+# HSL runs in SINGLE precision throughout, as Rust's `From<Srgba> for Hsl` and
+# `From<Hsl> for Srgba` do: f32 channels, f32 min/max, the `< 1e-6` tests, and
+# `hue_to_rgb` in f32, with Rust's association kept term for term. Up to 2.1.2
+# this ran in f64. h, s and l then differed from Rust by up to 22 ULPs on a 52^3
+# grid, and bytes differed too: 1 in 20,000 random Hsl, and the grey path at
+# every one of its 128 half-steps (scripts/oracle, groups srgba_to_hsl.* and
+# hsl_to_srgba*). `hue_shift` inherited all of it.
+var _C_EPS6 = 0x358637BD;   # 1e-6 as Rust's f32 literal
+
+fn _c_f32_abs(x) { return x & 0x7FFFFFFF; }
+fn _c_f32_max(a: f32, b: f32) { if (a > b) { return a; } return b; }
+fn _c_f32_min(a: f32, b: f32) { if (a < b) { return a; } return b; }
 
 #must_use
 fn srgba_to_hsl(c) {
-    var r = f64_div(f64_from(load8(c)), 255.0);
-    var g = f64_div(f64_from(load8(c + 1)), 255.0);
-    var b = f64_div(f64_from(load8(c + 2)), 255.0);
+    var k255: f32 = f32_from(255.0);
+    var r: f32 = f32_from(f64_from(load8(c))) / k255;
+    var g: f32 = f32_from(f64_from(load8(c + 1))) / k255;
+    var b: f32 = f32_from(f64_from(load8(c + 2))) / k255;
 
-    var max = f64_max(f64_max(r, g), b);
-    var min = f64_min(f64_min(r, g), b);
-    var d = f64_sub(max, min);
-    var l = f64_div(f64_add(max, min), 2.0);
+    var mx0: f32 = _c_f32_max(r, g);
+    var max: f32 = _c_f32_max(mx0, b);
+    var mn0: f32 = _c_f32_min(r, g);
+    var min: f32 = _c_f32_min(mn0, b);
+    var d: f32 = max - min;
+    var l: f32 = (max + min) / f32_from(2.0);
+    var eps: f32 = _C_EPS6;
 
     # Achromatic: hue is undefined, so Rust pins it to 0 rather than dividing
     # by a zero delta.
-    if (f64_lt(d, _RG_EPS6) == 1) {
-        return hsl_new(f32_from(0), f32_from(0), f32_from(l));
-    }
+    if (d < eps) { return hsl_new(0, 0, l); }
 
-    var s = 0;
-    if (f64_gt(l, 0.5) == 1) {
-        s = f64_div(d, f64_sub(f64_sub(2.0, max), min));
-    }
-    if (f64_gt(l, 0.5) == 0) {
-        s = f64_div(d, f64_add(max, min));
-    }
+    var s: f32 = d / (max + min);
+    if (l > f32_from(0.5)) { s = d / (f32_from(2.0) - max - min); }
 
-    var h = 0;
-    if (f64_lt(f64_abs(f64_sub(max, r)), _RG_EPS6) == 1) {
-        h = f64_div(f64_sub(g, b), d);
+    var dr: f32 = max - r;
+    var dg: f32 = max - g;
+    var adr: f32 = _c_f32_abs(dr);
+    var adg: f32 = _c_f32_abs(dg);
+    var h: f32 = (r - g) / d + f32_from(4.0);
+    if (adg < eps) { h = (b - r) / d + f32_from(2.0); }
+    if (adr < eps) {
         # The +6 wrap keeps hue positive when g < b; without it the red sector
         # comes out negative and *60 lands outside [0, 360).
-        if (f64_lt(g, b) == 1) { h = f64_add(h, 6.0); }
+        var wrap: f32 = f32_from(0.0);
+        if (g < b) { wrap = f32_from(6.0); }
+        h = (g - b) / d + wrap;
     }
-    if (f64_lt(f64_abs(f64_sub(max, r)), _RG_EPS6) == 0) {
-        if (f64_lt(f64_abs(f64_sub(max, g)), _RG_EPS6) == 1) {
-            h = f64_add(f64_div(f64_sub(b, r), d), 2.0);
-        }
-        if (f64_lt(f64_abs(f64_sub(max, g)), _RG_EPS6) == 0) {
-            h = f64_add(f64_div(f64_sub(r, g), d), 4.0);
-        }
-    }
-    return hsl_new(f32_from(f64_mul(h, 60.0)), f32_from(s), f32_from(l));
+    var h60: f32 = h * f32_from(60.0);
+    return hsl_new(h60, s, l);
 }
 
 #must_use
-fn _hue_to_rgb(p, q, t) {
-    var u = t;
-    if (f64_lt(u, 0) == 1) { u = f64_add(u, F64_ONE); }
-    if (f64_gt(u, F64_ONE) == 1) { u = f64_sub(u, F64_ONE); }
-    var sixth = f64_div(F64_ONE, f64_from(6));
-    var twothirds = f64_div(f64_from(2), f64_from(3));
-    if (f64_lt(u, sixth) == 1) {
-        return f64_add(p, f64_mul(f64_mul(f64_sub(q, p), 6.0), u));
-    }
-    if (f64_lt(u, 0.5) == 1) { return q; }
-    if (f64_lt(u, twothirds) == 1) {
-        return f64_add(p, f64_mul(f64_mul(f64_sub(q, p), f64_sub(twothirds, u)), 6.0));
-    }
+fn _c_hue_to_rgb(p: f32, q: f32, t: f32) {
+    var u: f32 = t;
+    if (u < f32_from(0.0)) { u = u + f32_from(1.0); }
+    if (u > f32_from(1.0)) { u = u - f32_from(1.0); }
+    var sixth: f32 = f32_from(1.0) / f32_from(6.0);
+    var twothirds: f32 = f32_from(2.0) / f32_from(3.0);
+    if (u < sixth) { return p + (q - p) * f32_from(6.0) * u; }
+    if (u < f32_from(0.5)) { return q; }
+    if (u < twothirds) { return p + (q - p) * (twothirds - u) * f32_from(6.0); }
     return p;
-}
-
-# Round-half-up then clamp to a byte — the same shape as linear_to_srgb.
-#must_use
-fn _f64_to_u8_round(v) {
-    var scaled = f64_add(f64_mul(v, 255.0), 0.5);
-    if (f64_lt(scaled, 0) == 1) { return 0; }
-    if (f64_gt(scaled, 255.0) == 1) { return 255; }
-    return f64_to(scaled);
 }
 
 #must_use
 fn hsl_to_srgba(c) {
-    var h = f32_to(load32(c));
-    var s = f32_to(load32(c + 4));
-    var l = f32_to(load32(c + 8));
+    var h: f32 = load32(c);
+    var s: f32 = load32(c + 4);
+    var l: f32 = load32(c + 8);
+    var eps: f32 = _C_EPS6;
 
     # Zero saturation is grey; the hue term would otherwise divide meaninglessly.
-    if (f64_lt(s, _RG_EPS6) == 1) {
-        var v = _f64_to_u8_round(l);
+    if (s < eps) {
+        var v = _rg_f32_round_u8(l);
         return srgba_new(v, v, v, 255);
     }
-    var q = 0;
-    if (f64_lt(l, 0.5) == 1) {
-        q = f64_mul(l, f64_add(F64_ONE, s));
-    }
-    if (f64_lt(l, 0.5) == 0) {
-        q = f64_sub(f64_add(l, s), f64_mul(l, s));
-    }
-    var p = f64_sub(f64_mul(2.0, l), q);
-    var hn = f64_div(h, 360.0);
-    var third = f64_div(F64_ONE, f64_from(3));
-    return srgba_new(_f64_to_u8_round(_hue_to_rgb(p, q, f64_add(hn, third))),
-      _f64_to_u8_round(_hue_to_rgb(p, q, hn)),
-      _f64_to_u8_round(_hue_to_rgb(p, q, f64_sub(hn, third))),
-      255);
+    var q: f32 = l + s - l * s;
+    if (l < f32_from(0.5)) { q = l * (f32_from(1.0) + s); }
+    var p: f32 = f32_from(2.0) * l - q;
+    var hn: f32 = h / f32_from(360.0);
+    var third: f32 = f32_from(1.0) / f32_from(3.0);
+    var r: f32 = _c_hue_to_rgb(p, q, hn + third);
+    var g: f32 = _c_hue_to_rgb(p, q, hn);
+    var b: f32 = _c_hue_to_rgb(p, q, hn - third);
+    return srgba_new(_rg_f32_round_u8(r), _rg_f32_round_u8(g), _rg_f32_round_u8(b), 255);
 }
 
 # ── Cmyk (4 x f32) ────────
@@ -517,30 +494,42 @@ fn cmyk_free(v) { if (v != 0) { fl_free(v); } return RG_ERR_NONE; }
 # Naive CMYK, no ICC profile — for print-accurate conversion use icc.cyr.
 #must_use
 fn cmyk_to_srgba(v) {
-    var k = f32_to(load32(v + 12));
-    var ik = f64_sub(F64_ONE, k);
-    return srgba_new(_f64_to_u8_round(f64_mul(f64_sub(F64_ONE, f32_to(load32(v))), ik)),
-      _f64_to_u8_round(f64_mul(f64_sub(F64_ONE, f32_to(load32(v + 4))), ik)),
-      _f64_to_u8_round(f64_mul(f64_sub(F64_ONE, f32_to(load32(v + 8))), ik)),
-      255);
+    var k: f32 = load32(v + 12);
+    var ik: f32 = f32_from(1.0) - k;
+    return srgba_new(_c_cmyk_chan(load32(v), ik), _c_cmyk_chan(load32(v + 4), ik),
+      _c_cmyk_chan(load32(v + 8), ik), 255);
 }
 
+# `(255.0 * (1.0 - x) * (1.0 - k) + 0.5).clamp(0.0, 255.0) as u8`, in f32 and in
+# Rust's order (255 * (1 - x) first). Up to 2.1.2 this ran in f64, and 127 of the
+# 255 output boundaries along k differed from Rust's (scripts/oracle).
+fn _c_cmyk_chan(x: f32, ik: f32) {
+    var v: f32 = f32_from(255.0) * (f32_from(1.0) - x) * ik + f32_from(0.5);
+    return _rg_f32_sat_u8(v);
+}
+
+# Single precision, as Rust's `srgb_to_cmyk`. Up to 2.1.2 this ran in f64, and c
+# was off by up to 248 ULPs (scripts/oracle, group srgba_to_cmyk.*).
 #must_use
 fn srgba_to_cmyk(c) {
-    var r = f64_div(f64_from(load8(c)), 255.0);
-    var g = f64_div(f64_from(load8(c + 1)), 255.0);
-    var b = f64_div(f64_from(load8(c + 2)), 255.0);
-    var k = f64_sub(F64_ONE, f64_max(f64_max(r, g), b));
+    var k255: f32 = f32_from(255.0);
+    var one: f32 = f32_from(1.0);
+    var r: f32 = f32_from(f64_from(load8(c))) / k255;
+    var g: f32 = f32_from(f64_from(load8(c + 1))) / k255;
+    var b: f32 = f32_from(f64_from(load8(c + 2))) / k255;
+    var mx0: f32 = _c_f32_max(r, g);
+    var mx: f32 = _c_f32_max(mx0, b);
+    var k: f32 = one - mx;
     # Pure black: every chromatic channel is undefined (inv_k would divide by
-    # zero), so Rust returns 0,0,0,1 outright.
-    if (f64_ge(k, f64_sub(F64_ONE, _RG_EPS6)) == 1) {
-        return cmyk_new(f32_from(0), f32_from(0), f32_from(0), f32_from(F64_ONE));
-    }
-    var inv_k = f64_div(F64_ONE, f64_sub(F64_ONE, k));
-    return cmyk_new(f32_from(f64_mul(f64_sub(f64_sub(F64_ONE, r), k), inv_k)),
-      f32_from(f64_mul(f64_sub(f64_sub(F64_ONE, g), k), inv_k)),
-      f32_from(f64_mul(f64_sub(f64_sub(F64_ONE, b), k), inv_k)),
-      f32_from(k));
+    # zero), so Rust returns 0,0,0,1 outright. `1.0 - 1e-6` is evaluated in f32.
+    var eps: f32 = _C_EPS6;
+    var lim: f32 = one - eps;
+    if (k >= lim) { return cmyk_new(0, 0, 0, one); }
+    var inv_k: f32 = one / (one - k);
+    var cc: f32 = (one - r - k) * inv_k;
+    var cm: f32 = (one - g - k) * inv_k;
+    var cy: f32 = (one - b - k) * inv_k;
+    return cmyk_new(cc, cm, cy, k);
 }
 
 # ── Display P3 ────────
@@ -739,28 +728,85 @@ fn _rg_to_degrees(rad) { return f64_div(f64_mul(rad, 180.0), _RG_PI); }
 #must_use
 fn _rg_to_radians(deg) { return f64_div(f64_mul(deg, _RG_PI), 180.0); }
 
-# Polar form. Chroma is |(a, b)|; hue is its angle in degrees, wrapped.
-#must_use
-fn oklab_to_oklch(c) {
-    var a = f32_to(load32(c + 4));
-    var b = f32_to(load32(c + 8));
-    var chroma = f64_sqrt(f64_add(f64_mul(a, a), f64_mul(b, b)));
-    var hue = 0;
-    # Below the threshold the colour is achromatic and atan2(0, 0) is
-    # meaningless, so hue is pinned to 0 rather than left to the libm.
-    if (f64_ge(chroma, 0.00000001) == 1) {
-        hue = _rg_rem_euclid(_rg_to_degrees(ganita_f64_atan2(b, a)), 360.0);
+# ── f32 angle helpers, as Rust's f32 methods compute them ────────
+# f32::to_degrees multiplies by the f32 constant 57.29578 (PIS_IN_180).
+# f32::to_radians multiplies by the f32 constant `PI / 180.0` (0.017453292).
+var _C_F32_DEG_PER_RAD = 0x42652EE1;
+var _C_F32_RAD_PER_DEG = 0x3C8EFA35;
+
+# |x| mod m for finite x >= 0 and m > 0, EXACTLY: binary long division in f64.
+# Each step subtracts m * 2^j from a value within a factor of 2 of it, so every
+# subtraction is exact (Sterbenz), whatever the magnitude of x.
+fn _c_f64_fmod_pos(x, m) {
+    if (f64_lt(x, m) == 1) { return x; }
+    var mk = m;
+    while (f64_le(f64_mul(mk, 2.0), x) == 1) { mk = f64_mul(mk, 2.0); }
+    var r = x;
+    while (f64_ge(mk, m) == 1) {
+        if (f64_ge(r, mk) == 1) { r = f64_sub(r, mk); }
+        mk = f64_div(mk, 2.0);
     }
-    return oklch_new(load32(c), f32_from(chroma), f32_from(hue));
+    return r;
 }
 
+# Rust's f32 `x.rem_euclid(m)` for m > 0: `let r = x % m; if r < 0.0 { r + m }
+# else { r }`. f32 `%` is fmod, which is exact and keeps x's sign, including the
+# sign of a zero. The `r + m` is an f32 add. Both are reproduced exactly here.
+#must_use
+fn _c_f32_rem_euclid(x, m) {
+    var xd = f32_to(x);
+    if (f64_eq(xd, xd) == 0) { return x; }
+    if (f64_lt(f64_abs(xd), _RG_INF) == 0) { return 0x7FC00000; }   # inf % m is NaN
+    var r = _c_f64_fmod_pos(f64_abs(xd), f32_to(m));
+    if (((x >> 31) & 1) == 1) { r = f64_neg(r); }
+    var rf: f32 = f32_from(r);
+    var mf: f32 = m;
+    if (rf < f32_from(0.0)) { return rf + mf; }
+    return rf;
+}
+
+fn _c_f32_clamp01(x: f32) {
+    if (x < f32_from(0.0)) { return f32_from(0.0); }
+    if (x > f32_from(1.0)) { return f32_from(1.0); }
+    return x;
+}
+
+# Polar form. Chroma is |(a, b)|; hue is its angle in degrees, wrapped.
+# Single precision throughout, as Rust's `From<Oklab> for Oklch`: f32 sqrt, f32
+# atan2, f32 to_degrees and f32 rem_euclid. Up to 2.1.2 this ran in f64, and on a
+# 52^3 grid chroma differed by 1 ULP at 23,654 points and hue by up to 2 ULPs at
+# 28,737 (scripts/oracle).
+#must_use
+fn oklab_to_oklch(c) {
+    var a: f32 = load32(c + 4);
+    var b: f32 = load32(c + 8);
+    var sq: f32 = a * a + b * b;
+    var chroma: f32 = ganita_f32_sqrt(sq);
+    var hue: f32 = f32_from(0.0);
+    # Below the threshold the colour is achromatic and atan2(0, 0) is
+    # meaningless, so hue is pinned to 0 rather than left to the libm.
+    var lim: f32 = f32_from(0.00000001);
+    if (chroma < lim) { hue = f32_from(0.0); } else {
+        var at: f32 = ganita_f32_atan2(b, a);
+        var k: f32 = _C_F32_DEG_PER_RAD;
+        var deg: f32 = at * k;
+        hue = _c_f32_rem_euclid(deg, f32_from(360.0));
+    }
+    return oklch_new(load32(c), chroma, hue);
+}
+
+# Rust: `a = c * h.to_radians().cos()`, `b = c * h.to_radians().sin()`, all f32.
 #must_use
 fn oklch_to_oklab(v) {
-    var h = _rg_to_radians(f32_to(load32(v + 8)));
-    var chroma = f32_to(load32(v + 4));
-    return oklab_new(load32(v),
-      f32_from(f64_mul(chroma, _rg_cos(h))),
-      f32_from(f64_mul(chroma, _rg_sin(h))));
+    var hdeg: f32 = load32(v + 8);
+    var k: f32 = _C_F32_RAD_PER_DEG;
+    var h: f32 = hdeg * k;
+    var chroma: f32 = load32(v + 4);
+    var co: f32 = ganita_f32_cos(h);
+    var si: f32 = ganita_f32_sin(h);
+    var a: f32 = chroma * co;
+    var b: f32 = chroma * si;
+    return oklab_new(load32(v), a, b);
 }
 
 # Convenience: sRGB byte -> Oklab, through LinRgba.
@@ -778,42 +824,62 @@ fn srgba_to_oklab(c) {
 #
 # NaN in gives neutral white out rather than propagating: 1.0.0 fixed this,
 # where a NaN kelvin previously survived the clamp and poisoned every channel.
+# Every `f32_from(<decimal>)` constant in the f32 colour code was checked to give the
+# same bits as rustc's f32 literal (for these values the f64 parse rounds to f32
+# without a double-rounding miss).
 fn color_temperature(kelvin, out) {
-    var k = f32_to(kelvin);
-    # NaN is the one value not equal to itself.
-    if (f64_eq(k, k) == 0) {
-        store32(out, f32_from(F64_ONE));
-        store32(out + 4, f32_from(F64_ONE));
-        store32(out + 8, f32_from(F64_ONE));
+    # Single precision throughout, as Rust's `color_temperature(kelvin: f32)`: f32
+    # literals, `powf`, `ln` and `clamp`. Up to 2.1.2 this ran in f64, and 5,590 of
+    # 16,716 components (kelvin 1000..40000 in steps of 7) were off by up to 233
+    # ULPs (scripts/oracle).
+    var kf: f32 = kelvin;
+    if (kf != kf) {
+        store32(out, f32_from(1.0));
+        store32(out + 4, f32_from(1.0));
+        store32(out + 8, f32_from(1.0));
         return RG_ERR_NONE;
     }
-    var temp = f64_div(f64_clamp(k, 1000.0, 40000.0), 100.0);
+    var lo: f32 = f32_from(1000.0);
+    var hi: f32 = f32_from(40000.0);
+    var kc: f32 = kf;
+    if (kc < lo) { kc = lo; }
+    if (kc > hi) { kc = hi; }
+    var temp: f32 = kc / f32_from(100.0);
+    var k66: f32 = f32_from(66.0);
+    var k60: f32 = f32_from(60.0);
+    var k255: f32 = f32_from(255.0);
 
-    var r = F64_ONE;
-    if (f64_gt(temp, 66.0) == 1) {
-        r = f64_clamp(f64_div(f64_mul(329.699, _rg_pow(f64_sub(temp, 60.0), f64_neg(0.133205))), 255.0), 0, F64_ONE);
+    var r: f32 = f32_from(1.0);
+    var g: f32 = f32_from(0.0);
+    if (temp <= k66) {
+        var lt: f32 = ganita_f32_ln(temp);
+        var c1: f32 = f32_from(99.4708);
+        var c2: f32 = f32_from(161.1196);
+        g = _c_f32_clamp01((c1 * lt - c2) / k255);
+    } else {
+        var t60: f32 = temp - k60;
+        var pr: f32 = ganita_f32_pow(t60, f32_from(f64_neg(0.133205)));
+        var pg: f32 = ganita_f32_pow(t60, f32_from(f64_neg(0.075515)));
+        var cr: f32 = f32_from(329.699);
+        var cg: f32 = f32_from(288.1222);
+        r = _c_f32_clamp01(cr * pr / k255);
+        g = _c_f32_clamp01(cg * pg / k255);
     }
 
-    var g = 0;
-    if (f64_le(temp, 66.0) == 1) {
-        g = f64_clamp(f64_div(f64_sub(f64_mul(99.4708, f64_ln(temp)), 161.1196), 255.0), 0, F64_ONE);
-    }
-    if (f64_le(temp, 66.0) == 0) {
-        g = f64_clamp(f64_div(f64_mul(288.1222, _rg_pow(f64_sub(temp, 60.0), f64_neg(0.075515))), 255.0), 0, F64_ONE);
-    }
-
-    var b = 0;
-    if (f64_ge(temp, 66.0) == 1) { b = F64_ONE; }
-    if (f64_ge(temp, 66.0) == 0) {
-        if (f64_le(temp, 19.0) == 0) {
-            var bl = f64_sub(f64_mul(138.5177, f64_ln(f64_sub(temp, 10.0))), 305.0448);
-            b = f64_clamp(f64_div(bl, 255.0), 0, F64_ONE);
+    var b: f32 = f32_from(0.0);
+    if (temp >= k66) { b = f32_from(1.0); } else {
+        if (temp > f32_from(19.0)) {
+            var t10: f32 = temp - f32_from(10.0);
+            var lb: f32 = ganita_f32_ln(t10);
+            var c3: f32 = f32_from(138.5177);
+            var c4: f32 = f32_from(305.0448);
+            b = _c_f32_clamp01((c3 * lb - c4) / k255);
         }
     }
 
-    store32(out, f32_from(r));
-    store32(out + 4, f32_from(g));
-    store32(out + 8, f32_from(b));
+    store32(out, r);
+    store32(out + 4, g);
+    store32(out + 8, b);
     return RG_ERR_NONE;
 }
 

@@ -8,17 +8,25 @@
 
 ## Where things stand
 
-The port shipped as **2.0.0** and is at **2.1.2** on cyrius 6.7.18. The 2026-11-02 review
-of all 303 public Rust items, updated for the 2.1.2 fixes, found:
+The port shipped as **2.0.0** and is at **2.2.0** on cyrius 6.7.18. The 2026-11-02 review
+of all 303 public Rust items, updated for 2.1.2 and 2.2.0, found:
 
-- 194 at parity;
+- 211 at parity;
 - 5 improved on Rust;
-- 28 that diverge on purpose, with the reason written down;
+- 29 that diverge on purpose, with the reason written down;
 - 19 partial and 33 missing;
-- **24 that compute something different from Rust without a documented reason**.
+- **6 that compute something different from Rust without a documented reason**. All
+  six are GPU and are scheduled in 2.5.x.
+
+**2.2.0 closed milestone 2.2.x, "bit-exact again".**
+- `scripts/oracle` checks the port against the Rust 1.0.1 crate on identical inputs:
+  2.1 million values, and every output boundary of the f32 → byte conversions over
+  all of [0, 1].
+- Every CPU computation it covers matches Rust bit for bit. The exception is three
+  libm-backed f32 fields, accepted within 2 ULP by ADR 002.
 
 The 2.1.2 P(-1) review ([`../audit/2026-11-02-audit.md`](../audit/2026-11-02-audit.md))
-closed out the 6.6.9 → 6.7.18 bumps, and showed that every one of the 24 predates them.
+had already shown that none of these divergences came from the toolchain bumps.
 
 The verification surface is far behind Rust:
 - no fuzzing;
@@ -35,8 +43,10 @@ Several of the original 2.0.0 criteria were never met, and they are carried belo
   milestone.
 - **Minor (`2.N.0`):** opens the next milestone below.
 
-Milestones are ordered by what unblocks what, not by size. Correctness comes first
-because the oracle that defines it (`rust-old/`) is due to be deleted.
+Milestones are ordered by what unblocks what, not by size. Correctness came first
+(2.2.x, done) because the oracle that defines it (`rust-old/`) is due to be deleted.
+Verification is next, because the oracle's evidence must be captured in tests before
+that happens.
 
 **Rule for every item:** the port's bar is "matches what Rust did", so diverge only with
 an ADR. Each SUSPECT item is either fixed to match Rust or given an ADR, and each
@@ -44,69 +54,6 @@ MISSING item is either ported or given an ADR. Sizes are S (hours), M (a day or 
 L (more).
 
 ---
-
-## 2.2.x — Bit-exact again
-
-Fix every measured divergence, and make the measurement repeatable.
-
-- [ ] **(M) Check in the differential oracle.** Add a small Rust driver outside
-      `rust-old/` (e.g. `scripts/oracle/`, depending on `../../rust-old` by path),
-      plus a Cyrius probe and a diff script. Run it once per release.
-      - Every finding below was measured with a throwaway version of it.
-      - It is the only thing that catches 1-ULP and half-step errors: the old sampled
-        sweeps called four of these paths byte-exact.
-- [ ] **(M) Single-precision colour byte paths:** `linear_to_srgb`,
-      `lin_rgba_to_srgba`, `hsl_to_srgba` (including its `s < 1e-6` compare),
-      `cmyk_to_srgba` and `rgbaf32_to_rgba8`. Use the `: f32` typed-local pattern
-      `srgb_to_linear` already uses, and sweep every f32 in [0,1] against the oracle.
-- [ ] **(M) Single-precision colour f32 outputs:** `srgba_to_hsl`, `srgba_to_cmyk`,
-      `color_temperature`, `oklab_to_oklch` and `oklch_to_oklab`. Fix them, or write an
-      ADR accepting ULP-level differences in fields that never round to a byte.
-      `hue_shift` depends on `srgba_to_hsl`.
-- [ ] **(S) `affine_inverse`:** restore Rust's association, `(c*ty - d*tx)*inv` and
-      `(b*tx - a*ty)*inv`. Ordinary scale+translate transforms currently sample the
-      wrong source column.
-- [ ] **(S) `affine_is_identity`:** make a NaN field fail, using Rust's all-`<` form.
-- [ ] **(S–M) `levels`:** compute `1/gamma`, the pow result, `*255` and `+0.5` in f32.
-- [ ] **(S) `bilateral`:**
-      - compute the coefficients and exp arguments in f32;
-      - return `RG_ERR_OTHER` for σ ≤ 0 (as `levels` already does);
-      - let a NaN σ through as Rust does, or write an ADR.
-- [ ] **(S) `hue_shift`:** do the hue add and `rem_euclid` in f32. This lands after
-      `srgba_to_hsl`.
-- [ ] **(S) ICC grid size 1:** accept it, as Rust does, or reject it under an ADR.
-      The two `fl_alloc(0)` regressions, zero tags and mft2 with zero entries, were
-      fixed in 2.1.2.
-- [ ] **(S) ICC error codes:** some malformed input returns `RG_ERR_PARSE` where Rust
-      returns InvalidFormat for all of it. Unify, or document the split.
-- [ ] **(S) Contradictions pinned by tests.** For each, match Rust or write an ADR:
-      - the error strings: Rust's InvalidFormat reads "invalid pixel format: …", and
-        `Other` carries its message;
-      - `PixelBuffer::new` reporting overflow as `RG_ERR_ALLOCATION`, which has needed
-        an ADR since M7.
-- [ ] **(S) ADR 001:**
-      - extend it to the BT.709, BT.2020 and NV12 inverses, which diverge the same way
-        and whose tests already pin the values;
-      - correct its "all five failed to reproduce" line.
-- [ ] **(S) Robustness found by the review:**
-      - `convert.cyr:103` ignores `_cv_y_row`'s return value;
-      - `buffer_pool_acquire` accepts a negative size;
-      - `BufferPool` allocates all `max_buffers` slots eagerly (`buffer_pool_new(1<<40)`
-        returns 0);
-      - `lut3d_new` has no overflow guard on `size³·12`;
-      - `flood_fill`'s stack has no capacity check;
-      - bilinear sampling of a 1-pixel source with a non-finite inverse reads past the
-        buffer.
-- [ ] **(S) Stale source comments the review listed.** 2.1.2 fixed the ones that
-      stated toolchain or dependency facts. Still wrong:
-      - `error.cyr` (INVALID_PARAMETER "levels gamma = 0", "logged at the failure site");
-      - `color.cyr:564` (Oklab "f32 throughout");
-      - `convert.cyr:4-8`;
-      - `transform.cyr:446-449`;
-      - `blend.cyr:4-9` and `:261-263`.
-
-**Done when:** the parity doc has no SUSPECT items, and an oracle sweep is clean on
-every u8 output path.
 
 ## 2.3.x — Verification parity
 
@@ -156,6 +103,12 @@ Make the test, fuzz and benchmark surfaces mean what Rust's meant.
       - Re-measure both sides on a quiet machine.
       - Rewrite `docs/benchmarks-rust-v-cyrius.md`, whose table and prose are stale.
       - The 26 GPU benches wait on a decision about GPU hardware in CI.
+- [ ] **(S) Run the oracle in CI.** `scripts/oracle/run.sh` needs `cargo`, which the
+      runner has, and it exits non-zero on any unaccepted difference from Rust.
+- [ ] **(M) Golden vectors from the oracle.** Capture the oracle's Rust outputs as
+      vectors checked into `tests/`, so the evidence survives `rust-old/`'s
+      deletion (2.x). The transition-point groups are 255 values each and can be
+      captured whole.
 - [ ] **(S) CI hygiene.** The lint gate became one strict call in 2.1.2. Still to do:
       - Add the fuzz step.
       - Rename the duplicate `b6`/`b8` globals in `filter_point.tcyr`.
@@ -330,8 +283,9 @@ first, for 6.6.9 → 6.7.18, is
    against the previous pin.
 5. Look for workarounds the toolchain has outgrown. At 6.7.18 the 2^63 trig guard
    had become a divergence. A cross-toolchain diff of the same probes, built under
-   the old and new pins, shows exactly what a bump changed. Until the 2.2.x oracle
-   is checked in, the P(-1) audit describes how to do it by hand.
+   the old and new pins, shows exactly what a bump changed. Run
+   `scripts/oracle/run.sh` too: a bump that moves a computation away from Rust fails
+   it.
 6. Until 2.3.x lands, `cyrius fuzz` runs the scaffold stub. **Do not report it as
    verification.**
 
