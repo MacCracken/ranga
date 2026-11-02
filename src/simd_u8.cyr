@@ -10,7 +10,8 @@
 # builtins that lex are exactly iv_add / iv_sub / iv_mul / iv_dp8. So each
 # primitive is an `asm { }` block of hand-encoded instruction bytes, gated on
 # `#ifdef CYRIUS_ARCH_X86` with a scalar fallback that is the definition of
-# correct. The in-tree precedent is `_fhm_probe16` (lib/hashmap_fast.cyr:66).
+# correct. The precedent is `_fhm_probe16` in the cyrius stdlib's
+# lib/hashmap_fast.cyr (not vendored here).
 #
 # EVERY encoding here was produced by llvm-mc, not from memory, and every
 # primitive is differentially tested against its own scalar fallback over the

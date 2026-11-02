@@ -1,9 +1,18 @@
 # Roadmap
 
-**Rust line closed at 1.0.1 (2026-08-13)** — final Rust release. ranga continues
-in Cyrius, following mabda, prakash, and ai-hwaccel.
+The plan lives in [docs/development/roadmap.md](docs/development/roadmap.md). This file
+is a summary. ranga continues in Cyrius; the Rust line closed at 1.0.1 and is
+preserved at `rust-old/` as the parity oracle until the port is complete.
 
-crates.io publishing is removed; releases are GitHub artifacts only. `wgpu` 29 and
-`pollster` 0.4 are frozen for the life of the Rust line (mabda 1.0.0 pins them).
+| Milestone | Theme |
+| --- | --- |
+| **2.2.x** | Bit-exact again: an in-tree differential oracle against `rust-old/`, then fixes for the 25 items that compute differently from Rust |
+| **2.3.x** | Verification parity: a real fuzz harness (8 targets), property tests, golden vectors, the missing benchmarks |
+| **2.4.x** | CPU surface completion: the serde decision, clone/eq for heap records, `Lut3d::from_cube`, writable records |
+| **2.5.x** | GPU: the wgpu decision, `GpuChain`, native blur/blend/bilinear, rounding and size fixes |
+| **2.6.x** | Performance: vectorised blur, histogram ops, contrast/saturation, the YUV inverse |
+| **2.7.x** | Docs, examples, security audit, a first Cyrius consumer |
+| **2.x** | Close the port: capture the oracle into tests, then retire `rust-old/` |
 
-Open items carried to the port: [docs/development/roadmap.md](docs/development/roadmap.md).
+The per-item inventory behind these milestones:
+[docs/development/parity-rust-v-cyrius.md](docs/development/parity-rust-v-cyrius.md).

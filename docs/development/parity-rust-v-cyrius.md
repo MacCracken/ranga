@@ -1,295 +1,282 @@
-# Surface parity — ranga Rust 1.0.1 vs the Cyrius port
+# Parity: ranga Rust 1.0.1 (`rust-old/`) vs the Cyrius port
 
-> M7. Audited module by module against `rust-old/`, then each claimed gap
-> adversarially re-checked against the files. This is a **surface** audit: it
-> asks whether every public Rust item has a counterpart, not whether the
-> counterpart computes the same numbers. Behavioural parity is what the 1,700+
-> assertions and the per-module mutation testing cover.
+> **Review of 2026-11-02, at ranga 2.1.1 / cyrius 6.7.18.** This replaces the M7 audit
+> written before 2.0.0, whose totals and several "byte-identical" claims no longer hold
+> (see [What the old audit got wrong](#what-the-old-audit-got-wrong)). Every public item
+> in `rust-old/src` was matched against `src/*.cyr`, both sides were read, and the
+> behavioural claims were **measured**. The crate at `rust-old/` was built with
+> `cargo --release` (default features, which include `simd`), the port was built under
+> cyrius 6.7.18, and the outputs were diffed value by value. Six of the findings were
+> then reproduced independently. The open work this produces is sequenced in
+> [`roadmap.md`](roadmap.md).
+
+## How each item is classified
+
+| Status | Meaning |
+| --- | --- |
+| **PARITY** | Counterpart exists and behaves the same: argument meaning and order, clamping, rounding and error case. |
+| **IMPROVED** | Counterpart exists and deliberately does better than Rust, through hardening, a Rust bug left unreproduced, or a safer bound. |
+| **DIVERGENT-DOCUMENTED** | Absent or different on purpose, with the reason written down. |
+| **PARTIAL** | Counterpart exists but lacks part of the Rust surface or behaviour. |
+| **MISSING** | No counterpart. |
+| **SUSPECT** | Counterpart exists and **computes something different from Rust without a documented reason**. Every SUSPECT below was confirmed by measurement. |
+
+The project rule is "diverge only with an ADR". So each SUSPECT item is either fixed
+to match Rust or written up as an ADR and becomes DIVERGENT-DOCUMENTED. Each MISSING
+item is either ported or given an ADR. Nothing stays SUSPECT.
 
 ## Totals
 
-| | Count |
-| --- | ---: |
-| Rust public items (fns incl. impl methods, structs, enums, consts, trait impls) | **318** |
-| Ported — same name or the expected mechanical rename | **222** |
-| Deliberate omission — absent with a documented reason | **22** |
-| **Missing** | **51** |
-| Cyrius public fns | 370 |
+| Area (Rust files) | Items | PARITY | IMPROVED | DIV-DOC | PARTIAL | MISSING | SUSPECT |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| error, lib, pixel, color, convert | 88 | 48 | 3 | 15 | 7 | 4 | 11 |
+| filter, transform, histogram | 73 | 51 | 1 | 4 | 0 | 11 | 6 |
+| composite, blend, icc, spectral, hwaccel | 70 | 55 | 1 | 5 | 3 | 4 | 2 |
+| gpu (context, buffer, shaders, pipeline) | 72 | 39 | 0 | 4 | 9 | 14 | 6 |
+| **Total** | **303** | **193** | **5** | **28** | **19** | **33** | **25** |
 
-The Cyrius surface is larger than the Rust one because Cyrius has no methods,
-no `Drop`, and no `std`: every `X::y()` becomes a free `x_y()`, every owning
-type needs an explicit `*_free`, and `bytevec.cyr` exists because `Vec<u8>` does
-not.
+An item is a pub fn (impl methods included), struct, enum, const, or trait impl/derive.
+Each derive counts once per type. The M7 audit counted 318 under a looser
+convention, so the two totals are not comparable line for line.
 
-## Where the 51 gaps are
+## Findings that matter most
 
-| Group | Rust items | Missing | What is missing |
-| --- | ---: | ---: | --- |
-| gpu | 75 | **28** | **the entirety of `pipeline.rs`** |
-| icc / spectral / hwaccel | 49 | 9 | derive impls, `IccLutProfile` accessors |
-| error / pixel | 61 | 4 | `RangaError` Display/Error, `into_data` |
-| transform / filter | 53 | 6 | derive impls, two `ScaleFilter` niceties |
-| color / convert | 52 | 2 | `ColorSpace::Bt601`, one `FromStr` |
-| composite / histogram / blend | 28 | 2 | two `BlendMode` derive impls |
+1. **Several byte outputs are not bit-exact against Rust.** The old audit said "every u8
+   output path is byte-exact", and that is false. The common cause is computing in f64
+   and narrowing once at the end, where Rust works in f32 throughout.
+   `src/color.cyr:195-200` names this exact pattern as wrong, for `srgb_to_linear`,
+   which is bit-exact. Affected:
+   - **Colour conversions:** `linear_to_srgb`, `lin_rgba_to_srgba`, `hsl_to_srgba`,
+     `cmyk_to_srgba`, `rgbaf32_to_rgba8`.
+   - **Filters:** `levels`, `bilateral`, and `hue_shift`, mostly through `srgba_to_hsl`.
 
-**Half the parity debt is one file.** `gpu/pipeline.rs` holds the fourteen
-public `gpu_*` operations and `GpuChain`, and none of it is ported. What IS
-ported is everything underneath: the context, the buffers, the SPIR-V emitter,
-eleven kernels and all twenty-one WGSL sources. So the gap is **wiring, not
-maths** — each missing operation is a function that uploads, picks a kernel,
-dispatches and downloads.
+   Most of the values involved are half-step inputs that sampled sweeps never hit. For
+   example, f32 `0x3f010101` through `rgbaf32_to_rgba8` gives Rust 129 and the port
+   128.
+2. **`affine_inverse` reassociates the translation.** Rust computes
+   `tx = (c*ty - d*tx) * inv`, and the port computes `-(ia*tx + ic*ty)`. For a plain
+   scale+translate (`a=0.6, d=2.5, tx=ty=-1.9`), tx is `0x4009555555555555` in Rust
+   and `…554` in the port, and an entire column of Nearest samples in
+   `affine_transform` then comes from the wrong source column.
+3. **Two ICC parse regressions came from the toolchain, not from ranga.** Since cyrius
+   6.6.7, `fl_alloc(0)` and `fl_calloc(0)` return 0. As a result, a profile with zero
+   tags, and an `mft2` LUT with zero input entries, now fail with `RG_ERR_ALLOCATION`.
+   Rust returns InvalidFormat for the first and parses the second, using identity
+   curves. The parser also rejects grid size 1, which Rust handles. ICC is the only
+   module that parses untrusted input.
+4. **The GPU "wgpu fallback" never runs.** ranga carries all 21 WGSL sources but
+   dispatches none of them, and mabda 4.2.0's context-aware wgpu dispatch is a stub
+   (see [architecture note 001](../architecture/001-mabda-native-gpu-constraints.md)).
+   So on wgpu every `gpu_*` operation fails. On native backends:
+   - 11 of the 14 operations run;
+   - `gpu_blend`, `gpu_noise_gaussian` and `gpu_gaussian_blur` are stubs on every
+     backend, and so is bilinear/bicubic `gpu_resize`;
+   - `GpuChain` (13 items) is not ported at all, although `hwaccel.cyr`'s cost model
+     assumes it.
+5. **The serde surface is 14 types, and no codec exists.** The old audit said
+   "four enums, hand-written codecs". In fact Rust derives Serialize/Deserialize on:
+   - the 8 colour structs;
+   - `PixelFormat`, `ColorSpace`, `BlendMode`, `ToneCurve`, `Affine` and `Perspective`.
 
-⚠ **A defect the audit's own summary buried under "derive impls".** ranga's
-`ColorSpace` was not a renumbered Rust enum — it was a DIFFERENT enum wearing
-the same name. Rust declares `Srgb, LinearRgb, DisplayP3, Bt601, Bt709, Bt2020,
-CieXyz`; the port dropped **Bt601 and Bt709** and let its own additions CieLab
-and Oklab take values 3-6. So a `ColorSpace` persisted by ranga 1.0.1 read back
-here as the wrong space — Rust's `Bt2020` (5) as CIE L\*a\*b\*, its `CieXyz`
-(6) as Oklab — with nothing to signal it, while `convert.cyr` had BT.601 and
-BT.709 conversions no ColorSpace value could name. Now corrected: the first
-seven discriminants are Rust's, and the two ranga additions are numbered above
-Rust's range so they cannot displace anything.
+   `src/` has no codec for any of them. Rust has **no `FromStr` anywhere**, so the old
+   "missing FromStr" gaps were never gaps.
 
-**The systemic fix matters more than the fix.** PixelFormat, BlendMode and
-ScaleFilter were all correct, but only PixelFormat's numbering was asserted
-anywhere — the other three suites checked `*_name()` strings, which pass under
-any renumbering. All four enums now have explicit discriminant guards.
+## Improved in Cyrius (keep)
 
-The remaining gaps break down as follows. **Cyrius has `#derive`**, so "no
-analogue" is not the explanation for any of them:
+- **`pixel_buffer_zeroed`**: fallible instead of panicking.
+- **`pixel_buffer_row_offset` / `row_bytes`** (Rust `rows`/`rows_mut`): reject planar
+  formats, and width 0 does not panic as Rust's `chunks_exact(0)` does.
+- **`pixel_view_new`**: a size overflow returns an error code instead of aborting.
+- **`brightness`**: a huge offset saturates. Rust's i16 wrap, which turns
+  `(255, 0, 0)` at offset 1000, is not reproduced; byte-exact on 1,042 ordinary offsets.
+- **`blend_row`**: an invalid mode returns `RG_ERR_INVALID_PARAMETER`.
 
-- `#derive(accessors)` is a documented Cyrius feature that generates
-  `T_field()` / `T_set_field()` pairs. ranga does not use it: every struct here
-  is hand-rolled `load64`/`store64` against a byte layout written into the
-  module header. That was a choice — the layouts are load-bearing documentation
-  and several are read by hand-encoded asm — not a limitation.
-- `#derive(Serialize)` / `#derive(Deserialize)` exist and **work on structs**
-  (cyrius's own `lib/sigil.cyr` derives Serialize on `struct ima_status`). On an
-  **enum** the derive compiles rc=0 with no diagnostic and emits **no
-  codec at all** — the generated `<name>_to_json` is simply undefined at link
-  time. Since ranga's serde surface is exactly four enums (`PixelFormat`,
-  `BlendMode`, `ColorSpace` and one payload enum), the derive is unusable here
-  and the codecs are hand-written. The port plan recorded this as a "misnamed,
-  crashing codec"; the symptom has since changed to a silent no-op, same
-  conclusion.
-- `Debug`, `Clone`, `Copy`, `PartialEq`, `Hash` genuinely have no Cyrius derive
-  and mostly need none — an `i64` is already copyable and comparable.
+## Deliberate divergences (documented; not to be re-litigated)
 
-What genuinely costs something is string-facing: no `FromStr` means a consumer
-cannot parse `"Multiply"` back into a `BlendMode`, and there is no inverse of
-`blend_mode_name`.
+- **No payloads:** error payloads are dropped. `ranga_error_message` returns the format
+  string with its placeholders removed, and `Result` becomes the `err_out` convention.
+- **One read function per pair:** `PixelView` and `PixelViewMut` share one
+  representation, and `data`/`data_mut` and `rows`/`rows_mut` merge, because Cyrius
+  pointers carry no mutability.
+- **Checked only:** panicking variants (`buffer_size`) collapse into the checked ones.
+  `pixel_format_checked_buffer_size` is bounded by i64, not usize.
+- **Overflow error code:** `pixel_buffer_new` reports a size overflow as
+  `RG_ERR_ALLOCATION`, where Rust reports `BufferTooSmall`. ⚠ This has needed an ADR
+  since M7, and none exists yet.
+- **No i16 wrap in the YUV inverses** ([ADR 001](../adr/001-yuv-inverse-does-not-reproduce-rusts-i16-wrap.md)).
+  ⚠ The ADR names only the BT.601 inverse, but `yuv420p_to_rgba_bt709`,
+  `yuv420p_to_rgba_bt2020` and `nv12_to_rgba` diverge the same way, and their tests pin
+  the diverged values. The ADR's "all five failed to reproduce" line is also wrong:
+  three of them reproduce.
+- **Grayscale coefficients:** GPU grayscale is BT.709 and CPU grayscale is BT.601,
+  inherited from Rust.
+- **Derives:** `Debug` has no Cyrius equivalent. ⚠ The old rationale, "an i64 is already
+  copyable and comparable", covers the enums but **not** the heap-allocated records:
+  - `Affine`, `Perspective` and `Lut3d` have no `*_clone` or `*_eq`;
+  - neither do the colour structs, ICC profiles or `HwReport`.
 
-## Fixed by this audit
+  Aliasing a pointer and freeing one copy leaves the other dangling.
+- **GPU omissions:**
+  - `GpuBuffer::download_async`: mabda has no async readback.
+  - `GpuContext::new` becomes `gpu_context_new_amd` / `_nvidia` / `_from_launcher`; the
+    caller picks the backend.
+  - `backend_name` reports mabda's backends.
+- **`Lut3d::from_cube`** is listed as "not ported", with no reason. ⚠ The user guides
+  still advertise it. It needs an ADR or a port.
 
-The audit's value was not the inventory — it was four things it found wrong in
-code that was already passing its tests:
+## Per-area detail (everything that is not PARITY)
 
-1. **`pixel_view_new` accepted oversized buffers.** It tested `len < want`; Rust
-   tests `data.len() != expected` and returns `DimensionMismatch`. The port
-   silently widened the contract — a caller passing a whole frame where a tile
-   was meant got a view reading the wrong rows instead of a diagnostic. Fixed to
-   exact equality, with the error code corrected to match Rust, and both
-   directions now asserted.
+### error, lib, pixel, color, convert
 
-2. **`RangaError`'s entire Display surface was absent.** Eight `RG_ERR_*` codes
-   with no way to render them — while `gpu_error_message` in the GPU module
-   already established the idiom. Added `ranga_error_message`, with a test that
-   no two codes share a string.
+| Rust item | Port | Status | What is wrong or missing |
+| --- | --- | --- | --- |
+| `linear_to_srgb` | color.cyr:224 | SUSPECT | Computed in f64 with an f64 exponent of 1/2.4. 7 of 7 probed half-step inputs differ by 1. An emulation estimates ~219 affected f32 inputs in [0,1]. |
+| `From<LinRgba> for Srgba` | `lin_rgba_to_srgba` :270 | SUSPECT | Alpha rounded in f64, and RGB goes through `linear_to_srgb`. |
+| `From<Srgba> for Hsl` | `srgba_to_hsl` :398 | SUSPECT | On a 52³ grid, h differs by up to 22 ULP and s by up to 15 ULP. `hue_shift` inherits this. |
+| `From<Hsl> for Srgba` | `hsl_to_srgba` :467 | SUSPECT | f64 path, and its `s < 1e-6` compare is f64 where Rust's is f32. Bytes differ. |
+| `cmyk_to_srgb` | `cmyk_to_srgba` :519 | SUSPECT | Byte output computed in f64. 1,086 k values differ even with c=m=y=0. |
+| `srgb_to_cmyk` | `srgba_to_cmyk` :529 | SUSPECT | f32 fields differ by up to 248 ULP. |
+| `From<Oklab> for Oklch`, reverse | `oklab_to_oklch` :744, `oklch_to_oklab` :758 | SUSPECT | f64 trig. The header at :564 claims f32 throughout. |
+| `color_temperature` | :781 | SUSPECT | f64 path. 4,205 of 5,572 kelvin values differ by up to 233 ULP. |
+| `rgbaf32_to_rgba8` | convert.cyr:427 | SUSPECT | `v*255+0.5` computed in f64. 128 half-step f32 values in [0,1] round the other way. |
+| `BufferPool::new` | pixel.cyr:398 | SUSPECT | Allocates `max_buffers*8` slots up front. `buffer_pool_new(1<<40)` returns 0, and acquire/release scan O(max). |
+| `LinRgba`, `Hsl`, `CieXyz`, `CieLab`, `Cmyk`, `Oklab`, `Oklch` | color.cyr | PARTIAL ×7 | Getters only; Rust's pub fields are writable. The Hsl and Cmyk layouts are not in the module header. |
+| `PixelBuffer::into_data` | — | MISSING | No way to take the bytevec and free only the header. |
+| serde on `PixelFormat`, `ColorSpace` and the 8 colour structs | — | MISSING ×3 | No codec. |
+| `PixelBuffer::new` overflow | pixel.cyr:154 | DIV-DOC | Needs the ADR flagged since M7. |
+| `yuv420p_to_rgba_bt709` / `_bt2020`, `nv12_to_rgba` | convert.cyr | DIV-DOC | Diverge by ADR 001's i16 wrap, but the ADR does not name them. |
 
-3. **`gpu_context_adapter_name` was a stub reporting itself as ported.** It
-   returns the literal `"unknown"` unconditionally; nothing ever assigns the
-   field, because mabda exposes no live adapter query. Now documented as a stub,
-   given a `gpu_context_has_adapter_name` companion, and PINNED by a test that
-   asserts the stub state — so the day mabda can report a name, the suite fails
-   and the contract gets updated rather than a consumer branching on "unknown"
-   forever.
+**Also found (no Rust counterpart, worth fixing):**
+- `convert.cyr:103` ignores `_cv_y_row`'s return value. A failed 16-byte allocation
+  hands back an uninitialised Y plane with `RG_ERR_NONE`.
+- `buffer_pool_acquire` does not guard against a negative size.
+- `bytevec.cyr`'s 19 `bv_*` functions sit in the unprefixed global namespace.
 
-4. **Two comments asserted things that were not true.** `pixel.cyr` claimed the
-   `PixelView`/`PixelViewMut` split "survives as naming plus the mutating
-   accessors being defined only for the Mut form" — there are no such accessors,
-   and both forms read through a writable pointer. `gpu_spirv.cyr` claimed
-   mabda's lowerer handles "exactly five" GLSL.std.450 ops; it handles eight,
-   and the three unlisted ones include `FClamp`, which several kernels here
-   spell the long way as FMax-then-FMin.
+### filter, transform, histogram
 
-## Divergences that are deliberate, recorded so they are not re-litigated
+| Rust item | Port | Status | What is wrong or missing |
+| --- | --- | --- | --- |
+| `levels` | filter_point.cyr:222 | SUSPECT | pow and tail computed in f64. `(black 0, white 0.8, γ1)` maps 106 to 132; Rust gives 133 (the f32 product is exactly 132.5). 17 of 9,900 settings differ. |
+| `hue_shift` | filter_point.cyr:413 | SUSPECT | ±1 on 7–23% of pixels at 10°, 45° and −90°, mostly from `srgba_to_hsl`. At ±1e9° results diverge outright, because Rust's f32 add swallows the hue. |
+| `bilateral` | filter_kernel.cyr:705 | SUSPECT | f64 coefficients and exp give ±1 on up to 67 of 1,564 bytes. σ ≤ 0 returns INVALID_PARAMETER where Rust returns `Other`; a NaN σ is rejected where Rust returns Ok. |
+| `Affine::inverse` | transform.cyr:151 | SUSPECT | tx/ty reassociated: 8 of 15 inverses differ in bits, and samples flip. |
+| `affine_transform` | transform.cyr:452 | SUSPECT | Inherits the inverse error. A model flips at least one Nearest sample in 561 of 20,000 random transforms. |
+| `Affine::is_identity` | transform.cyr:171 | SUSPECT | A NaN field passes (returns 1); Rust returns false. |
+| `Lut3d` Clone | — | MISSING | Heap-owning, and there is no `lut3d_clone`. |
+| `Affine`: Clone, Copy, PartialEq, Serialize, Deserialize | — | MISSING ×5 | No `affine_clone` / `affine_eq`, and no codec. |
+| `Perspective`: Clone, Copy, PartialEq, Serialize, Deserialize | — | MISSING ×5 | Same. |
+| `Lut3d::from_cube` | — | DIV-DOC | Listed "not ported" with no reason. |
 
-- **Error payloads are gone.** `BufferTooSmall { need, have }` and friends carry
-  data an `i64` cannot. `ranga_error_message` returns the format string with the
-  placeholders removed rather than a message implying detail it lacks. Rust's own
-  tests assert on the interpolated values and have no analogue here.
-- **`PixelView` and `PixelViewMut` share one representation.** Cyrius cannot
-  express borrow mutability. The distinction is naming only, and now says so.
-- **Panicking variants collapse into checked ones.** `PixelFormat::buffer_size`
-  merges into `pixel_format_checked_buffer_size` because there is no panic idiom;
-  callers who ignore the negative return are where `.expect()` used to be.
-- **`GpuBuffer::download_async` is not ported.** It existed to work around
-  `mabda::PendingReadback::finish()` needing a non-`Send` `&Device` — a Rust
-  borrow-checker artifact. The Cyrius mabda exposes no async readback to build
-  on. The consumer cost is real: no way to overlap readback with CPU work.
-- **`data`/`data_mut` and `rows`/`rows_mut` merge.** Cyrius pointers carry no
-  mutability, so the pairs are one function each.
-- **GPU grayscale is BT.709, CPU grayscale is BT.601.** Inherited from Rust,
-  which had the same split. Reconciling either side would change output the Rust
-  line produced.
+**Also found:**
+- `lut3d_new` has no overflow guard on `size³·12`.
+- `flood_fill`'s fixed w·h stack has no capacity check.
+- Bilinear sampling of a 1-pixel-wide or 1-pixel-tall source can read up to 12 bytes past
+  the buffer when the inverse is non-finite. `transform.cyr:446-449` claims it cannot
+  produce NaN.
+- `xorshift64_*` is public in the port but was private in Rust, which makes it a new API
+  commitment.
 
-## Remaining behavioural divergences worth an ADR
+### composite, blend, icc, spectral, hwaccel
 
-Found while checking surface parity, not counted as gaps:
+composite and blend are **byte-identical to Rust**, exhaustively for blend (all 12 modes
+× all 65,536 channel pairs) and across every composite function, NaN and inf included.
+ICC LUT outputs, table curves and the `srgb_v2_profile` bytes are bit-exact. Gamma,
+para and matrix results differ by 1–2 ULP because `ganita_f64_pow` is not libm's `pow`.
+That is counted as PARITY.
 
-- `PixelBuffer::new` maps a size overflow to `BufferTooSmall { need: usize::MAX }`
-  in Rust; the port returns `RG_ERR_ALLOCATION`.
-- Rust's `PixelView::new` calls the *panicking* `buffer_size`, so `u32::MAX`
-  dimensions abort the process; the port returns an error code. Likewise
-  `rows()` on a planar format `debug_assert`s in Rust and yields wrong slices in
-  release, where `pixel_buffer_row_offset` returns `RG_ERR_INVALID_FORMAT`. Both
-  are hardening, and both mean a program that aborted under Rust now continues.
+| Rust item | Port | Status | What is wrong or missing |
+| --- | --- | --- | --- |
+| `IccProfile::from_bytes` | icc.cyr:451 | SUSPECT | Zero tags gives `RG_ERR_ALLOCATION` (`fl_calloc(0)`, :177); Rust gives InvalidFormat. |
+| `IccLutProfile::from_bytes` | icc.cyr:920 | SUSPECT | mft2 with 0 input entries fails at `fl_alloc(0)` (:796), where Rust uses identity curves. Grid 1 is rejected by `grid < 2` (:862), where Rust handles it. |
+| `IccProfile`, `IccLutProfile` structs | getters | PARTIAL ×2 | Read-only; there is no way to build a profile. |
+| `ToneCurve` | `TC_*` | PARTIAL | Table entries have no accessor (raw `load64(t+16)` only). |
+| serde on `BlendMode`, `ToneCurve` | — | MISSING ×4 | No codec. BlendMode's wire form is the variant name ("ColorDodge"), not `blend_mode_name`. |
 
+**Also found:**
+- `src/blend.cyr:143` (`one - ganita_f32_min(..)`, whose callee is declared `: i64`) is
+  correct at 6.7.18; all 65,536 ColorBurn inputs match. It is fragile, though, and
+  `_bl_sub(one, …)` removes both the warning and the risk.
+- ICC returns `RG_ERR_PARSE` for some malformed input and `RG_ERR_INVALID_FORMAT` for
+  the rest; Rust uses InvalidFormat throughout.
+- prakash renamed three of the 20 spectral re-exports, so they are not callable under
+  their Rust names: `CIE_1931_2DEG` → `cie_1931_table()` and `VISIBLE_MIN/MAX_NM` →
+  `spec_visible_min/max_nm()`.
+- ai-hwaccel 2.5.6 picks the first of equal-ranked devices, where Rust's `max_by_key`
+  picks the last, and counts shared RAM once. So `hw_probe` can disagree with Rust on
+  multi-GPU or unified-memory machines. This is upstream behaviour.
 
-## Final behavioural sweep (pre-2.0.0 tag)
+### gpu
 
-M7 asked whether a counterpart EXISTS. This asked whether it COMPUTES THE SAME
-THING — every ported function compared arithmetic-by-arithmetic against
-`rust-old/`, with each claimed divergence handed to a second agent told to
-refute it by running both sides.
+| Rust item | Port | Status | What is wrong or missing |
+| --- | --- | --- | --- |
+| `GpuChain` + 12 methods | — | MISSING ×13 | Not ported, and missing from the CHANGELOG's "not ported" list. |
+| `GpuContext::new_with_hwaccel` | — | MISSING | There is no gpu+hwaccel bundle profile. |
+| `gpu_blend`, `gpu_noise_gaussian`, `gpu_gaussian_blur` | gpu_pipeline.cyr | PARTIAL ×3 | Stubs on every backend. Blur returns UNSUPPORTED even for radius 0, where Rust returns a clone. |
+| `gpu_resize` | :449 | PARTIAL | Nearest only. A 0 dimension returns null + FORMAT; Rust returns Ok(0×0). |
+| `adapter_name`, `device`, `queue`, `get_or_create_pipeline_1buf/_3buf` | gpu_context.cyr | PARTIAL ×5 | Pinned stub, or wgpu-only. The pipeline builders have no caller. |
+| `gpu_fade`, `gpu_dissolve` | :314, :351 | SUSPECT | Packing rounds half UP (`floor(x+0.5)`), where WGSL `round` rounds half to even. fade(0.5) of 1/5/9/13 gives 1/3/5/7 against 0/2/4/6. |
+| `gpu_flip_horizontal`, `gpu_flip_vertical`, `gpu_crop` | :388, :394, :410 | SUSPECT | 1D dispatch is capped at 65,535 groups, so 4096² fails with BUFFER_OP; Rust's 2D dispatch works. A degenerate crop returns 0×h, not 0×0. |
+| `GpuError` Display | `gpu_error_message` | SUSPECT | FORMAT and UNSUPPORTED both render "no error". |
 
-### Fixed before the tag
+**Also found:**
+- Guards run in a different order from Rust: buffers are read before the null checks.
+- `err_out` is set inconsistently on dimension mismatch.
+- The cache vecs are never freed.
+- `gpu_buffer_upload` leaks the GPU handle if a later allocation fails.
 
-1. **`oklab(black)` was `(NaN, NaN, NaN)`.** `ganita_f32_cbrt(0.0)` returns NaN —
-   it is `exp(y·ln x)` underneath, and `ln(0)` is -inf — where Rust's
-   `f32::cbrt(0.0)` is `0.0`. The NaN propagated through the entire M2 matrix.
-   Black is the most common pixel value there is. Rust pins this in its own
-   `oklab_black` test, which the port never ported; that test now exists.
-   Fixed with `_rg_f32_cbrt`, which intercepts ONLY zero so every other input
-   keeps the f32 tier exactly rather than being widened to f64 to fix one input.
-2. **`apply_lut3d` truncated where Rust rounds half-up.** Rust is
-   `(v * 255.0 + 0.5).clamp(…) as u8`. A LUT entry of exactly 0.5 gave 127
-   instead of 128, and half of all grey levels came out one count low. Note the
-   +0.5 is NOT the general convention in `filter.rs` — `unsharp_mask` and
-   `vignette` genuinely truncate — so the fix is at the call site, not in the
-   shared `_fk_f32_to_u8`.
-3. **An ICC LUT profile with `grid_size == 0` read below its allocation.** Rust
-   checks only `> 64`, so zero underflows `grid_size - 1`: Rust panics in debug
-   and indexes wildly in release. The byte comes from an untrusted file. The
-   port now rejects `< 2` — a deliberate divergence, and strictly safer.
+## Verification parity (tests, benchmarks, fuzz, examples)
 
-⚠ **All three were in code with green tests.** The Oklab bug survived eight
-milestones because the one Rust test that would have caught it was not ported,
-and every existing lut3d test used entries that did not land on a .5 boundary.
-
-### Known divergences — MEASURED, not reasoned about
-
-⚠ **An earlier draft of this section listed seven divergences as "real and
-confirmed by running both sides." Five of them were false.** They came from an
-agent sweep whose findings I recorded without re-measuring. Every claim below
-has now been checked by building the actual Rust crate at `rust-old/` with
-`cargo --release` and diffing its output against the port under cyrius 6.5.31.
-
-**Did not reproduce — the port is byte-identical to Rust:**
-
-| claimed divergence | measurement |
+| Rust 1.0.1 | Port today |
 | --- | --- |
-| `linear_to_srgb` f64 vs f32 | **14,013 inputs**, including boundaries, negatives and out-of-range — 0 differ |
-| `rgbaf32_to_rgba8` rounding | identical on every sample |
-| `cmyk_to_srgba` / `srgba_to_cmyk` | identical, forward and round-trip |
-| `levels` gamma/scale width | byte-identical across an 8-pixel ramp |
-| `affine_inverse` reassociation | 4 transforms including rotation and sub-pixel translation — identical |
+| 214 unit tests | 127 covered, 56 partial, 27 missing, 4 N/A |
+| 123 integration tests (integration, edge_cases, proptest, photoshop_reference, visual_regression, spectral) | 34 covered, 59 partial, 30 missing |
+| 161 doctests (118 runnable, 110 with asserts, 42 `no_run`, 1 `ignore`) | ~85 covered, 16 partial, 10 missing (of the 110) |
+| Property tests (31, proptest) | **None.** 3 are covered by exhaustive 256-value sweeps; 25 are reduced to fixed examples; 3 are missing. |
+| Photoshop golden vectors (7 modes on one fixed pixel pair) | **None pinned.** |
+| 134 benchmarks (108 CPU, 26 GPU) | 35. 33 match by name, 1 is renamed, 1 runs a different workload. 101 are missing. |
+| 8 fuzz targets | **0.** `tests/ranga.fcyr` is the scaffold stub. |
+| 11 examples | **0.** `docs/examples/` is empty, and the guides are Rust-era. |
 
-**Reproduced and FIXED:**
+Further detail on test coverage:
+- **GPU coverage depends on the host.** 152 GPU assertion sites only run when an AMD
+  context opens, so CI (no GPU) and any non-AMD host skip almost all of
+  `gpu_pipeline` and `gpu_kernels`. The 1,921-assertion figure is an **AMD-host**
+  count, and the NVIDIA backend has no test at all.
+- **Some tests pin behaviour that contradicts Rust,** with no ADR:
+  - the error strings;
+  - bilateral's error codes;
+  - the GPU stubs returning UNSUPPORTED where Rust returns a clone, InvalidFormat or Ok;
+  - the BT.709 and NV12 inverses (see ADR 001 above).
 
-- **blend's `f32 → u8` tail computed in f64.** Rust's
-  `(result * 255.0 + 0.5).clamp(…) as u8` is single-precision throughout;
-  widening first is more accurate and therefore wrong. ColorBurn on
-  `src(10,200,30) / dst(254,3,180)` gave 229 against Rust's 230. The tail now
-  carries `: f32` annotations and matches exactly.
+## What the old audit got wrong
 
-**Reproduced and ACCEPTED as a divergence — see
-[ADR 001](../adr/001-yuv-inverse-does-not-reproduce-rusts-i16-wrap.md):**
+Listed so the corrections are not lost:
 
-- **The YUV→RGB inverse does not wrap at i16.** Rust's does, and saturated red
-  round-trips to **black**. That is an overflow, not a colour decision.
-  Reproducing it would mean deliberately re-introducing the bug.
+- **"Every u8 output path is byte-exact":** false. See findings 1 and 2.
+- **Rows it called "did not reproduce":** `linear_to_srgb`, `rgbaf32_to_rgba8` and
+  `cmyk_to_srgba`/`srgba_to_cmyk` were reproduced against the real crate. So was
+  "levels byte-identical", and "affine_inverse identical" was also wrong.
+- **"`Hsl.h` — 15 values, port more accurate":** h, s and l differ widely, and the
+  differences reach bytes through `hue_shift`.
+- **"serde surface is exactly four enums … codecs are hand-written":** it is 14 types,
+  and no codec exists.
+- **"Missing `FromStr`" and "`ColorSpace::Bt601` missing":** Rust has no `FromStr`, and
+  `CS_BT601` exists.
+- **"Entirety of `pipeline.rs` unported":** 11 of the 14 ops are ported. `GpuChain` is
+  not, and 3 ops are stubs.
+- **"ICC grid 0 makes Rust index wildly in release":** Rust panics, because Vec
+  indexing is bounds-checked. Rejecting `< 2` also drops grid 1, which is valid.
 
-**Then measured, and all three were real — the worst of the whole sweep:**
+## Re-running the oracle
 
-- **`linear_to_srgb` returned `i64::MIN` for NaN, and for +inf.** Rust's
-  float-to-int `as` cast SATURATES — NaN to 0, +inf to 255, -inf to 0 — while
-  Cyrius's `f64_to` returns `i64::MIN` for anything it cannot represent. Both
-  clamp comparisons are false for NaN, so the function fell through and returned
-  -9223372036854775808 from something whose contract is a byte. The +inf case
-  has a second cause: **`f64_exp(+inf)` returns NaN in Cyrius** rather than
-  +inf, the same builtin quirk as `exp(-inf)` that ganita 1.1.4 works around for
-  zero bases but not for infinity. Fixed; the 4,012-input finite sweep confirms
-  no regression.
-- **`levels` diverged three ways.** Rust guards only `gamma <= 0.0`, which is
-  false for NaN, so Rust PROCEEDS on a NaN gamma and blackens — the port
-  rejected it. Rust reports a non-positive gamma as `RangaError::Other`, not an
-  invalid parameter. And `f32::max` DISCARDS a NaN operand, so a NaN white point
-  gives `range = 1e-6` and the image WHITENS in Rust, where the port's bare
-  comparison let the NaN survive and blackened it — the opposite result. All
-  three fixed.
-- **`brightness` with a NaN offset blackened the image**; Rust's saturating
-  `as i16` makes it a complete no-op. Fixed.
-- **`_icc_write_s15fixed16` used banker's rounding.** Rust's `.round()` is
-  half-away-from-zero; `f64_round` is half-to-even, and they differ in both
-  directions on an exact .5 — 0.5 gave 0 against Rust's 1, 2.5 gave 2 against 3.
-  An s15Fixed16 value lands on a .5 exactly when it is an odd multiple of
-  2^-17, which real ICC matrices hit. Fixed with an explicit
-  `_icc_round_half_away`.
-- **`pixel_format_checked_buffer_size` bounded the PIXEL count** against one
-  constant equal to `floor(i64::MAX/16)` — the divisor only RgbaF32 needs — and
-  so rejected sizes Rust accepts: 1e9 x 1e9 Rgba8 is `Some(4000000000000000000)`
-  in Rust and was `RG_ERR_ALLOCATION` here. The guard is now per-format, and the
-  comment claiming "i64 is wide enough that u32*u32*16 cannot overflow it" is
-  gone — `(2^32-1)^2` alone is 1.8e19 against i64::MAX 9.2e18.
+The measurements above were taken with throwaway harnesses. To repeat them:
 
-**A second Rust i16 overflow surfaced while measuring**, alongside the YUV one:
-`brightness` with an offset of 1000 gives `(255,0,0)` in Rust — some channels
-wrap to 0 instead of saturating — where the port saturates to `(255,255,255)`.
-Same judgement as ADR 001: not reproduced.
+1. Build `rust-old/` with `CARGO_TARGET_DIR` pointed at a scratch directory, using
+   `cargo --release` (it builds in seconds).
+2. Write a small Rust driver and a Cyrius probe that print the same calls over the same
+   inputs.
+3. Diff the two outputs.
 
-
-## Exhaustive differential sweep — the measurement that should have come first
-
-Everything above was found by sampling. This is the systematic version: the
-crate at `rust-old/` built with `cargo --release`, driven over a broad input
-space, diffed value-by-value against the same calls in the port under cyrius
-6.5.31. **5,800 comparisons.**
-
-| group | coverage | before | after |
-| --- | --- | ---: | ---: |
-| `srgb_to_linear` | all 256 u8 inputs | **214 differ** | **0** |
-| `blend_pixel` | 12 modes x 256 src/dst pairs | 0 | 0 |
-| colour round trips | 216 colours x 8 outputs | 504* | 49 |
-| `delta_e` x3 | 12 Lab pairs | 1 | 1 |
-| format conversions | rgb8, argb8, YUV BT.709, BT.2020 | 0 | 0 |
-| composite | premultiply, unpremultiply, fade | 0 | 0 |
-
-\* inflated by a harness bug of mine — comparing an f64 field against an f32
-one. The real figure was 49.
-
-**Every u8 output path is now byte-exact against Rust.** The 50 residual
-differences are all in f32/f64 *intermediates* that are never rounded to a byte:
-
-- `CieLab.l` — 34 values, max absolute error **1.4e-14** on a 0..100 scale where
-  one u8 step of L\* is 0.39. Thirteen orders of magnitude below significance.
-  It comes from `f64::cbrt` against ganita's `pow(x, 1/3)` — different
-  algorithms, not a defect.
-- `Hsl.h` — 15 values, max error **1.5e-5 degrees** out of 360. The port is the
-  MORE accurate side here: it returns exactly 200.0 where Rust returns
-  200.0000152588.
-- one `delta_e_ciede2000` value, 1 ULP in f64.
-
-### What this exercise actually showed
-
-The `srgb_to_linear` result is the one worth keeping: **214 of 256 inputs were
-wrong, and the entire test suite was green.** Every hand-written assertion in
-`tests/color.tcyr` used a tolerance wide enough to swallow a 1-ULP error,
-because that is what a human writes when checking a colour conversion by eye.
-Only a bit-exact diff against the real oracle could see it.
-
-That is the argument for building the oracle FIRST. `cargo build` on `rust-old/`
-succeeds in under a second; this sweep is a few hundred lines. Doing it at the
-start of M7 would have caught `srgb_to_linear`, the Oklab NaN, the LUT3D
-rounding, the `linear_to_srgb` `i64::MIN`, and the `levels` NaN divergences in
-one pass, instead of over a dozen separate rounds of "one more issue".
+Making this a checked-in tool is the first item of 2.2.x in the roadmap. `rust-old/`
+is due to be deleted eventually, and this oracle, plus the golden vectors captured from
+it, is what has to outlive it.

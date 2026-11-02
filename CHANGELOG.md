@@ -21,7 +21,7 @@
   `cyrius deps --features spectral,hwaccel,gpu`, `cyrius.lock` resolved from scratch,
   all four bundles regenerated with `scripts/version-bump.sh`. Build, the full test suite
   (19 files, 1,921 assertions), lint (41 files, 0 warnings, 0 untracked deferrals),
-  bench, fuzz and `cyrius distlib --check` re-verified.
+  bench and `cyrius distlib --check` re-verified.
 - **Optional deps moved to their latest releases.**
   - prakash `2.11.0` → `2.15.0` (feature `spectral`; pins 6.7.18). 2.15.1 is not
     released yet.
@@ -30,14 +30,30 @@
   - Transitive pins moved with them: hisab `3.4.0` → `3.4.1`, sakshi `2.5.8` → `2.5.10`.
     samvada `1.0.1` and chitra `1.0.3` are unchanged.
 - **`lib/`:** 42 files updated, plus a new `lib/unicode/` (7 files) that the 6.7.18
-  `lib/bayan.cyr` includes. The lock records 71 files and 7 commit pins, each matching
-  its GitHub tag, and `cyrius deps --verify` reports 71 verified, 0 failed. The
-  `[deps] stdlib` list is unchanged. ai-hwaccel 2.5.6's sidecar adds `atomic`, but its
-  bundle includes `lib/atomic.cyr` itself and `cyrius deps` asks for nothing more.
-- **Bundles:** besides the version line and the rename above, the 6.7.18
-  `cyrius distlib` trims two sidecars and their `# Requires` blocks: `freelist` from
-  `ranga-hwaccel` and `math` from `ranga-spectral`. Both still arrive through other
-  leaves.
+  `lib/bayan.cyr` includes. The `[deps] stdlib` list is unchanged. ai-hwaccel 2.5.6's
+  sidecar adds `atomic`, but its bundle includes `lib/atomic.cyr` itself and
+  `cyrius deps` asks for nothing more.
+- **`lib/flags.cyr` and `lib/hashmap_fast.cyr` removed.** 6.7.18's `cyrius deps`
+  reports both as outside the declared footprint, so the resolve no longer vendors
+  them, and nothing includes either one. They were dropped with
+  `rm … && cyrius deps --lock`, and a CI-style resolve does not bring them back. The
+  lock records 69 files and 7 commit pins, each matching its GitHub tag, and
+  `cyrius deps --verify` reports 69 verified, 0 failed. The comment in
+  `src/simd_u8.cyr` that cited `lib/hashmap_fast.cyr:66` as the in-tree precedent for
+  hand-encoded `asm { }` now names the cyrius stdlib's copy, as does
+  `docs/development/port-mechanics.md`.
+- **Bundles:** besides the version line, the rename above and the `simd_u8.cyr`
+  comment, the 6.7.18 `cyrius distlib` trims two sidecars and their `# Requires`
+  blocks: `freelist` from `ranga-hwaccel` and `math` from `ranga-spectral`. Both still
+  arrive through other leaves.
+
+### Corrected
+
+- **There is no real fuzz harness.** `tests/ranga.fcyr` is still the 16-line `cyrius port`
+  scaffold stub: it includes no ranga module, calls an empty `fuzz_main` once and prints
+  "fuzz: ok". The "fuzz re-verified" lines in the 2.0.3, 2.0.4 and 2.1.0 entries meant
+  only that the stub ran. They have been removed from 2.0.4 and 2.1.0, and none of the 8
+  Rust fuzz targets is ported. Tracked in `docs/development/roadmap.md` (2.3.x).
 
 ### Known
 
@@ -45,9 +61,6 @@
   `cyrius distlib` reports `num_fft` as undefined in `ranga-spectral.cyr`. The name
   comes from prakash, 6.7.9 reported it too, and it matches the "undefined function
   'num_fft'" warning in the test run.
-- `cyrius deps` notes that `lib/flags.cyr` and `lib/hashmap_fast.cyr` are outside the
-  declared footprint. The resolve no longer vendors them, so they keep their earlier
-  content, and nothing includes either one. They are left in place and still locked.
 - `cyrius deps` still warns that stdlib `sakshi` overlaps the sakshi package hisab
   resolves. The kept stdlib snapshot is byte-identical to sakshi 2.5.10.
 
@@ -61,8 +74,7 @@
   `cyrius deps --features spectral,hwaccel,gpu`, `cyrius.lock` resolved from scratch,
   all four bundles regenerated with `scripts/version-bump.sh`. `src/` and `tests/` are
   untouched. Build, the full test suite (19 files, 1,921 assertions), lint (41 files,
-  0 warnings, 0 untracked deferrals), bench, fuzz and `cyrius distlib --check`
-  re-verified.
+  0 warnings, 0 untracked deferrals), bench and `cyrius distlib --check` re-verified.
 - **Optional deps moved to the releases that pin the 6.7.9 line.**
   - prakash `2.10.1` → `2.11.0` (feature `spectral`; pins 6.7.9)
   - mabda `4.1.7` → `4.2.0` (feature `gpu`; pins 6.7.5)
@@ -91,7 +103,7 @@
   `cyrius deps --features spectral,hwaccel,gpu` (the way CI resolves), `cyrius.lock`
   regenerated, all four bundles regenerated with `scripts/version-bump.sh`. `src/` and
   `tests/` are untouched. Build, the full test suite (19 files, 1,921 assertions), lint
-  (41 files, 0 warnings, 0 untracked deferrals), bench, fuzz and `cyrius distlib --check`
+  (41 files, 0 warnings, 0 untracked deferrals), bench and `cyrius distlib --check`
   re-verified.
 - **Optional deps moved to the releases that pin the 6.6.20 line.**
   - prakash `2.2.8` → `2.10.1` (feature `spectral`; pins 6.6.20)

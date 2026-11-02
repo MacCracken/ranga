@@ -6,4 +6,4 @@ Not decisions (those live in [`../adr/`](../adr/)) and not guides (those live in
 
 ## Items
 
-_Empty. Add a numbered entry (`001-kebab-case-title.md`) the first time the code has a non-obvious invariant a reader can't derive. Do not write entries for decisions — those are ADRs._
+- [001 — What mabda's native GPU path accepts](001-mabda-native-gpu-constraints.md): backends, entry points, error spaces, and the SPIR-V the native lowerer takes (as of mabda 4.2.0).

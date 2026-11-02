@@ -288,8 +288,9 @@ suite that exercises them; none of them documented upstream:
 - Produce every encoding with `llvm-mc -arch=x86-64 -show-encoding`. Never from
   memory: `paddusb` and `paddb` differ in one byte (`0xDC` vs `0xFC`) and the
   wrong one wraps instead of saturating.
-- In-tree precedents: `_fhm_probe16` (lib/hashmap_fast.cyr:66) for the SSE2
-  shape, `_sha_ni_compress_one` (lib/sigil.cyr:4871) for VEX-encoded AVX2.
+- Precedents in the cyrius stdlib (the toolchain's `lib/`; ranga vendors
+  neither file): `_fhm_probe16` (lib/hashmap_fast.cyr) for the SSE2 shape,
+  `_sha_ni_compress_one` (lib/sigil.cyr) for VEX-encoded AVX2.
 
 The scalar fallback is the *oracle*, not a consolation prize: write it first,
 then differentially test the asm against it across an exhaustive sweep. That is

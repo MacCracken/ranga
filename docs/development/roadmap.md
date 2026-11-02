@@ -1,761 +1,339 @@
 # ranga — Roadmap
 
-> Milestone plan through the Cyrius port. State lives in [`state.md`](state.md);
-> this file is the sequencing — what ships, in what order, against what
-> dependency gates. The detailed capability analysis, module map, and
-> internalizing list live in [`cyrius-port-plan.md`](cyrius-port-plan.md).
+> What is left to do and in what order. Live state is in [`state.md`](state.md). The
+> per-item parity inventory these milestones are drawn from is in
+> [`parity-rust-v-cyrius.md`](parity-rust-v-cyrius.md) (review of 2026-11-02, ranga
+> 2.1.1). Shipped work is recorded in the [CHANGELOG](../../CHANGELOG.md) and git
+> history. Non-obvious constraints are in [`../architecture/`](../architecture/).
+
+## Where things stand
+
+The port shipped as **2.0.0** and is at **2.1.1** on cyrius 6.7.18. The 2026-11-02 review
+of all 303 public Rust items found:
+
+- 193 at parity;
+- 5 improved on Rust;
+- 28 that diverge on purpose, with the reason written down;
+- 19 partial and 33 missing;
+- **25 that compute something different from Rust without a documented reason**.
+
+The verification surface is far behind Rust:
+- no fuzzing;
+- no property tests;
+- 35 of 134 benchmarks;
+- no examples;
+- no Cyrius consumer.
+
+Several of the original 2.0.0 criteria were never met, and they are carried below.
 
 ## Versioning
 
-`VERSION` stays **1.0.1** for the whole port and bumps to **2.0.0** at M8, when
-the Cyrius tree reaches parity with what Rust 1.0.1 shipped. `distlib` stamping
-`v1.0.1` in the meantime is correct — claiming 2.0.0 earlier would advertise a
-library that does not exist yet.
-
-This continues ranga's existing numbering with a major bump rather than resetting
-to 0.x, matching every AGNOS port (vidya 1.x→2.0.0, prakash 1.2.0→2.0.0, mabda
-1.0.0→2.0.0, ai-hwaccel 1.2.0→2.0.0, hisab 1.4.0→2.0.0) and prakash's practice of
-deferring the bump to the final milestone.
-
-_This file replaces the generic `v0.1.0 → v1.0` template the `cyrius port`
-scaffold wrote, which assumed a fresh project rather than a port._
-
-## Moving the cyrius pin to 6.6.5
-
-Nothing breaks at this bump, and the 6.6.5 cyrlint adds no new warnings or
-untracked deferrals here. cyrius 6.6.5 is not tagged yet, and nothing below
-can land against the pin until it is. The pin is 6.6.2 today, and this section
-lists only what 6.6.5 itself changes.
-
-- [ ] The *Lint* step's comment (`.github/workflows/ci.yml:67`) goes stale:
-      "`cyrius lint` takes ONE path". From 6.6.5 `lint` takes 1..N files, so
-      the form it replaced would now lint all 41. The per-file loop can stay.
-      See the cyrius CHANGELOG [6.6.5] entry "The whole CLI took flags as file
-      names, dropped flags written after the operand, and dropped extra
-      operands", which names ranga's CI.
-- [ ] At the bump, re-run `cyrius deps` — the aarch64 syscall peer moved
-      SYS_UNLINKAT 35 → 263, so an un-re-vendored peer's sys_unlink would run
-      nanosleep.
-
-## 2.0.0 criteria
-
-- [ ] Rust → Cyrius surface parity verified (function-level diff against `rust-old/`)
-- [ ] Test coverage at parity — 214 unit + 123 integration + 161 doctest assertions ported
-- [ ] All 134 benchmarks recorded in [`benchmarks-rust-v-cyrius.md`](../benchmarks-rust-v-cyrius.md)
-- [ ] All 8 fuzz targets ported to `tests/ranga.fcyr`
-- [ ] At least one downstream consumer green (rasa, tazama, aethersafta, soorat)
-- [ ] CHANGELOG entry for 2.0.0 naming the language change as the breaking change
-- [ ] Security audit pass (`docs/audit/YYYY-MM-DD-audit.md`)
-- [ ] `VERSION` → 2.0.0, distlib drift gate green
-
-## Milestones
-
-Full module map and difficulty ratings: [`cyrius-port-plan.md`](cyrius-port-plan.md) §6.
-
-### M0 — Port scaffold — ✅ shipped 2026-08-17
-
-- Benchmark history lifted out before `_port_move` swept `benches/`
-- `cyrius port` scaffold landed; 13,958 Rust lines moved to `rust-old/`
-- Manifest converted from the scaffold's binary shape to library shape
-  (`${file:VERSION}`, `[lib] modules`, `distlib` → `dist/ranga.cyr`)
-- `.gitignore` repaired — the port's move broke every root-anchored Rust rule,
-  leaving 7.6 GB of `rust-old/target/` unignored
-- Doc-tree per [first-party-documentation.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-documentation.md)
-
-### M1 — Foundation — in progress (183 assertions green)
-
-Settles the raw-byte-offset accessor pattern that every later module follows
-(plan §2). Automation learnings captured in
-[`port-mechanics.md`](port-mechanics.md).
-
-- [x] `src/error.cyr` — 8 error codes + `is_err`/`is_ok`, plus the Rust-semantics
-      shims `_rg_pow`/`_rg_exp`/`_rg_cbrt`/`_rg_sin`/`_rg_cos`. 37 assertions.
-- [x] `src/bytevec.cyr` — the `Vec<u8>` the stdlib lacks (plan §3 item 2), on
-      `fl_alloc`/`fl_free` so a 1080p frame is one mmap each way.
-- [x] `src/pixel.cyr` — `PixelFormat` (6 formats, overflow-checked sizing),
-      `PixelBuffer`, `PixelView`/`PixelViewMut`, `BufferPool` (best-fit).
-      102 assertions.
-- [x] `src/color.cyr` — **complete.** sRGB transfer, `Srgba`/`LinRgba`/`CieXyz`/
-      `CieLab`/`Hsl`/`Cmyk`/`Oklab`/`Oklch`, sRGB↔XYZ, XYZ↔Lab, Display P3,
-      `color_temperature`, Delta-E CIE76/CIE94/CIEDE2000. 108 assertions,
-      including the Sharma et al. CIEDE2000 reference pair at 2.0425.
-- [ ] `src/constants.cyr` — shared EPS and matrices, once a second module needs them.
-
-Two silent-corruption traps hit here and written up in
-[`port-mechanics.md`](port-mechanics.md): untyped f32 operands emit integer
-multiplies, and decimal float literals past ~9 significant digits parse wrong
-(filed upstream as
-`cyrius/docs/development/issues/2026-08-17-decimal-float-literal-silent-precision-loss.md`).
-
-### M2 — Pixel ops — ✅ complete (936 assertions green across the port)
-
-- [x] `src/composite.cyr` — all 13 fns: premultiply/unpremultiply, apply_mask,
-      dissolve/fade/wipe, fill_solid/fill_checkerboard, three gradients,
-      composite_at + composite_at_argb. 159 assertions, 13 doctests.
-- [x] `src/histogram.cyr` — all 5 fns plus the `Hist` record standing in for
-      `Vec<f64>`. 150 assertions, 5 doctests.
-- [x] `src/transform.cyr` — `Affine` (+ translate/scale/rotate/then/apply/inverse/
-      is_identity), `ScaleFilter`, crop, resize (nearest/bilinear/bicubic), both
-      flips, `affine_transform`, `Perspective` (+ `from_quad`'s 8×8 Gaussian
-      elimination with partial pivoting), `perspective_transform`.
-      148 assertions; 16/16 mutants caught.
-- [x] `src/filter_point.cyr` — 13 per-pixel fns: brightness, contrast,
-      saturation, levels, curves, grayscale, invert, hue_shift, color_balance,
-      vibrance, channel_mixer, threshold, auto_white_balance. 112 assertions;
-      17/18 mutants caught.
-- [x] `src/filter_kernel.cyr` — 10 neighbourhood/generative fns: gaussian_blur,
-      box_blur, unsharp_mask, median (Huang), bilateral, vignette, apply_lut3d
-      (+ `Lut3d` trilinear), noise_gaussian, noise_salt_pepper, flood_fill
-      (scanline). 120 assertions; 17/19 mutants caught.
-
-`filter.rs` (2007 lines, 23 fns) was split into a point half and a kernel half,
-matching prakash's split of `ray/mod.rs` — Cyrius `src/` is flat and one file
-that size is unwieldy.
-
-First half fanned out to agents (two porters + two adversarial verifiers), which
-found a use-after-free in the composite tests and four histogram assertions that
-passed against deliberately broken code. The second half was ported inline after
-three consecutive API 529 failures made the agent path unreliable.
-
-### M3 — SIMD modules — scalar parity ✅ (1,119 assertions green across the port)
-
-- [x] `src/blend.cyr` — `BlendMode` (12 modes), `blend_pixel`,
-      `blend_pixel_argb`, `blend_row_normal` (+ argb variant), `blend_row`.
-      87 assertions; 14/18 mutants caught, the other 4 provably unobservable.
-- [x] `src/convert.cyr` — all 14 fns: BT.601/709/2020 in both directions,
-      NV12 both ways, and the six interleaved/f32 format converters.
-      96 assertions; 17/17 mutants caught.
-- [x] `src/simd_u8.cyr` — plan §3 items **3 and 5**: hand-encoded saturating u8
-      add/sub (`paddusb`/`psubusb`), packed unsigned min/max (`pminub`/`pmaxub`),
-      and a masked lane select. Every encoding produced by `llvm-mc`, every
-      primitive differentially tested against its own scalar fallback over an
-      exhaustive input sweep. 34 assertions.
-- [x] `brightness` vectorised end-to-end — 4 pixels per iteration with an alpha
-      mask-and-restore (paddusb cannot skip a lane), plus a scalar tail. Proven
-      to agree with the scalar path on a deliberately non-multiple-of-4 buffer.
-- [x] `_sx_luma_row_sse2` — pmaddwd, 2 px/iter, the whole loop inside one
-      `asm { }` block with branch displacements taken from `as`/`objdump`.
-      Differentially tested against an independent scalar reference with
-      DIFFERENT values per lane, across all three coefficient standards.
-      Wired into `_cv_y_row`, `grayscale` and `threshold` — one kernel, four
-      call sites.
-- [x] `invert` — vectorised with the pass-1 primitives, no new assembly:
-      `255 - c` on a byte IS a saturating subtract.
-- [x] `_sx_blend_row_sse2` — Porter-Duff source-over, 2 px/iter.
-      **46.70 µs → 1.87 µs (25×), now 0.5× Rust** — i.e. faster than the Rust
-      original, which is the first benchmark where that is true. Proven
-      byte-identical to the scalar path over 257 px × 5 opacities, and confirmed
-      to actually execute by forcing the scalar path (49.8 µs).
-- [ ] `_cv_yuv_row_to_rgba` — got a 1.43× loop hoist but no kernel yet.
-      Plan §3 item 4 (256-bit AVX2) sits behind it.
-
-**int→f32 probe: no cheap win, closed.** `f32_from(f64_from(n))` is cvtsi2sd +
-cvtsd2ss; there is no `cvtsi2ss` path in the compiler and mabda's
-`native_int_to_f32_bits` is the same two-step. Measured in the blur inner shape:
-`load8` alone 1 ns, the full convert-and-multiply-add 2 ns — so eliminating the
-conversion entirely would at best halve the blur, leaving it ~10× off. The
-remaining blur gap is Rust **auto-vectorising** a loop Cyrius runs scalar, not
-conversion overhead. Closing it needs a SIMD blur kernel, not a cheaper cast.
-
-⚠ **A correct SIMD path is invisible to output testing.** Mutating the group
-count so fewer pixels take the vector path leaves every assertion passing,
-because the scalar fallback agrees by construction. These tests prove the paths
-AGREE; proving which one *ran* needs a benchmark.
-
-**The technique that settles it:** force the scalar path (set `pairs = 0`) and
-re-measure. `blend_row_normal` went 1.87 µs → 49.8 µs, which is proof the kernel
-executes. Do this once per kernel — it costs a minute and is the only evidence
-that a vector path is not silently dead.
-
-Not fanned out to agents, per `port-mechanics.md` — and the shift-direction bug
-below is exactly why.
-
-⚠ **Shift direction is per-call-site, and Cyrius spells it backwards from most
-languages**: `>>` is LOGICAL, `>>>` is ARITHMETIC. Which is correct depends on
-the signedness of the Rust operand — xorshift shifts a `u64` so `>>` is right,
-while the YUV inverse shifts an `i16` whose `(U-128)` is genuinely negative, so
-`>>>` is required. Using `>>` there zero-filled a negative product into a large
-positive and blue came back 255 instead of 0. Neither answer generalises; check
-the Rust operand type at every shift.
-
-### M4 — ICC ✅
-
-`src/icc.cyr` (1,018 lines), `tests/icc.tcyr` (169 assertions). **Both** profile
-parsers are ported, not just the matrix/TRC one:
-
-- **`IccProfile`** — the matrix/TRC form. Tag table, `curv` tags (count 0 =
-  linear, 1 = u8Fixed8 gamma, else a u16 table), `para` tags (all five function
-  types), the column-major primaries matrix, and `srgb_v2_profile`.
-- **`IccLutProfile`** — the `A2B0` LUT form, `mft2` (16-bit) and `mft1` (8-bit),
-  with per-channel input curves and trilinear interpolation through a 3D CLUT.
-  This was nearly missed: it is a second, independent parser sharing only the
-  header and tag-table code with the first, and the roadmap's carried-forward
-  list had it filed as "coverage currently minimal" rather than as unported
-  surface. rust-old's doc comment advertises `mAB ` (v4) support that its match
-  arms do not implement; the port preserves the actual behaviour and rejects
-  `mAB `, with a test pinning that so it reads as deliberate.
-
-**This is the one module whose input is untrusted** — every other module
-consumes buffers ranga itself produced. Every multi-byte read is big-endian and
-bounds-checked, the tag count is capped at 1024, and the LUT grid is capped at
-64 (an unchecked 255 would ask for 397 MB from a single byte).
-
-**Mutation testing: 38 mutants, 34 killed.** The pass was worth more here than
-anywhere else so far — the first round killed only 12 of 17 and the survivors
-were not near-misses but *whole unexecuted paths*: the generated sRGB profile
-only ever emits `curv` with count 1, so five of the six curve types and the
-entire table branch had no coverage at all despite the suite passing. Two
-further rounds found an assertion tolerance loose enough to hide a 13% error,
-and three fixtures whose parameters made the mutant and the original agree by
-coincidence (`e == f`, `in_entries == out_entries`, a value that clamped to the
-same bound either way). The four documented survivors are recorded in the module
-header; all are clamps whose wrong value is multiplied by zero — real
-protections against a heap over-read, invisible to any output assertion.
-
-### M5 — External deps ✅
-
-`src/spectral.cyr` (58 assertions) over **prakash 2.2.3**, `src/hwaccel.cyr`
-(48 assertions) over **ai-hwaccel 2.3.17**.
-
-**Both are OPTIONAL, matching the Rust line.** `spectral` and `hwaccel` were
-non-default cargo features (`default = ["simd"]`), so the port gates them the
-same way: `[features]` + `optional = true` deps, each with its own `[lib.X]`
-bundle profile. Consumers of the core bundle never clone prakash or ai-hwaccel —
-transitive feature tables are not parsed, so an optional dep stays inert
-downstream.
-
-**The re-exports needed no code.** `rust-old/src/spectral.rs` is mostly a
-`pub use` block naming 18 prakash items. Cyrius has a flat namespace and links
-the bundle whole, so all 18 are already callable; re-declaring them would be a
-collision, not a re-export. What survived porting is the six convenience
-functions and the two `From` conversions — the only part that was ever real
-code.
-
-**Two allocators meet at the spectral seam.** prakash allocates with the bump
-allocator and never frees; ranga's `CieXyz` uses `fl_alloc`/`fl_free`. Every
-conversion copies rather than aliasing, even though the layouts are identical
-(both 24 bytes, x@0 y@8 z@16) — an alias would work right up until the first
-free. The tests assert the layout agreement *and* the pointer distinctness, so
-the claim in the comment is checked rather than trusted.
-
-**`Option<u32>` became a sentinel.** ai-hwaccel encodes "not reported" as
-`PROFILE_NONE` (-1). That distinction is load-bearing: a GPU idling at 0% and a
-GPU whose driver exposes no counter are different facts, and the offload policy
-branches on which one it has. The port carries the sentinel through rather than
-flattening it, with `hw_report_has_utilization` / `_has_temperature` as the
-`is_some()` equivalents.
-
-**The Rust hwaccel tests asserted nothing** — `let _ = report.has_gpu;` three
-times over, because a CI box has no GPU and the assertions were unwritable. That
-left the five-branch offload decision completely untested. The port splits the
-policy out of the probe (`hw_should_use_gpu_report` takes a report instead of
-reading hardware), so every branch is now reachable from a synthetic report and
-the crossover, VRAM and utilisation rules are all pinned.
-
-⚠ **A dep bundle silently overrode three of ranga's own functions.** Including
-`lib/hisab.cyr` — which prakash's bundle references for `num_fft` — produced
-three duplicate-function warnings, and Cyrius resolves duplicates as LAST
-DEFINITION WINS. hisab's four-argument `premultiply_alpha(r, g, b, a)` replaced
-ranga's one-argument `premultiply_alpha(buf)`; every existing call site would
-have passed a PixelBuffer where four doubles were expected. hisab is only needed
-by prakash's `wave_pattern`, which this bridge never calls, so it is not
-included and `num_fft` links as an unreachable reference. **Read the duplicate
-warnings from `cyrius distlib` — they are the only signal.**
-
-**Mutation testing: 18 mutants, 17 killed.** The survivor is equivalent —
-`has_utilization` is redundant while the sentinel is negative, since `-1 > 90`
-is false either way — and is kept because it states the intent Rust spelled with
-`if let Some`. One mutant exposed a genuinely under-specified helper:
-`_hw_bytes_to_mb(-1)` returns 0 with or without its negative guard, because
-integer division truncates toward zero, so the test now pins a negative larger
-than a megabyte.
-
-**Filed upstream, and FIXED in 6.5.29.** Profile `.deps` sidecars were written
-empty for any project following the documented "source files only need project
-includes" convention — the include-scan had nothing to find. sit filed the same
-defect from the opposite direction (a sidecar that never appeared at all) and
-located it, explicitly as a hypothesis, in the path derivation; the measured
-root cause was an empty `req_leaves`, and the path derivation was innocent. All
-four of ranga's sidecars are populated at the 6.5.29 pin.
-
-### M6 — GPU ✅
-
-`src/gpu_pipeline.cyr` — the fourteen public operations and the wiring that
-makes the GPU feature callable. **99 assertions, HW-verified on AMD Cezanne.**
-Eleven run natively; `gpu_blend`, `gpu_noise_gaussian`, `gpu_gaussian_blur` and
-bilinear `gpu_resize` report `RG_GPU_ERR_UNSUPPORTED` and have complete WGSL for
-the wgpu path.
-
-**A 36-agent audit of the new layer found six real defects in code that passed
-56 assertions on the first run.** Two would have bitten a consumer directly:
-
-1. **`gpu_gaussian_blur` returned an error code from a slot that carries a
-   buffer.** Rust's is `-> Result<PixelBuffer>` — it PRODUCES, where blend and
-   noise mutate in place. Returning `RG_ERR_OTHER` (-8) meant a caller written
-   to the documented convention saw non-zero, took the success branch, and
-   `pixel_buffer_data(-8)` dereferenced it. Now returns 0, like `gpu_resize`'s
-   unsupported path, and the test pins it.
-2. **The shader-module cache was process-global.** A compiled module is staged
-   in a GTT buffer object on the context's own DRM fd, and mabda's dispatch
-   checks only that the handle is non-null — so a second context would dispatch
-   the first one's modules, and after the first was freed, against a closed fd.
-   Rust kept its caches on `GpuContext`; the cache now lives there too and is
-   released with the device. A test creates a second context after freeing the
-   first and asserts it rebuilds.
-3. **`gpu_crop` diverged from BOTH Rust and ranga's own CPU `crop`.** Rust takes
-   `(left, top, right, bottom)` and CLAMPS; ranga's `transform.cyr` crop takes
-   the same four and clamps the same way. This took `(sx, sy, dw, dh)` and hard-
-   rejected out-of-range input, so moving a call between CPU and GPU crop would
-   have silently changed what the arguments meant.
-4. **`gpu_dissolve` and `gpu_wipe` compared pixel COUNT, not shape.** Rust
-   guards width and height separately. 4x1 against 2x2 passed, and wipe then
-   reflowed the source into a different raster — a silently wrong composite
-   rather than `DimensionMismatch`.
-5. **The two error spaces overlap and were being mixed.** `RG_GPU_ERR_FORMAT` is
-   -4 and so is `RG_ERR_UNSUPPORTED_CONVERSION`; `RG_GPU_ERR_BUFFER_OP` is -3
-   and so is `RG_ERR_BUFFER_TOO_SMALL`. Guard paths returned `err_out`'s value
-   straight into a slot documented as `RG_ERR_*`, handing callers a plausible
-   code from the wrong space. Everything now goes through `gpu_error_to_ranga`.
-6. **A null context was dereferenced** where every sibling in the feature
-   returns a coded `RG_GPU_ERR_NO_ADAPTER`.
-
-**And five assertions that could not fail.** Saturation was tested only at
-factor 0 — the one value where it collapses to bare luminance, making the
-expected constants bit-identical to grayscale's and the factor entirely
-unconstrained. Brightness/contrast only at the identity, which says nothing
-about which param is which. Wipe only at 0 and 1, neither of which exercises the
-line. Crop with `top = 0` throughout, leaving `src_y` wiring untested. And every
-dispatch under 256 pixels, so `_gp_groups`' div_ceil was never asked a real
-question — a wrapper hardcoding one workgroup would have passed the entire
-suite. All five now have inputs that distinguish right from wrong.
-
-⚠ The lesson is the same one M7 taught: **a green suite is evidence about the
-tests, not the code.** These 56 assertions passed on the first run against code
-with a dereference-a-negative-integer bug in it.
-
-### M6 — GPU (superseded; foundation notes below)
-
-`src/gpu_context.cyr` + `src/gpu_buffer.cyr` (43 assertions, **round-trip
-HW-verified on AMD Cezanne**). `gpu_shaders` and `gpu_pipeline` — the 14
-operations and `GpuChain` — are NOT started; see the shader-format fork below.
-
-**mabda is at 4.0.9, not the 1.0.0 the plan assumed.** Three backends behind one
-public API: native AMD (amdgpu/GFX9), native NVIDIA (nouveau/SM75), and wgpu.
-
-⚠ **"The public API does not change across backends" applies to a NARROWER set
-of entry points than it sounds.** The `gpu_ctx_device`/`gpu_ctx_queue`
-accessors, and every helper taking a `device` — `create_storage_buffer`,
-`read_buffer`, `compute_pipeline_new` — are **wgpu-path only**. The native
-context reuses the same struct with different field meanings: offset +16 holds a
-GEM buffer-object handle where wgpu holds the device. The backend-agnostic
-surface is the one taking the CONTEXT — `gpu_buffer_create`/`_write`/`_read`/
-`_release`, `gpu_compute_dispatch` — which dispatches through the backend's slot
-table. The first draft of this module used the wgpu helpers and would have
-called through an uninitialised function table on native hardware.
-
-⚠ **Every mabda context constructor returns a TAGGED RESULT.** Dereferencing it
-as a context does not fault — it yields plausible garbage. The first version
-reported a context created successfully with `backend=unknown`, and segfaulted
-only on the *next* run. `payload()` after `is_err_result()` is mandatory, and
-the test suite asserts the backend name is not "unknown" specifically to catch
-a regression here.
-
-⚠ **mabda's `compute_pipeline_new` does not fit ranga's layouts** — it builds a
-fixed BGL (read-write at 0, read-only at 1..N, no uniform) where all three of
-ranga's end in a uniform and two want read-only first. Rust used
-`ComputePipeline::with_layout`; the Cyrius port has no equivalent, so
-`_gc_pipeline_with_layout` assembles one from mabda's public `bglb_*` builder.
-
-**THE FORK — shader format.** `_backend_native_shader_module_create` accepts
-**only SPIR-V**; WGSL and even pre-compiled GFX9 return 0. `gpu_shader_module_create`
-forwards GFX9 for native AMD, which that handler then rejects. So:
-
-- **wgpu** takes ranga's 1,047 lines of WGSL as-is, but requires the consumer to
-  compile in `object;` mode and be entered from a C launcher building a wgpu
-  function table. mabda deprecated AMD-on-wgpu at v4.0.1.
-- **native** works on this hardware (mabda's own e2e programs are HW-verified on
-  Cezanne) but needs SPIR-V, and **there is no WGSL→SPIR-V compiler anywhere in
-  the stack** — mabda's e2e programs hand-emit SPIR-V word by word in Cyrius.
-
-**DECIDED: native via mabda, wgpu as the automatic fallback.** wgpu is a
-backend *inside* mabda, not an alternative to it — ranga targets mabda's API and
-mabda picks the backend. So the shader layer must carry BOTH forms, selected on
-`backend_kind` at runtime: SPIR-V for the native backends, WGSL for the wgpu
-fallback. The WGSL half is a near-verbatim transcription of the Rust; the
-SPIR-V half is new work, specified below.
-
-#### What the native lowerer accepts — the binding constraint
-
-ranga can only emit SPIR-V that `_spirv_lower_one_instr` turns into GFX9.
-Enumerated from the dispatch, this is the whole set:
-
-- **arithmetic** IAdd, FAdd, ISub, FSub, IMul, FMul, UDiv, SDiv, FDiv, UMod,
-  SRem, SMod
-- **bitwise** And, Or, Xor, shifts
-- **compare** FOrd{Equal,NotEqual,LessThan,GreaterThan,…}, ULessThan, SLessThan
-- **convert** ConvertSToF, ConvertUToF, ConvertFToS, FConvert
-- **memory** Load, Store, AccessChain
-- **composite** CompositeConstruct, CompositeExtract
-- **control** Label, Branch, BranchConditional, SelectionMerge, Select, Return
-- **ExtInst** GLSL450 (sqrt, floor, …)
-
-⚠ **`OpLoopMerge` and `OpPhi` both return `LOWER_ERR_CONTROL_FLOW`.** Straight-line
-code and if/else only — **no loops**. Thirteen of ranga's fourteen operations are
-per-pixel and fit; `gpu_gaussian_blur` convolves over a dynamic radius and does
-not. Blur either unrolls to a fixed set of radii, or takes the wgpu fallback,
-or stays on the CPU — that is a smaller decision to make when it is reached,
-not a blocker for the other thirteen.
-
-⚠ **f64 is gated off on native** (`MABDA_NATIVE_F64 = 0` until mabda's F.7): a
-SPIR-V module using f64 is rejected up front. ranga's GPU kernels are f32
-throughout, so this costs nothing today — but it rules out reusing the f64
-colour paths from `color.cyr` verbatim.
-
-#### Emitter design
-
-Hand-writing SPIR-V per kernel is not viable: mabda's own e2e example spends
-**125 lines of raw `store32`** on `data[id.x] = id.x`, the simplest kernel there
-is. ranga needs `src/gpu_spirv.cyr` — a builder that owns a word buffer and an
-id counter and exposes `spv_type_int` / `spv_type_vec` / `spv_constant` (all
-interned), `spv_emit(op, …)`, and the standard compute preamble
-(OpCapability Shader, OpMemoryModel Logical GLSL450, OpEntryPoint GLCompute,
-OpExecutionMode LocalSize, the Block/ArrayStride/Binding/DescriptorSet
-decorations `_spirv_check_array_strides` requires). Each kernel is then a
-function against that builder rather than a wall of offsets.
-
-`spirv_validate_stream` and `spirv_find_entry_point` are already in mabda's
-surface and give the emitter a free self-check: every kernel can assert its own
-module parses before it is ever handed to the GPU.
-
-#### ✅ The emitter landed — and the whole native path is proven end to end
-
-`src/gpu_spirv.cyr` (413 lines), `tests/gpu_spirv.tcyr` (53 assertions).
-**HW-verified on AMD Cezanne**: ranga emits a 560-byte SPIR-V module, mabda
-compiles it SPIR-V → GFX9, it dispatches, and all 256 lanes come back correct.
-The remaining thirteen kernels are now ordinary code against this builder rather
-than walls of `store32`.
-
-**Four buffers, concatenated at finish.** A SPIR-V module has a fixed section
-order — capabilities, memory model, entry point, execution modes, then ALL
-annotations, then ALL types/constants/globals, then function bodies. But a
-kernel discovers the types it needs *while* emitting its body, so the builder
-keeps the sections apart and joins them in `spv_finish`.
-
-⚠ **mabda's parser does not enforce section order.** Swapping the annotation and
-type sections passes `spirv_validate_stream`, rebuilds every table, compiles to
-GFX9, and *runs correctly on the GPU* — the mutation for it survived an
-otherwise complete suite. It is still an invalid module and a stricter consumer
-may reject it, so `tests/gpu_spirv.tcyr` walks the instruction stream itself and
-asserts the section boundaries directly rather than trusting the lenient parser.
-
-**Mutation testing: 12 mutants, 12 killed.** The ones worth naming, because each
-is a whole-module corruption that produces a *plausible* file: a wordcount that
-omits its own header word (every following instruction reinterpreted), an id
-bound off by one (the highest id reads as out of range), a literal string
-dropping its NUL padding word (`"main"` is TWO words, not one — four chars plus
-a mandatory terminator), and each of the four interning keys being ignored,
-which silently declares a duplicate type where SPIR-V demands exactly one.
-
-#### ✅ The five per-pixel kernels
-
-`src/gpu_kernels.cyr` (347 lines), `tests/gpu_kernels.tcyr` (26 assertions).
-`invert`, `grayscale`, `fade`, `brightness_contrast`, `saturation` — all five
-**HW-verified on AMD Cezanne against an f32 oracle, byte-exact on every pixel**.
-
-⚠ **THE BRANCH SHAPE IS NOT INTERCHANGEABLE, AND THE FAILURE IS SILENT.** The
-WGSL guard is `if idx >= count { return; }` followed by the body. Emitted that
-way — return inside the selection, body after the merge label — the module
-compiles to a **non-zero shader handle** and dispatches with **rc = 0**, and
-writes nothing whatsoever. There is no diagnostic anywhere. mabda's own
-`programs/native_spirv_divergent_if_e2e.cyr` is the reference shape: the body
-goes in the THEN block, that block ends with `OpBranch` to the merge, and the
-merge block holds the function's only `OpReturn`. So the guard is inverted to
-`if (count > idx) { body } return`. The comparison is `count > idx` rather than
-`idx < count` because mabda's binop map covers UGreaterThan and
-UGreaterThanEqual but **not ULessThan**.
-
-⚠ **No `OpBitcast` in the supported set.** A params word that must be read both
-as a `count` and as an f32 needs two differently-typed arrays over the *same*
-memory, so the params buffer is bound twice — three bindings, two buffers.
-
-⚠ **The oracle must be f32, not f64.** Computed in f64, the expected values
-agree on most inputs and then disagree on the ones near a rounding boundary —
-brightness/contrast on two of five pixels — which reads exactly like a kernel
-bug and is not one.
-
-⚠ **grayscale disagrees with ranga's CPU path, and did in Rust too.** The CPU
-uses BT.601 integer weights (77/150/29 >> 8); the GPU shader uses BT.709 floats
-(0.2126/0.7152/0.0722). On (200, 100, 50) that is 0x7C against 0x76. Both are
-preserved as-is — reconciling either side would change output the Rust line
-produced. The test asserts the gap explicitly so it reads as inherited rather
-than accidental.
-
-#### ✅ Five more: dissolve, wipe, crop, flip_horizontal, flip_vertical
-
-**Ten of fourteen operations now run on the native backend**, all HW-verified on
-AMD Cezanne against exact expected output.
-
-⚠ **Two more things the compiler silently rejects.** Both surfaced as
-`gpu_shader_module_create_spirv` returning 0 with no diagnostic, and both were
-isolated by bisecting a working kernel rather than guessed:
-
-- **A selection nested inside a selection does not compile.** Two SEQUENTIAL
-  selections do, and a 2D workgroup using `gid.y` does. So the WGSL's 2D bounds
-  test `if x >= w || y >= h { return; }` cannot be written as two nested ifs.
-- **`OpSelect` does not compile either**, despite mabda's lowerer having a case
-  for it — it is dispatched but not selectable on GFX9. That rules out the
-  obvious workaround of reducing two booleans to 1/0 and multiplying.
-
-There is no OpLogicalAnd in the binop map either, so conjunction is built from
-arithmetic that does survive. For `b1 > v1 && b2 > v2` on unsigned values below
-2^31, form `d = (b1 - 1 - v1) | (b2 - 1 - v2)`: each term underflows and sets
-bit 31 exactly when its condition fails, so one comparison against `0x80000000`
-tests both. `wipe` uses this.
-
-**The geometry kernels moved to 1D indexing.** crop, flip_horizontal and
-flip_vertical dispatch flat and recover x and y with UMod and UDiv, so they need
-ONE bound instead of two and avoid the conjunction entirely. The WGSL's 16x16
-workgroup was for cache locality on wgpu and the fallback keeps it.
-
-**Mutation testing: 11 mutants, 11 killed** — after three rounds of fixing the
-TESTS, not the code. `dissolve` mixes all four channels including alpha, and the
-first data set had alpha 0 on both sides, so dropping the alpha channel passed.
-The guards compare strictly, and a one-past write lands in 64 KiB alignment
-slack unless an explicit sentinel sits past `count`. And the sentinel has to
-differ between source and destination: with the same value in both, a one-past
-*copy* writes an identical word and stays invisible.
-
-#### ✅ The WGSL fallback — all 21 sources
-
-`src/gpu_shaders.cyr` (877 lines), `tests/gpu_shaders.tcyr` (59 assertions).
-Every WGSL source from the Rust line, for the wgpu backend.
-
-**Machine-transcribed, not retyped.** A script extracted each source verbatim
-from `rust-old/src/gpu/shaders.rs` and escaped it for Cyrius, one WGSL line per
-`str_builder_add_cstr`, so a divergence between the two lines cannot come from a
-typo. The four WGSL lines too long for the 120-column limit are emitted in
-several calls; the concatenation is byte-identical, only the emission is split.
-The tests assert byte LENGTHS against the Rust originals, which is what catches
-a dropped or doubled line.
-
-**Twenty-one sources, not fourteen.** `gpu/mod.rs` re-exports fourteen
-operations, but shaders.rs also carries LUT3D, HUE_SHIFT, COLOR_BALANCE,
-RGBA_TO_Y_BT601 and the two blur passes, which the pipeline drives internally.
-Dropping the ones without a public wrapper would have silently narrowed what the
-fallback can do.
-
-⚠ **No hardware test is possible for this module**, and the tests say so rather
-than implying otherwise. mabda's wgpu backend requires the consumer to compile
-in `object;` mode and be entered from a C launcher that builds a wgpu function
-table — a `.tcyr` run has no launcher. So the WGSL is checked structurally, and
-`gpu_context_from_launcher` is the entry point for a consumer that has one.
-
-**Every native kernel has a fallback, and every native-blocked one is complete
-here.** The suite asserts both directions, so adding a native kernel without its
-WGSL fails the build. `resize_bilinear`, `blend` and both blur passes — the ones
-the native path cannot take — are present in full. Blur's WGSL genuinely loops,
-which is exactly why `OpLoopMerge` blocks it natively; the test asserts that too.
-
-#### ✅ resize_nearest — and where the native path runs out
-
-**Eleven of fourteen operations run on the native backend**, all HW-verified.
-The remaining three are blocked by concrete mabda limits, filed in
-**mabda's own repo** at
-`docs/development/issues/2026-08-19-native-spirv-compile-limits.md` — it is a
-mabda defect, and cyrius does not own mabda.
-
-`resize_nearest` landed. The WGSL clamps with `min(gx * src_w / dst_w, src_w - 1u)`;
-that min is **provably redundant** once the bounds guard has run, since
-`gx <= dst_w - 1` forces the integer division below `src_w`. Dropped rather than
-reproduced, because there is no unsigned min in the ext-inst set and faking one
-through floats would add rounding to an exact integer path.
-
-⚠ **`OpFDiv` does not compile.** Integer `UDiv`/`UMod` are fine. Isolated by
-bisection: a kernel doing nothing but one float division returns 0, while the
-same kernel with four texel loads, twelve lerps and a full unpack/pack round
-trip compiles. Both reciprocals are now computed host-side and passed as params.
-
-⚠ **`resize_bilinear` emits a valid module that mabda cannot lower.** This is
-NOT an emitter defect and the test suite says so explicitly:
-`spirv_validate_stream` accepts it, every table rebuilds, the id bound is 201 —
-and a deliberately-grown kernel compiles at **229 ids** and fails at **254**, so
-size is not the obstacle. Every individual construct compiles in isolation. What
-is left is live-value pressure from four independent texel addresses; holding
-the texels packed and extracting one channel at a time (peak liveness ~20 → ~12)
-did not lower it enough. The test pins the current state — valid module, under
-the cap, does not compile — so the suite reports the day mabda can take it
-rather than leaving a silently dead kernel in the tree.
-
-**Still blocked, and why:** `resize_bilinear` and `blend` (13 modes, larger
-still) on register pressure; `gaussian_blur` separately on `OpLoopMerge` and
-`OpPhi` being rejected outright.
-
-#### Per-pixel kernels
-
-**Mutation testing: 15 mutants, 15 killed.** Three needed better inputs rather
-than better assertions: the clamps inside `pack_rgba` are unreachable from any
-kernel that clamps in its own maths, so `fade` at 2.0 (mid-grey lands on exactly
-256, whose low byte is 0 — the brightest input would come out BLACK) and at -1.0
-drive them; and the bounds guard's off-by-one is invisible without a sentinel
-element past `count`, since the buffer is 64 KiB-aligned and a one-past write
-lands in slack.
-
-### M6 — GPU (original plan)
-
-`gpu_shaders`, `gpu_buffer`, `gpu_context`, `gpu_pipeline` against mabda's
-**native** backends; wgpu is the fallback and leaves mabda's tree at v5.1.
-
-### M-perf — first performance pass ✅
-
-Benchmark harness built (`tests/ranga.bcyr`, 35 CPU benchmarks with names
-matching the Rust criterion series) and
-[`benchmarks-rust-v-cyrius.md`](../benchmarks-rust-v-cyrius.md) filled in.
-
-**Median 10.6x slower than Rust, range 3.8x-79.9x.** Two fixes landed from
-reading the spread rather than the median:
-
-- **Flat hot loops.** Cyrius leaves general inlining off (`_INLINE_OK`), so
-  helper calls in a per-pixel path are real calls. Inlining the blur inner loops
-  gave **2.1x**.
-- **`pixel_buffer_uninit`.** `fl_calloc` zeroes byte-at-a-time over already-zero
-  mmap pages — 369x slower than the allocation itself. Filed upstream; the
-  consumer workaround is 1.35x-1.75x on the memcpy-bound ops and should be
-  reverted if the stdlib fix lands.
-
-**Second pass — first vector kernels landed:**
-
-- `rgba_to_yuv420p` **2.10x** — new `_sx_luma_row_sse2` (pmaddwd, 2 px/iter),
-  wired into `_cv_y_row` so all three colour standards benefit.
-- `invert` **2.33x** — no new assembly; `255 - c` is a saturating subtract, so
-  the primitives from the first pass covered it.
-- `yuv420p_to_rgba` **1.40x** — pure loop hoist, chroma row pointers out of the
-  inner loop.
-
-**Third pass — one kernel, four call sites.** `_sx_luma_row_sse2` turned out to
-serve `grayscale`, `threshold` and all three YUV forward converters, because
-they share the same integer luma shape:
-
-- `threshold` **1.62x**, `grayscale` **1.50x** — luma vectorised, scatter left
-  scalar.
-
-**Median is now 8.6x (from 10.6x), worst case 46.0x (from 79.9x).**
-
-Still open, in priority order:
-
-1. **`crop` 46.0x and `flip_vertical` 23.9x** — still `memcpy`-bound and still
-   the worst ratios. The real fix is upstream (`fl_calloc`); the consumer
-   workaround has already been applied and this is what remains.
-2. **The blurs at 21.4x** are now the largest ABSOLUTE cost (~396 ms each).
-   Rust's blur is *also* scalar f32 at default features, so this is pure
-   language overhead, and the likely culprit is that
-   `f32_from(f64_from(load8(..)))` is two conversions per sample where Rust's
-   `as f32` is one. Worth investigating a direct int->f32 path before more
-   assembly.
-3. **`blend_row_normal` 12.9x** — needs a per-pixel alpha broadcast (pshuflw)
-   plus a vector div255, materially more complex than the luma kernel.
-4. Plan §3 item 4 (256-bit AVX2) sits behind all of the above.
-
-### M7 — Parity ✅
-
-Full surface audit against `rust-old/`, module by module, every claimed gap
-adversarially re-checked. Report:
-[`parity-rust-v-cyrius.md`](parity-rust-v-cyrius.md).
-
-**318 Rust public items: 222 ported, 22 deliberate omissions, 51 missing** — and
-**28 of the 51 are one file**, `gpu/pipeline.rs`. Everything underneath it is
-ported (context, buffers, SPIR-V emitter, eleven kernels, all twenty-one WGSL
-sources), so that gap is wiring rather than maths. Most of the rest is `#derive`
-with no Cyrius analogue and mostly no cost; the ones that do cost something are
-string-facing, chiefly the absent `FromStr` inverses.
-
-**The audit earned its keep on four defects in code that was already green:**
-
-1. **`pixel_view_new` accepted OVERSIZED buffers.** It tested `len < want`;
-   Rust tests `data.len() != expected`. The port had silently widened the
-   contract — passing a whole frame where a tile was meant produced a view
-   reading the wrong rows instead of a diagnostic. Fixed to exact equality,
-   error code corrected to `DimensionMismatch`, both directions now asserted.
-2. **`RangaError` had no Display surface at all** — eight opaque negative
-   integers, while `gpu_error_message` in the GPU module already had the idiom.
-   Added `ranga_error_message`, with a test that no two codes share a string.
-3. **`gpu_context_adapter_name` was a stub reporting itself as ported** — it
-   returns the literal `"unknown"` and nothing ever assigns the field, because
-   mabda exposes no live adapter query. Now documented, given a
-   `has_adapter_name` companion, and PINNED by a test asserting the stub state
-   so the suite fails the day mabda can report a real one.
-4. **Two comments asserted things that were false.** `pixel.cyr` claimed
-   Mut-only accessors that do not exist; `gpu_spirv.cyr` claimed mabda lowers
-   "exactly five" GLSL ops when it lowers eight — and one of the three unlisted
-   is `FClamp`, which several kernels here spell the long way.
-
-⚠ **A passing suite does not mean a faithful port.** Every one of those four was
-in code with green tests and clean lint. Three were found only by reading the
-Rust beside the Cyrius, and the fourth only because a verifier was told to
-assume the audit was lying.
-
-
-Surface count against `rust-old/`, full benchmark sweep on a quiesced machine,
-`benchmarks-rust-v-cyrius.md` filled in.
-
-### M8 — Release ✅
-
-**`VERSION` → 2.0.0.** All four bundles rebuilt and byte-current, CHANGELOG
-written, docs refreshed.
-
-⚠ **CI would have failed on the first push, and the gate that would have caught
-it did not exist.** `cyrius deps` ran with no features while `cyrius test`
-auto-discovers every `tests/*.tcyr` — so the spectral, hwaccel and gpu suites,
-which `include "lib/prakash.cyr"` / `"lib/ai-hwaccel.cyr"` / `"lib/mabda.cyr"`,
-would have hit libs that were never vendored. The features are off by DEFAULT
-for consumers, but the repo tests all of them. Now
-`cyrius deps --features spectral,hwaccel,gpu`.
-
-Two gates added while there: `cyrius lint` (0 warnings and 0 untracked
-deferrals was a habit, now a gate) and `cyrius distlib --check` (byte-compares
-the bundles, so a source change that was never re-bundled fails CI instead of
-shipping a stale `dist/`).
-
-## Out of scope (for 2.0.0)
-
-- Async GPU readback — mabda has no non-blocking buffer map
-- WASM / WebGPU — blocked on the Cyrius WASM backend
-- Retiring `rust-old/` — kept 1–3 releases past 2.0.0, then deleted per the
-  AGNOS standard (only after Cyrius has equal or better coverage and benchmarks)
-
-## Moving the cyrius pin to 6.6.6
-
-**Current pin: `cyrius = "6.6.2"` (cyrius.cyml:17). Bump it; nothing else needs
-to change.**
-
-Checked against the 6.6.6 change list, in ranga's own sources (`src/`,
-`programs/`, `tests/` — vendored `lib/` excluded): no `O_APPEND` / `O_TRUNC` at
-all, so the Windows append/truncate data-corruption fix is a non-event; zero
-`struct` declarations, so the new different-struct-copy compile error and the
-by-value >8 B deep-copy change cannot apply; no `async` fns, no `operator` fns,
-no `ret2`/`rethi` pair returns, no top-level `{ }` blocks, no `: cstring`
-parameters, no duplicate global `var` declarations, no locally defined `vec_*`
-(and `assert` + `vec` are both already in `[deps] stdlib`, so assert.cyr's new
-transitive `include "lib/vec.cyr"` cannot collide). `lib/regression.cyr` is not
-vendored — the only mention is a comment at
-`lib/syscalls_linux_common.cyr:208` — so the new exec deadline is irrelevant.
-
-**SIMD is safe for the same reason it is in prakash:** 6.6.6 makes "a
-SIMD-returning fn returning anything else" a compile error, and ranga's SIMD is
-memory-form — `iv_add` / `iv_sub` / `iv_mul` / `iv_dp8` over pointers in
-`src/simd_u8.cyr`, `src/pixel.cyr`, `src/convert.cyr` and
-`src/gpu_pipeline.cyr`. There is no `: f32v*` / `: f64v*` / `: iv*` type
-annotation anywhere, so no function returns a SIMD value.
-
-**Measured:** `cyrius build` under 6.6.2 and under 6.6.6 both exit 0 and emit
-**zero** warnings or errors.
-
-**Verify after bumping:** `cyrius deps` to re-vendor (6.6.6's `lib/io.cyr` is
-rewritten and now self-sufficient), then `cyrius build`, `cyrius test`,
-`cyrius lint` and `cyrius distlib` across all four profiles
-(`ranga`, `ranga-gpu`, `ranga-hwaccel`, `ranga-spectral`).
-
-> Note for whoever edits this next: ranga carries both `ROADMAP.md` at the repo
-> root and this file. This note was appended here, to
-> `docs/development/roadmap.md`. The root `ROADMAP.md` does not mention the
-> cyrius pin at all — worth collapsing one into the other so the next pin note
-> has one home.
+- **Patch (`2.N.x`):** toolchain and dependency bumps, and fixes within the current
+  milestone.
+- **Minor (`2.N.0`):** opens the next milestone below.
+
+Milestones are ordered by what unblocks what, not by size. Correctness comes first
+because the oracle that defines it (`rust-old/`) is due to be deleted.
+
+**Rule for every item:** the port's bar is "matches what Rust did", so diverge only with
+an ADR. Each SUSPECT item is either fixed to match Rust or given an ADR, and each
+MISSING item is either ported or given an ADR. Sizes are S (hours), M (a day or two) and
+L (more).
+
+---
+
+## 2.2.x — Bit-exact again
+
+Fix every measured divergence, and make the measurement repeatable.
+
+- [ ] **(M) Check in the differential oracle.** Add a small Rust driver outside
+      `rust-old/` (e.g. `scripts/oracle/`, depending on `../../rust-old` by path),
+      plus a Cyrius probe and a diff script. Run it once per release.
+      - Every finding below was measured with a throwaway version of it.
+      - It is the only thing that catches 1-ULP and half-step errors: the old sampled
+        sweeps called four of these paths byte-exact.
+- [ ] **(M) Single-precision colour byte paths:** `linear_to_srgb`,
+      `lin_rgba_to_srgba`, `hsl_to_srgba` (including its `s < 1e-6` compare),
+      `cmyk_to_srgba` and `rgbaf32_to_rgba8`. Use the `: f32` typed-local pattern
+      `srgb_to_linear` already uses, and sweep every f32 in [0,1] against the oracle.
+- [ ] **(M) Single-precision colour f32 outputs:** `srgba_to_hsl`, `srgba_to_cmyk`,
+      `color_temperature`, `oklab_to_oklch` and `oklch_to_oklab`. Fix them, or write an
+      ADR accepting ULP-level differences in fields that never round to a byte.
+      `hue_shift` depends on `srgba_to_hsl`.
+- [ ] **(S) `affine_inverse`:** restore Rust's association, `(c*ty - d*tx)*inv` and
+      `(b*tx - a*ty)*inv`. Ordinary scale+translate transforms currently sample the
+      wrong source column.
+- [ ] **(S) `affine_is_identity`:** make a NaN field fail, using Rust's all-`<` form.
+- [ ] **(S–M) `levels`:** compute `1/gamma`, the pow result, `*255` and `+0.5` in f32.
+- [ ] **(S) `bilateral`:**
+      - compute the coefficients and exp arguments in f32;
+      - return `RG_ERR_OTHER` for σ ≤ 0 (as `levels` already does);
+      - let a NaN σ through as Rust does, or write an ADR.
+- [ ] **(S) `hue_shift`:** do the hue add and `rem_euclid` in f32. This lands after
+      `srgba_to_hsl`.
+- [ ] **(S) ICC parse regressions,** all caused by `fl_alloc(0)` / `fl_calloc(0)`
+      returning 0 since cyrius 6.6.7:
+      - a zero-tag profile should return `RG_ERR_INVALID_FORMAT`;
+      - an `mft2` with zero input entries should parse with identity curves;
+      - grid size 1 should be accepted, or rejected under an ADR.
+
+      Add a test for each.
+- [ ] **(S) ICC error codes:** some malformed input returns `RG_ERR_PARSE` where Rust
+      returns InvalidFormat for all of it. Unify, or document the split.
+- [ ] **(S) `src/blend.cyr:143`:** write it as `_bl_sub(one, ganita_f32_min(...))`.
+      It is correct today, but only because the compiler passes f32 bits through an
+      `: i64` call.
+- [ ] **(S) Contradictions pinned by tests.** For each, match Rust or write an ADR:
+      - the error strings: Rust's InvalidFormat reads "invalid pixel format: …", and
+        `Other` carries its message;
+      - `PixelBuffer::new` reporting overflow as `RG_ERR_ALLOCATION`, which has needed
+        an ADR since M7.
+- [ ] **(S) ADR 001:**
+      - extend it to the BT.709, BT.2020 and NV12 inverses, which diverge the same way
+        and whose tests already pin the values;
+      - correct its "all five failed to reproduce" line.
+- [ ] **(S) Robustness found by the review:**
+      - `convert.cyr:103` ignores `_cv_y_row`'s return value;
+      - `buffer_pool_acquire` accepts a negative size;
+      - `BufferPool` allocates all `max_buffers` slots eagerly (`buffer_pool_new(1<<40)`
+        returns 0);
+      - `lut3d_new` has no overflow guard on `size³·12`;
+      - `flood_fill`'s stack has no capacity check;
+      - bilinear sampling of a 1-pixel source with a non-finite inverse reads past the
+        buffer.
+- [ ] **(S) Stale source comments the review listed:**
+      - `error.cyr` (INVALID_PARAMETER "levels gamma = 0", "logged at the failure site");
+      - `color.cyr:564` (Oklab "f32 throughout");
+      - `convert.cyr:4-8`;
+      - `transform.cyr:446-449`;
+      - `composite.cyr`'s NaN-ordering and `f64_cos` notes;
+      - `blend.cyr:4-9` and `:261-263`;
+      - `hwaccel.cyr:1`;
+      - `spectral.cyr:9-17`.
+
+**Done when:** the parity doc has no SUSPECT items, and an oracle sweep is clean on
+every u8 output path.
+
+## 2.3.x — Verification parity
+
+Make the test, fuzz and benchmark surfaces mean what Rust's meant.
+
+- [ ] **(M) A real fuzz harness.** `tests/ranga.fcyr` is still the scaffold stub.
+      - Port the 8 Rust targets behind one dispatcher with a seeded input generator.
+      - Start with `fuzz_icc` (the only untrusted-input parser), then `fuzz_convert`
+        and `fuzz_transform` (size arithmetic).
+      - `fuzz_lut` can cover only `apply_lut3d` unless `from_cube` is ported (2.4.x).
+      - Run `cyrius fuzz --poison` in CI.
+- [ ] **(M) A property suite (`tests/properties.tcyr`)** with a seeded generator,
+      porting the 31 `proptest.rs` properties.
+      - First the three with no coverage at all: `lab_roundtrip`, `oklch_roundtrip`
+        and the BT.2020 grey round trip.
+      - Then the 25 that were reduced to one fixed example.
+      - Sweep exhaustively where the domain is cheap, as `color.tcyr` already does.
+- [ ] **(S) Golden vectors:**
+      - the 7 Photoshop reference pixels from `photoshop_reference.rs`;
+      - the 4 missing visual-regression checks: blur monotonicity, 2-D blur symmetry,
+        Screen commutativity and hue 360 identity.
+- [ ] **(S–M) `tests/integration.tcyr`:** the 6 multi-step pipelines from
+      `integration.rs` and `crop_resize_composition`. Each step is unit-tested today,
+      but no chain is.
+- [ ] **(M) Unit, edge and doctest gaps,** highest risk first:
+      - `resize_to_1x1` (the divide-by-zero guard);
+      - any resize downscale, and the Bilinear/Bicubic sample paths;
+      - `perspective_inverse_roundtrip`;
+      - XYZ/P3 round trips on colours other than white;
+      - CMYK with k ≠ 0, and the HSL branch for l > 0.5;
+      - `get_rgba` on a pixel with four distinct channels;
+      - `view_mut` write-through, and pool re-zeroing;
+      - alpha preservation in threshold and salt-and-pepper;
+      - NV12 at odd sizes, and a 1×1 YUV image;
+      - the convert white/black checks through the public API.
+- [ ] **(S) Make GPU coverage visible.**
+      - Move the hardware-free checks (null context, shape guards, stub returns) out of
+        the `ctx != 0` gate.
+      - Report how many assertions were skipped.
+      - Say in `state.md` that the full count is an AMD-host count.
+      - Decide whether the NVIDIA backend needs coverage.
+- [ ] **(S) Spectral re-export tests:** record that prakash's own suite owns the 8
+      `spectral.rs` tests for re-exported items, or port them.
+- [ ] **(M) Benchmarks.**
+      - Add the 74 missing CPU benches, using Rust's names (`rgba_to_yuv420p_bt601_1080p`)
+        and workloads (composite_at 640×480; opacity 200 for blend).
+      - Re-measure both sides on a quiet machine.
+      - Rewrite `docs/benchmarks-rust-v-cyrius.md`, whose table and prose are stale.
+      - The 26 GPU benches wait on a decision about GPU hardware in CI.
+- [ ] **(S) CI hygiene.**
+      - Replace the per-file lint loop with
+        `cyrius lint --strict --strict-deferrals src/*.cyr tests/*.tcyr 2>&1`. Since
+        6.6.5 lint takes 1..N files, and the strict flags exit non-zero, so the old
+        loop's comment is stale.
+      - Add the fuzz step.
+      - Rename the duplicate `b6`/`b8` globals in `filter_point.tcyr`.
+
+**Done when:**
+- all 8 fuzz targets run under `--poison` in CI;
+- every Rust test case is covered, or given an ADR;
+- all 108 CPU benchmarks are recorded against the frozen Rust series.
+
+## 2.4.x — Surface completion (CPU)
+
+- [ ] **(M–L) Decide serde first.** Rust derives Serialize/Deserialize on 14 types:
+      the 8 colour structs, `PixelFormat`, `ColorSpace`, `BlendMode`, `ToneCurve`,
+      `Affine` and `Perspective`. Either write the codecs by hand (on bayan; the wire
+      form is serde's, i.e. variant names such as "ColorDodge"), or write an ADR that
+      puts serde out of scope.
+- [ ] **(S) Clone and equality for heap records:**
+      - `affine_clone`/`_eq`, `perspective_clone`/`_eq` and `lut3d_clone`;
+      - a clone for the colour structs.
+- [ ] **(S) Writable records:**
+      - setters for the colour structs, with the Hsl and Cmyk layouts added to the
+        `color.cyr` header;
+      - a Table accessor for `ToneCurve`;
+      - `pixel_buffer_into_bv` (Rust's `into_data`).
+- [ ] **(S–M) ICC constructors:** a way to build `IccProfile` / `IccLutProfile` from
+      a matrix and curves, as Rust's pub fields allowed.
+- [ ] **(M) `Lut3d::from_cube`:** port the `.cube` parser, or write an ADR. Either way,
+      fix `docs/guides/features/filters.md` and `migration-guide.md`, which advertise
+      it.
+- [ ] **(S) Spectral names:** document prakash's three renamed re-exports
+      (`CIE_1931_2DEG`, `VISIBLE_MIN_NM` and `VISIBLE_MAX_NM`), or provide the Rust
+      names.
+- [ ] **(S) Namespace decisions:** whether `xorshift64_*` stays public (it was
+      private in Rust), and whether `bytevec`'s unprefixed `bv_*` functions need a
+      prefix to avoid colliding with consumers.
+
+**Done when:** outside the GPU layer, every MISSING item in the parity doc is either
+ported or given an ADR.
+
+## 2.5.x — GPU
+
+See [architecture note 001](../architecture/001-mabda-native-gpu-constraints.md) for
+what mabda 4.2.0 accepts.
+
+- [ ] **Decide the wgpu story first.** ranga carries all 21 WGSL sources and dispatches
+      none of them, and mabda's context-aware wgpu dispatch is a stub, so every op
+      fails on wgpu. Either:
+      - wire the WGSL through mabda's `compute_dispatch(device, queue, …)`, selected
+        on `backend_kind`, which needs a C-launcher test harness (L); or
+      - stop claiming a fallback in the README, CHANGELOG, guides and source comments
+        (S).
+- [ ] **(S) Round half to even** when packing, to match WGSL `round`. `gpu_fade` and
+      `gpu_dissolve` are off by one at exact halves. Use `OpSelect`, which mabda 4.1.0
+      can now lower, and add odd-byte test inputs.
+- [ ] **(S) Geometry ops:**
+      - dispatch in 2D (16×16, guarded by `_gk_guard_open2`), which removes the
+        65,535-group ceiling that makes 4096² fail;
+      - a degenerate crop should return 0×0, and resize to a 0 dimension should return
+        Ok(0×0).
+- [ ] **(S) Error hygiene:**
+      - `gpu_error_message` for FORMAT and UNSUPPORTED (both say "no error");
+      - guards in Rust's order: null, then format, then dimensions;
+      - consistent `err_out` on dimension mismatch;
+      - stubs that return the same code the native path does.
+- [ ] **(M) `GpuChain`, natively,** with ping-pong buffers kept on the GPU (13 items).
+      `hwaccel.cyr`'s cost model already assumes it.
+- [ ] **(S) `GpuContext::new_with_hwaccel`,** plus a bundle profile that combines gpu
+      and hwaccel.
+- [ ] **(M) Native `gpu_gaussian_blur`:**
+      - mabda 4.1.0 lowers loops and phi, so add loop/phi helpers to `gpu_spirv.cyr`
+        and port `build_gaussian_kernel`;
+      - until then, radius 0 should return a clone, as Rust did (S).
+- [ ] **(M) Bilinear `gpu_resize`.** The module exceeds the 256-id cap (reason code
+      -25); register pressure is not the cause. Split it into two separable passes, or
+      reduce the ids. Re-pin the test on the reason code.
+- [ ] **(M–L) Native `gpu_blend`:** one kernel per mode, so each fits the id cap.
+      `OpFDiv` and `OpSelect` are now available, and the nested ifs need flattening.
+- [ ] **(S) Retire pre-4.1.0 workarounds:** host-side reciprocals, the `count > idx`
+      operand swap and the underflow conjunction.
+- [ ] **(S–M) Adapter name,** from `wgpu_adapter_get_info` on wgpu, or
+      `native_amdgpu_query_dev_info` natively.
+- [ ] **(S) Leaks:**
+      - the context's cache vecs are never freed;
+      - `gpu_buffer_upload` leaks the handle when a later allocation fails.
+- **Blocked upstream in mabda:**
+  - `gpu_noise_gaussian`: no Log, Sin or Cos in the GLSL.std.450 lowering;
+  - async readback: no API;
+  - nested selections.
+
+**Done when:**
+- all 14 operations run natively;
+- `GpuChain` is ported;
+- wgpu either works or is not claimed.
+
+## 2.6.x — Performance
+
+The baseline is the frozen Rust 1.0.1 criterion series in
+[`benchmarks-rust-v-cyrius.md`](../benchmarks-rust-v-cyrius.md).
+
+- [ ] **(L) Vectorised or tiled separable blur.** Blurs run about 21× slower than Rust.
+      Rust auto-vectorises the passes. The int→f32 conversion is not the bottleneck:
+      removing it entirely would at best halve the blur.
+- [ ] **(S) `equalize` (19.5×) and `auto_levels` (23×):** inline the per-channel helper
+      calls. This is call overhead, not a SIMD gap.
+- [ ] **(M) f32 SIMD for `contrast` and `saturation`** (12–15× slower).
+- [ ] **(S–M) `hue_shift`:** remove its two heap allocations per pixel.
+- [ ] **(M) A vector kernel for `yuv420p_to_rgba`.** It has had a loop hoist only.
+- [ ] `crop` and `flip_vertical` are still memcpy-bound. The real fix is upstream (the
+      `fl_calloc` zeroing), and the consumer workaround is already in place.
+- [ ] **(L) 256-bit AVX2,** cyrius-port-plan §3 item 4. It comes after all of the
+      above.
+
+**Done when:** the blurs and the histogram ops are no longer the worst ratios, as
+measured on a quiet machine.
+
+## 2.7.x — Docs, examples, audit, consumers
+
+- [ ] **(M) Port the 11 Rust examples** to runnable `.cyr` files in `docs/examples/`.
+      `gpu_compute` and `spectral_analysis` need their features enabled.
+- [ ] **(M) Rewrite the Rust-era docs:**
+      - `docs/guides/features/*.md`, `testing.md`, `performance.md` and
+        `troubleshooting.md`;
+      - `docs/architecture/overview.md`, which still describes wgpu and
+        `hwaccel::should_use_gpu`;
+      - the README's GPU claims;
+      - `threat-model.md`.
+- [ ] **(L) Security audit** (`docs/audit/YYYY-MM-DD-audit.md`): the ICC parser, the
+      raw-offset buffer accessors and the size arithmetic. Do it after the fuzz harness
+      lands.
+- [ ] **(L, outside this repo) A first Cyrius consumer.** The four named candidates
+      (rasa, tazama, aethersafta, soorat) are all still Rust crates on ranga 0.20.5,
+      0.29 or 1.x. aethersafta's compositor is the likeliest first port. The
+      alternative is to drop the criterion by decision.
+
+## 2.x — Closing the port: retire `rust-old/`
+
+These criteria replace the unmet 2.0.0 list. `rust-old/` is the parity oracle, so
+deleting it deletes the oracle. **Capture what it knows into tests first.**
+
+- [ ] Zero SUSPECT items, and every MISSING item ported or given an ADR (2.2–2.5).
+- [ ] Every Rust test case covered or given an ADR, with golden vectors from the oracle
+      checked into `tests/` (2.3).
+- [ ] All 8 fuzz targets in CI, and the security audit filed (2.3, 2.7).
+- [ ] All CPU benchmarks recorded against the frozen Rust series (2.3).
+- [ ] At least one Cyrius consumer green, or the criterion dropped by decision (2.7).
+- [ ] Then delete `rust-old/`, with a CHANGELOG entry naming the
+      `git checkout 1.0.1 -- rust-old/` recovery command.
+
+## Ongoing — toolchain and dependency bumps
+
+Each pin move is a patch release. The steps below are what the 2.0.4 → 2.1.1 bumps
+needed:
+
+1. Move `cyrius` in `cyrius.cyml`. Move each dep tag to the newest release that pins
+   the same toolchain line or an older one.
+2. Delete the lock and re-resolve:
+   `rm cyrius.lock && cyrius deps --features spectral,hwaccel,gpu`. Run with all
+   features, the way CI does. Re-resolving over an existing lock kept the stale commit
+   pins (seen at 6.6.20).
+3. Check that new stdlib and dep top-level names do not collide with `src/`. At 6.7.18,
+   `bayan`'s `_TC_SIZE` broke `icc.cyr`. Also look for new
+   `cyrius deps` notes about files outside the declared footprint.
+4. Run `cyrius build`, `cyrius test`, the lint gate and `cyrius bench`. Then run
+   `scripts/version-bump.sh X.Y.Z` and `cyrius distlib --check`. Compare the warnings
+   against the previous pin.
+5. Until 2.3.x lands, `cyrius fuzz` runs the scaffold stub. **Do not report it as
+   verification.**
+
+## Out of scope
+
+- WASM / WebGPU: blocked on the Cyrius WASM backend.
