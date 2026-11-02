@@ -9,6 +9,11 @@
 > cyrius 6.7.18, and the outputs were diffed value by value. Six of the findings were
 > then reproduced independently. The open work this produces is sequenced in
 > [`roadmap.md`](roadmap.md).
+>
+> **Updated for 2.1.2.** The P(-1) closeout
+> ([`../audit/2026-11-02-audit.md`](../audit/2026-11-02-audit.md)) fixed two of the
+> ICC items below and one undocumented trig divergence. A cross-toolchain diff also
+> confirmed that every remaining SUSPECT item predates the 6.6.9 → 6.7.18 bumps.
 
 ## How each item is classified
 
@@ -31,9 +36,9 @@ item is either ported or given an ADR. Nothing stays SUSPECT.
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | error, lib, pixel, color, convert | 88 | 48 | 3 | 15 | 7 | 4 | 11 |
 | filter, transform, histogram | 73 | 51 | 1 | 4 | 0 | 11 | 6 |
-| composite, blend, icc, spectral, hwaccel | 70 | 55 | 1 | 5 | 3 | 4 | 2 |
+| composite, blend, icc, spectral, hwaccel | 70 | 56 | 1 | 5 | 3 | 4 | 1 |
 | gpu (context, buffer, shaders, pipeline) | 72 | 39 | 0 | 4 | 9 | 14 | 6 |
-| **Total** | **303** | **193** | **5** | **28** | **19** | **33** | **25** |
+| **Total** | **303** | **194** | **5** | **28** | **19** | **33** | **24** |
 
 An item is a pub fn (impl methods included), struct, enum, const, or trait impl/derive.
 Each derive counts once per type. The M7 audit counted 318 under a looser
@@ -58,12 +63,12 @@ convention, so the two totals are not comparable line for line.
    scale+translate (`a=0.6, d=2.5, tx=ty=-1.9`), tx is `0x4009555555555555` in Rust
    and `…554` in the port, and an entire column of Nearest samples in
    `affine_transform` then comes from the wrong source column.
-3. **Two ICC parse regressions came from the toolchain, not from ranga.** Since cyrius
-   6.6.7, `fl_alloc(0)` and `fl_calloc(0)` return 0. As a result, a profile with zero
-   tags, and an `mft2` LUT with zero input entries, now fail with `RG_ERR_ALLOCATION`.
-   Rust returns InvalidFormat for the first and parses the second, using identity
-   curves. The parser also rejects grid size 1, which Rust handles. ICC is the only
-   module that parses untrusted input.
+3. **Two ICC parse regressions came from the toolchain, not from ranga (fixed in
+   2.1.2).** Since cyrius 6.6.7, `fl_alloc(0)` and `fl_calloc(0)` return 0. From
+   2.0.3 to 2.1.1, a profile with zero tags, and an `mft2` LUT with zero input
+   entries, failed with `RG_ERR_ALLOCATION`. Rust returns InvalidFormat for the
+   first and parses the second, using identity curves. Both now match Rust. Still
+   open: the parser rejects grid size 1, which Rust handles.
 4. **The GPU "wgpu fallback" never runs.** ranga carries all 21 WGSL sources but
    dispatches none of them, and mabda 4.2.0's context-aware wgpu dispatch is a stub
    (see [architecture note 001](../architecture/001-mabda-native-gpu-constraints.md)).
@@ -79,7 +84,9 @@ convention, so the two totals are not comparable line for line.
    - `PixelFormat`, `ColorSpace`, `BlendMode`, `ToneCurve`, `Affine` and `Perspective`.
 
    `src/` has no codec for any of them. Rust has **no `FromStr` anywhere**, so the old
-   "missing FromStr" gaps were never gaps.
+   "missing FromStr" gaps were never gaps. At the 6.7.18 pin `#derive(Serialize)` on
+   an enum works and writes the variant name, which is serde's wire form (checked
+   for 2.1.2), so the enum codecs can be derived.
 
 ## Improved in Cyrius (keep)
 
@@ -162,6 +169,7 @@ convention, so the two totals are not comparable line for line.
 | `Affine::inverse` | transform.cyr:151 | SUSPECT | tx/ty reassociated: 8 of 15 inverses differ in bits, and samples flip. |
 | `affine_transform` | transform.cyr:452 | SUSPECT | Inherits the inverse error. A model flips at least one Nearest sample in 561 of 20,000 random transforms. |
 | `Affine::is_identity` | transform.cyr:171 | SUSPECT | A NaN field passes (returns 1); Rust returns false. |
+| `Affine::rotate` | transform.cyr:100 | PARITY (2.1.2) | The review counted this as parity with a documented NaN for \|θ\| ≥ 2^63. That guard had outlived the toolchain fault it worked around, so `rotate(1e20)` was NaN where Rust is finite. 2.1.2 delegates every finite angle; the item is not counted twice. |
 | `Lut3d` Clone | — | MISSING | Heap-owning, and there is no `lut3d_clone`. |
 | `Affine`: Clone, Copy, PartialEq, Serialize, Deserialize | — | MISSING ×5 | No `affine_clone` / `affine_eq`, and no codec. |
 | `Perspective`: Clone, Copy, PartialEq, Serialize, Deserialize | — | MISSING ×5 | Same. |
@@ -186,16 +194,16 @@ That is counted as PARITY.
 
 | Rust item | Port | Status | What is wrong or missing |
 | --- | --- | --- | --- |
-| `IccProfile::from_bytes` | icc.cyr:451 | SUSPECT | Zero tags gives `RG_ERR_ALLOCATION` (`fl_calloc(0)`, :177); Rust gives InvalidFormat. |
-| `IccLutProfile::from_bytes` | icc.cyr:920 | SUSPECT | mft2 with 0 input entries fails at `fl_alloc(0)` (:796), where Rust uses identity curves. Grid 1 is rejected by `grid < 2` (:862), where Rust handles it. |
+| `IccProfile::from_bytes` | icc.cyr:451 | PARITY (2.1.2) | Zero tags gave `RG_ERR_ALLOCATION` from 2.0.3 to 2.1.1; it is now InvalidFormat, as in Rust. |
+| `IccLutProfile::from_bytes` | icc.cyr | SUSPECT | Grid 1 is rejected by `grid < 2`, where Rust handles it. The mft2-with-0-entries case was fixed in 2.1.2. |
 | `IccProfile`, `IccLutProfile` structs | getters | PARTIAL ×2 | Read-only; there is no way to build a profile. |
 | `ToneCurve` | `TC_*` | PARTIAL | Table entries have no accessor (raw `load64(t+16)` only). |
 | serde on `BlendMode`, `ToneCurve` | — | MISSING ×4 | No codec. BlendMode's wire form is the variant name ("ColorDodge"), not `blend_mode_name`. |
 
 **Also found:**
-- `src/blend.cyr:143` (`one - ganita_f32_min(..)`, whose callee is declared `: i64`) is
-  correct at 6.7.18; all 65,536 ColorBurn inputs match. It is fragile, though, and
-  `_bl_sub(one, …)` removes both the warning and the risk.
+- `src/blend.cyr:143` (`one - ganita_f32_min(..)`, whose callee is declared `: i64`) was
+  correct but fragile. It became `_bl_sub(one, …)` in 2.1.2, and all 65,536 ColorBurn
+  inputs still match Rust.
 - ICC returns `RG_ERR_PARSE` for some malformed input and `RG_ERR_INVALID_FORMAT` for
   the rest; Rust uses InvalidFormat throughout.
 - prakash renamed three of the 20 spectral re-exports, so they are not callable under

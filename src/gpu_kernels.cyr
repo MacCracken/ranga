@@ -126,9 +126,10 @@ fn _gk_prologue(s) {
     # reference — work in the then-block, then-block ends with OpBranch to the
     # merge, merge block holds the sole OpReturn. That is reproduced exactly.
     #
-    # The comparison is `count > idx`, not `idx < count`: mabda's binop map
-    # covers UGreaterThan and UGreaterThanEqual but NOT ULessThan, so the
-    # operands are swapped rather than the opcode changed.
+    # The comparison is `count > idx`, not `idx < count`. When this was written,
+    # ULessThan looked absent from mabda's binop map, so the operands were swapped.
+    # It is mapped at mabda 4.2.0 (docs/architecture/001). The swap is
+    # correctness-neutral and is retired in roadmap 2.5.x.
     var count = _gk_param_u32(s, k, 0);
     var inb = spv_binop(s, SPIRV_OP_UGREATERTHAN, boolt, count, idx);
     var lwork = spv_id(s);
@@ -165,10 +166,11 @@ fn _gk_prologue(s) {
 # pack_rgba: clamp(round(c * 255), 0, 255) per channel, then OR the bytes back
 # together and store.
 #
-# ⚠ `round` is emitted as `floor(x + 0.5)`. GLSL.std.450 has a Round, but
-# mabda's lowerer handles only Sqrt/Floor/FAbs/FMin/FMax — anything else reaches
-# GFX9 selection and fails. For the non-negative values reaching this point,
-# floor(x + 0.5) is exactly Rust's round-half-away-from-zero.
+# ⚠ `round` is emitted as `floor(x + 0.5)`, because mabda's lowerer has no
+# GLSL.std.450 Round. At 4.2.0 it handles Sqrt, Floor, FAbs, FMin, FMax, FMA,
+# FClamp and Ldexp (docs/architecture/001). floor(x + 0.5) rounds an exact half
+# UP. The Rust line ran this through WGSL `round`, which rounds half to EVEN, so
+# fade and dissolve differ by one count at exact halves (roadmap 2.5.x).
 fn _gk_epilogue(s, k, r, g, b, a) {
     var u32t = load64(k);
     var f32t = load64(k + 8);
@@ -413,7 +415,10 @@ fn _gk_guard_open(s, k, bound, value) {
 
 # Open a guard on TWO conditions at once, without nesting and without OpSelect.
 #
-# ⚠ NEITHER OF THE OBVIOUS ROUTES WORKS. Measured directly against the compiler:
+# ⚠ NEITHER OF THE OBVIOUS ROUTES WORKED on mabda 4.0.x, measured directly
+# against the compiler. At 4.2.0, nesting is still rejected
+# (GISEL_ERR_NESTED_SELECTION), but OpSelect lowers when its condition is an
+# integer compare in the preceding instruction (docs/architecture/001):
 #   * a selection nested inside a selection makes
 #     `gpu_shader_module_create_spirv` return 0, while two SEQUENTIAL selections
 #     compile fine;
@@ -551,7 +556,8 @@ fn gk_wipe(s) {
       _gk_cpy_param_f32(s, k, 3));
     var wipe_x = spv_unop(s, SPIRV_OP_CONVERT_F_TO_S, u32t, wf);
     # The store happens when idx is in range AND x >= wipe_x. The second is
-    # written `x + 1 > wipe_x` because ULessThan is absent from mabda's map.
+    # written `x + 1 > wipe_x`. ULessThan looked absent from mabda's map when this
+    # was written. It is mapped at 4.2.0 (docs/architecture/001).
     var xp1 = spv_binop(s, SPIRV_OP_IADD, u32t, x, spv_const(s, u32t, 1));
     var lm = _gk_guard_open2(s, k, count, idx, xp1, wipe_x);
     _gk_copy_word(s, k, idx, idx);
@@ -780,7 +786,9 @@ fn gk_resize_nearest(s) {
 #
 # ⚠ THREE WGSL CONSTRUCTS HAVE NO DIRECT FORM HERE.
 #
-# 1. **`OpFDiv` does not compile.** Isolated by bisection: a kernel doing
+# 1. **`OpFDiv` did not compile before mabda 4.1.0**, which now lowers it
+#    correctly rounded (docs/architecture/001; host-side reciprocals retire in
+#    roadmap 2.5.x). Isolated by bisection at the time: a kernel doing
 #    nothing but one float division returns 0 from
 #    `gpu_shader_module_create_spirv`, while the same kernel with four texel
 #    loads, twelve lerps and a full unpack/pack round trip compiles fine.

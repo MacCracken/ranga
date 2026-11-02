@@ -2,7 +2,7 @@ commit	ccdcd9c035e205c1373b3c0d2c5878004da6edbc	ai-hwaccel	https://github.com/Ma
 commit	833919c2bf0ec8943aaf8f04a0cdf5b4c80544e5	chitra	https://github.com/MacCracken/chitra.git	1.0.3
 commit	d6703c5007839da8958a7c46a36039cd9a417a1c	hisab	https://github.com/MacCracken/hisab.git	3.4.1
 commit	4799000af35054d54ef2be33874012265c42fa6a	mabda	https://github.com/MacCracken/mabda.git	4.2.0
-commit	3475ea5a13ba2d149f4a789530585cbc0399b8a9	prakash	https://github.com/MacCracken/prakash.git	2.15.0
+commit	1844d26435597c248daf829dec26f0a9835f135d	prakash	https://github.com/MacCracken/prakash.git	2.15.1
 commit	569e9f8d5fbaffa0d68f0271796da4d72d68588d	sakshi	https://github.com/MacCracken/sakshi.git	2.5.10
 commit	a882a35c257fcc95a2e4824089d0ff57d5c530a3	samvada	https://github.com/MacCracken/samvada.git	1.0.1
 807532a0cfad2147fdb6ecebea11a5e2224611d89454349545f50b3daed59d9d  lib/ai-hwaccel.cyr
@@ -38,7 +38,7 @@ e532c082ce75b0f18dc8e3c07462300b428e432aa19e6a5fcc2b0b6b174be45d  lib/io.cyr
 3a85748ee6bf83fe72bb310f21341c97232649def8c6064213da5502d86888f4  lib/math.cyr
 6390e2b0611636af94078acc9a6122eaaeab59b31c5cffe95bbcbc77d89748e5  lib/mmap.cyr
 52d8879572df7a9ab0c5d1b97eb1f41799b06e684c01876d8023f04a4c63ee0d  lib/poison.cyr
-66889378950cf413d646085543334cc713b501acabb92821018c600418428b59  lib/prakash.cyr
+712490c11f0ffd5c3ed1979d1c5d4b5751534c002a25c110b2b16ebbd44bf9f8  lib/prakash.cyr
 ff8ec116ffc0e13ec3d6b7f217fbf6551b0f34853b847f87dfc81d5d97571305  lib/process.cyr
 a31332549bfbe0c2811879ab09d7a2bd40d38d05dfc561292f90d0b4b16528a5  lib/process_agnos.cyr
 5b27e5289d54657fb5bbc0634a34634419b19034cdbf9a04d41745fc13bb6ada  lib/process_win.cyr

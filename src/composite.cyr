@@ -89,8 +89,10 @@ var _RG_F32_EPS6 = f32_from(0.000001);   # 1e-6, Rust's degenerate-range guard
 var _RG_F32_DEG2RAD = 0x3C8EFA35;   # 0.017453292f
 
 # NaN is the one value with a maximal exponent and a non-zero mantissa. Needed
-# because ganita_f32_min/max order NaN as a large finite value (its monotone
-# key is well-defined but meaningless), where Rust's clamp propagates it.
+# because Rust's `clamp` PROPAGATES a NaN, while a clamp built from
+# ganita_f32_min/max does not. Since ganita 1.2.x those IGNORE a NaN operand
+# (IEEE maxNum); before that they ordered NaN as a large finite value.
+# Neither lets a NaN through.
 #must_use
 fn _rg_f32_is_nan(v) {
     if ((v & 0x7FFFFFFF) > 0x7F800000) { return 1; }
@@ -476,10 +478,11 @@ fn gradient_linear(buf, start, end) {
 # negatives, and a projection is negative for every angle past 90 degrees.
 #
 # A degenerate range leaves the buffer untouched, as in Rust. The NaN guard is
-# ours: ganita_f32_cos widens to f64_cos, whose x87 backing is undefined for
-# |x| >= 2^63 and returns its argument there, so an absurd angle can drive the
-# projections to infinity and the range to inf - inf. Leaving the buffer alone
-# is the honest answer for an input with no meaningful gradient.
+# ours, for a NaN or infinite angle, where the projections and the range are
+# NaN and no gradient is meaningful. It used to matter for HUGE finite angles
+# too, when f64_cos's x87 backing returned its argument for |x| >= 2^63. The
+# toolchain now reduces every finite argument, so under 6.7.18 the 1e20 and 1e25
+# degree gradients match Rust byte for byte (2.0.3, at 6.6.9, differed at 1e25).
 fn gradient_linear_angled(buf, start, end, angle_deg) {
     var rc = _validate_rgba8(buf);
     if (rc != RG_ERR_NONE) { return rc; }
@@ -527,12 +530,13 @@ fn gradient_linear_angled(buf, start, end, angle_deg) {
 # patterns. The radius is floored at 1e-6 so a zero — or negative — radius
 # produces a hard edge rather than a division by zero.
 #
-# ⚠ The explicit NaN check is not redundant with the max. Rust's `f32::max` is
-# NaN-IGNORING, so `NaN.max(1e-6)` is 1e-6; ganita_f32_max orders by the
-# monotone bit key, under which NaN sorts above every finite value and wins.
-# Without this the whole buffer would come out black for a NaN radius where
-# Rust draws a hard-edged gradient. The max itself is still ganita's, because a
-# NEGATIVE radius is the case a raw unsigned bit compare gets wrong.
+# Rust's `f32::max` is NaN-IGNORING, so `NaN.max(1e-6)` is 1e-6 and a NaN radius
+# draws a hard-edged gradient. Since ganita 1.2.x ganita_f32_max ignores a NaN
+# operand the same way, so the explicit check below is now redundant. It is
+# kept because it states Rust's behaviour without depending on the ganita
+# version: before 1.2.x, NaN sorted above every finite value, won the max, and
+# blackened the buffer. The max itself is ganita's, because a NEGATIVE radius is
+# the case a raw unsigned bit compare gets wrong.
 fn gradient_radial(buf, cx, cy, radius, start, end) {
     var rc = _validate_rgba8(buf);
     if (rc != RG_ERR_NONE) { return rc; }

@@ -11,14 +11,21 @@
 # the caller's buffer. `_gp_run_1buf` and `_gp_run_2buf` carry all of it; each
 # operation is its parameter block.
 #
-# ⚠ THREE OF THE FOURTEEN CANNOT RUN ON THE NATIVE BACKEND, and they return
-# RG_GPU_ERR_UNSUPPORTED rather than pretending. `gpu_blend` and
-# `gpu_noise_gaussian` have no SPIR-V kernel (blend is 13 modes and exceeds the
-# register budget; noise needs log/cos/sin, which mabda's lowerer does not
-# carry), `gpu_gaussian_blur` needs OpLoopMerge which is rejected outright, and
-# `gpu_resize` with a bilinear filter hits the same register ceiling as blend.
-# All four have complete WGSL in gpu_shaders.cyr and work on the wgpu path.
-# Filed at mabda/docs/development/issues/2026-08-19-native-spirv-compile-limits.md.
+# ⚠ THREE OF THE FOURTEEN HAVE NO KERNEL, and they return RG_GPU_ERR_UNSUPPORTED
+# rather than pretending: `gpu_blend`, `gpu_noise_gaussian` and
+# `gpu_gaussian_blur`. Bilinear `gpu_resize` is unsupported too. This is current
+# as of mabda 4.2.0 (docs/architecture/001-mabda-native-gpu-constraints.md):
+#   * noise needs log/sin/cos, which the native lowerer still lacks;
+#   * blur needs a loop. mabda 4.1.0 lowers OpLoopMerge/OpPhi, but
+#     gpu_spirv.cyr has no loop helpers yet;
+#   * bilinear's valid module exceeds the 256-id cap (reason -25), which is not
+#     register pressure as first thought;
+#   * blend (12 modes) has never been written as a kernel.
+# The WGSL for all four is in gpu_shaders.cyr, but NOTHING dispatches WGSL:
+# mabda's context-level wgpu dispatch is a stub, so there is no working wgpu path.
+# All of this is tracked in docs/development/roadmap.md (2.5.x). The original
+# filing is archived as resolved in mabda's
+# docs/development/issues/archived/2026-08-19-native-spirv-compile-limits.md.
 
 # Every per-pixel kernel declares @workgroup_size(256).
 var _GP_WG = 256;
@@ -441,10 +448,10 @@ fn gpu_crop(ctx, buf, left, top, right, bottom, err_out) {
 
 # Nearest-neighbour resize into a new buffer.
 #
-# ⚠ `SF_BILINEAR` and `SF_BICUBIC` return RG_GPU_ERR_UNSUPPORTED on the native
-# backend. The bilinear SPIR-V exists and is valid but exceeds mabda's register
-# budget; bicubic has no GPU shader in the Rust line either. Both have WGSL and
-# work on the wgpu path, and both have full CPU implementations in transform.cyr.
+# ⚠ `SF_BILINEAR` and `SF_BICUBIC` return RG_GPU_ERR_UNSUPPORTED. The bilinear
+# SPIR-V is valid but exceeds mabda's 256-id cap (reason -25). Rust ran bicubic
+# through the bilinear shader. Both have full CPU implementations in
+# transform.cyr. See docs/development/roadmap.md (2.5.x).
 #must_use
 fn gpu_resize(ctx, buf, new_w, new_h, filter, err_out) {
     if (new_w <= 0 || new_h <= 0) { store64(err_out, RG_GPU_ERR_FORMAT); return 0; }
@@ -503,13 +510,14 @@ fn _gp_geom(ctx, buf, kind, out_w, out_h, sx, sy, err_out) {
 
 # ── Not available on the native backend ────────
 #
-# These four have complete WGSL in gpu_shaders.cyr and run on the wgpu path.
-# They return RG_GPU_ERR_UNSUPPORTED here rather than silently doing nothing —
+# These have WGSL in gpu_shaders.cyr, but nothing dispatches it (mabda's
+# context-level wgpu dispatch is a stub; roadmap 2.5.x). They return
+# RG_GPU_ERR_UNSUPPORTED rather than silently doing nothing —
 # which is what a missing kernel would otherwise produce, since mabda's dispatch
 # accepts a null shader module about as quietly as it accepts a bad one.
 
-# 13 blend modes. No SPIR-V kernel: the mode switch alone exceeds the register
-# budget that already stops the four-tap bilinear resize.
+# 12 blend modes. No SPIR-V kernel has been written. The plan is one kernel per
+# mode, fixed at emit time, so each fits mabda's 256-id cap (roadmap 2.5.x).
 fn gpu_blend(ctx, src, dst, mode, opacity, err_out) {
     store64(err_out, RG_GPU_ERR_UNSUPPORTED);
     return RG_ERR_OTHER;
@@ -522,9 +530,9 @@ fn gpu_noise_gaussian(ctx, buf, amount, seed, err_out) {
     return RG_ERR_OTHER;
 }
 
-# Separable convolution over a dynamic radius. `OpLoopMerge` and `OpPhi` are
-# rejected outright by the lowerer, so the loop cannot be expressed at all —
-# this is the one blocked on control flow rather than on size.
+# Separable convolution over a dynamic radius. Before mabda 4.1.0 the lowerer
+# rejected `OpLoopMerge` and `OpPhi` outright. It lowers both now, but
+# gpu_spirv.cyr has no loop/phi helpers yet (roadmap 2.5.x).
 #
 # ⚠ RETURNS 0, NOT AN ERROR CODE. Rust's gpu_gaussian_blur is
 # `-> Result<PixelBuffer, RangaError>`; it PRODUCES a buffer, where gpu_blend

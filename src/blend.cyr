@@ -140,7 +140,11 @@ fn _bl_blend_channel(s: f32, d: f32, mode) {
     if (mode == BM_COLOR_BURN) {
         # s == 0 would divide by zero; Rust returns 0.0 outright.
         if (f64_le(f32_to(s), 0) == 1) { return f32_from(0); }
-        return one - ganita_f32_min(_bl_div(one - d, s), one);
+        # `ganita_f32_min` is declared `: i64` and returns f32 bits. A bare
+        # `one - <call>` relies on the compiler passing those bits through
+        # unchanged (cyrius 6.6.10 started warning about it). `_bl_sub`'s
+        # typed parameters make the f32 subtract explicit.
+        return _bl_sub(one, ganita_f32_min(_bl_div(one - d, s), one));
     }
     if (mode == BM_SOFT_LIGHT) {
         if (f64_le(f32_to(s), 0.5) == 1) {

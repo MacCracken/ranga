@@ -174,7 +174,13 @@ var _ICC_TAG_SIZE = 24;
 # Returns 0 and writes a code on any malformed entry.
 #must_use
 fn _icc_parse_tag_table(data, len, count, err_out) {
-    var tags = fl_calloc(count * _ICC_TAG_SIZE);
+    # An empty table is legal here, as in Rust, and the first tag lookup then fails
+    # with INVALID_FORMAT. Since cyrius 6.6.7 `fl_calloc(0)` returns 0, so an
+    # empty table is given one zeroed entry, which no lookup can match, rather than
+    # being reported as an allocation failure.
+    var bytes = count * _ICC_TAG_SIZE;
+    if (bytes == 0) { bytes = _ICC_TAG_SIZE; }
+    var tags = fl_calloc(bytes);
     if (tags == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
     var i = 0;
     while (i < count) {
@@ -791,7 +797,13 @@ fn _icc_lut_build(data, len, major, minor, cs_off, grid, in_start, in_entries,
     var width = 1;
     if (scale16 == 1) { width = 2; }
 
+    # mft2 may declare zero input entries. Rust then keeps empty curves, which
+    # `apply_curve` treats as identity, and `_icc_apply_curve` does the same for
+    # n == 0. Since cyrius 6.6.7 `fl_alloc(0)` returns 0, so empty curves are not
+    # allocated at all. Their slots stay null from the `fl_calloc` above, and
+    # `icc_lut_profile_free` skips null curves.
     var ch = 0;
+    if (in_entries == 0) { ch = 3; }
     while (ch < 3) {
         var cur = fl_alloc(in_entries * 8);
         if (cur == 0) {

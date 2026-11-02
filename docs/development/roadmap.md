@@ -8,14 +8,17 @@
 
 ## Where things stand
 
-The port shipped as **2.0.0** and is at **2.1.1** on cyrius 6.7.18. The 2026-11-02 review
-of all 303 public Rust items found:
+The port shipped as **2.0.0** and is at **2.1.2** on cyrius 6.7.18. The 2026-11-02 review
+of all 303 public Rust items, updated for the 2.1.2 fixes, found:
 
-- 193 at parity;
+- 194 at parity;
 - 5 improved on Rust;
 - 28 that diverge on purpose, with the reason written down;
 - 19 partial and 33 missing;
-- **25 that compute something different from Rust without a documented reason**.
+- **24 that compute something different from Rust without a documented reason**.
+
+The 2.1.2 P(-1) review ([`../audit/2026-11-02-audit.md`](../audit/2026-11-02-audit.md))
+closed out the 6.6.9 → 6.7.18 bumps, and showed that every one of the 24 predates them.
 
 The verification surface is far behind Rust:
 - no fuzzing;
@@ -71,18 +74,11 @@ Fix every measured divergence, and make the measurement repeatable.
       - let a NaN σ through as Rust does, or write an ADR.
 - [ ] **(S) `hue_shift`:** do the hue add and `rem_euclid` in f32. This lands after
       `srgba_to_hsl`.
-- [ ] **(S) ICC parse regressions,** all caused by `fl_alloc(0)` / `fl_calloc(0)`
-      returning 0 since cyrius 6.6.7:
-      - a zero-tag profile should return `RG_ERR_INVALID_FORMAT`;
-      - an `mft2` with zero input entries should parse with identity curves;
-      - grid size 1 should be accepted, or rejected under an ADR.
-
-      Add a test for each.
+- [ ] **(S) ICC grid size 1:** accept it, as Rust does, or reject it under an ADR.
+      The two `fl_alloc(0)` regressions, zero tags and mft2 with zero entries, were
+      fixed in 2.1.2.
 - [ ] **(S) ICC error codes:** some malformed input returns `RG_ERR_PARSE` where Rust
       returns InvalidFormat for all of it. Unify, or document the split.
-- [ ] **(S) `src/blend.cyr:143`:** write it as `_bl_sub(one, ganita_f32_min(...))`.
-      It is correct today, but only because the compiler passes f32 bits through an
-      `: i64` call.
 - [ ] **(S) Contradictions pinned by tests.** For each, match Rust or write an ADR:
       - the error strings: Rust's InvalidFormat reads "invalid pixel format: …", and
         `Other` carries its message;
@@ -101,15 +97,13 @@ Fix every measured divergence, and make the measurement repeatable.
       - `flood_fill`'s stack has no capacity check;
       - bilinear sampling of a 1-pixel source with a non-finite inverse reads past the
         buffer.
-- [ ] **(S) Stale source comments the review listed:**
+- [ ] **(S) Stale source comments the review listed.** 2.1.2 fixed the ones that
+      stated toolchain or dependency facts. Still wrong:
       - `error.cyr` (INVALID_PARAMETER "levels gamma = 0", "logged at the failure site");
       - `color.cyr:564` (Oklab "f32 throughout");
       - `convert.cyr:4-8`;
       - `transform.cyr:446-449`;
-      - `composite.cyr`'s NaN-ordering and `f64_cos` notes;
-      - `blend.cyr:4-9` and `:261-263`;
-      - `hwaccel.cyr:1`;
-      - `spectral.cyr:9-17`.
+      - `blend.cyr:4-9` and `:261-263`.
 
 **Done when:** the parity doc has no SUSPECT items, and an oracle sweep is clean on
 every u8 output path.
@@ -162,11 +156,7 @@ Make the test, fuzz and benchmark surfaces mean what Rust's meant.
       - Re-measure both sides on a quiet machine.
       - Rewrite `docs/benchmarks-rust-v-cyrius.md`, whose table and prose are stale.
       - The 26 GPU benches wait on a decision about GPU hardware in CI.
-- [ ] **(S) CI hygiene.**
-      - Replace the per-file lint loop with
-        `cyrius lint --strict --strict-deferrals src/*.cyr tests/*.tcyr 2>&1`. Since
-        6.6.5 lint takes 1..N files, and the strict flags exit non-zero, so the old
-        loop's comment is stale.
+- [ ] **(S) CI hygiene.** The lint gate became one strict call in 2.1.2. Still to do:
       - Add the fuzz step.
       - Rename the duplicate `b6`/`b8` globals in `filter_point.tcyr`.
 
@@ -179,9 +169,13 @@ Make the test, fuzz and benchmark surfaces mean what Rust's meant.
 
 - [ ] **(M–L) Decide serde first.** Rust derives Serialize/Deserialize on 14 types:
       the 8 colour structs, `PixelFormat`, `ColorSpace`, `BlendMode`, `ToneCurve`,
-      `Affine` and `Perspective`. Either write the codecs by hand (on bayan; the wire
-      form is serde's, i.e. variant names such as "ColorDodge"), or write an ADR that
-      puts serde out of scope.
+      `Affine` and `Perspective`. Either write the codecs (the wire form is serde's,
+      i.e. variant names such as "ColorDodge"), or write an ADR that puts serde out
+      of scope.
+      - At 6.7.18, `#derive(Serialize)` on an enum works and emits exactly that
+        variant name. It was checked for 2.1.2, so the four enums can be derived.
+      - The structs are hand-rolled byte layouts, so their codecs would be
+        hand-written, on bayan.
 - [ ] **(S) Clone and equality for heap records:**
       - `affine_clone`/`_eq`, `perspective_clone`/`_eq` and `lut3d_clone`;
       - a clone for the colour structs.
@@ -195,9 +189,9 @@ Make the test, fuzz and benchmark surfaces mean what Rust's meant.
 - [ ] **(M) `Lut3d::from_cube`:** port the `.cube` parser, or write an ADR. Either way,
       fix `docs/guides/features/filters.md` and `migration-guide.md`, which advertise
       it.
-- [ ] **(S) Spectral names:** document prakash's three renamed re-exports
-      (`CIE_1931_2DEG`, `VISIBLE_MIN_NM` and `VISIBLE_MAX_NM`), or provide the Rust
-      names.
+- [ ] **(S) Spectral names:** decide whether to provide the Rust names for prakash's
+      three renamed re-exports (`CIE_1931_2DEG`, `VISIBLE_MIN_NM` and
+      `VISIBLE_MAX_NM`). `spectral.cyr` has documented the renames since 2.1.2.
 - [ ] **(S) Namespace decisions:** whether `xorshift64_*` stays public (it was
       private in Rust), and whether `bytevec`'s unprefixed `bv_*` functions need a
       prefix to avoid colliding with consumers.
@@ -317,7 +311,9 @@ deleting it deletes the oracle. **Capture what it knows into tests first.**
 ## Ongoing — toolchain and dependency bumps
 
 Each pin move is a patch release. The steps below are what the 2.0.4 → 2.1.1 bumps
-needed:
+needed. A series of bumps closes with a P(-1) review filed under `docs/audit/`; the
+first, for 6.6.9 → 6.7.18, is
+[`../audit/2026-11-02-audit.md`](../audit/2026-11-02-audit.md).
 
 1. Move `cyrius` in `cyrius.cyml`. Move each dep tag to the newest release that pins
    the same toolchain line or an older one.
@@ -328,10 +324,15 @@ needed:
 3. Check that new stdlib and dep top-level names do not collide with `src/`. At 6.7.18,
    `bayan`'s `_TC_SIZE` broke `icc.cyr`. Also look for new
    `cyrius deps` notes about files outside the declared footprint.
-4. Run `cyrius build`, `cyrius test`, the lint gate and `cyrius bench`. Then run
+4. Run `cyrius build`, `cyrius test` and the lint gate, then
+   `scripts/bench-history.sh`, which appends to `bench-history.csv`. Then run
    `scripts/version-bump.sh X.Y.Z` and `cyrius distlib --check`. Compare the warnings
    against the previous pin.
-5. Until 2.3.x lands, `cyrius fuzz` runs the scaffold stub. **Do not report it as
+5. Look for workarounds the toolchain has outgrown. At 6.7.18 the 2^63 trig guard
+   had become a divergence. A cross-toolchain diff of the same probes, built under
+   the old and new pins, shows exactly what a bump changed. Until the 2.2.x oracle
+   is checked in, the P(-1) audit describes how to do it by hand.
+6. Until 2.3.x lands, `cyrius fuzz` runs the scaffold stub. **Do not report it as
    verification.**
 
 ## Out of scope

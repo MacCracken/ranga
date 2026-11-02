@@ -18,10 +18,12 @@
 # module that is byte-for-byte plausible and rejected by every consumer.
 #
 # WHAT THE TARGET ACCEPTS. ranga may only emit what mabda's `spirv_lower_module`
-# turns into GFX9. `OpLoopMerge` and `OpPhi` are rejected outright
-# (LOWER_ERR_CONTROL_FLOW), so kernels are straight-line code plus if/else —
-# there are no loops here, and none can be added. f64 is gated off on native
-# (MABDA_NATIVE_F64), so everything is f32 or u32.
+# turns into GFX9. When this emitter was written (mabda 4.0.x), `OpLoopMerge`
+# and `OpPhi` were rejected outright and f64 was gated off natively. So the
+# kernels are straight-line code plus if/else, in f32 or u32. mabda 4.1.0 lowers
+# loops and phi, and 4.2.0 enables f64 (MABDA_NATIVE_F64 = 1). This builder has
+# no loop helpers yet. What mabda accepts today is in
+# docs/architecture/001-mabda-native-gpu-constraints.md.
 #
 #   Builder 72 bytes
 #     +0  preamble words   +8  annotations   +16 types/consts   +24 body

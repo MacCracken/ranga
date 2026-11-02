@@ -1,4 +1,4 @@
-# gpu_context.cyr -- GPU device/queue management over mabda 4.0.9
+# gpu_context.cyr -- GPU device/queue management over mabda (pinned in cyrius.cyml)
 # Ported from rust-old/src/gpu/context.rs. Private prefix: _gc_
 #
 # OPTIONAL. Not in the core `[lib]` bundle — this was the `gpu` cargo feature

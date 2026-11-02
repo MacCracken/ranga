@@ -94,8 +94,9 @@ fn affine_translate(tx, ty) { return affine_new(1.0, 0.0, 0.0, 1.0, tx, ty); }
 #must_use
 fn affine_scale(sx, sy) { return affine_new(sx, 0.0, 0.0, sy, 0.0, 0.0); }
 
-# Rust uses sin_cos(); the two calls are equivalent and go through the domain
-# guards in error.cyr so a huge angle yields NaN rather than the argument back.
+# Rust uses sin_cos(); the two calls are equivalent. They go through
+# error.cyr's `_rg_sin`/`_rg_cos`, which give NaN only for a NaN or infinite
+# angle. A huge finite angle reduces as in Rust (since 2.1.2).
 #must_use
 fn affine_rotate(angle_rad) {
     var s = _rg_sin(angle_rad);

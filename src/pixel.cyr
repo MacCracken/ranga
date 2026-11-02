@@ -32,11 +32,12 @@ var PF_YUV420P = 3;
 var PF_NV12    = 4;
 var PF_RGBAF32 = 5;
 
-# Display impl. Hand-written because #derive(Serialize) on a Cyrius enum
-# compiles clean and emits NO CODEC AT ALL — the generated `<name>_to_json` is
-# undefined at link time. Re-verified at the 6.5.29 pin — still open. The derive DOES work on a
-# struct; it is enums specifically that silently produce nothing, and ranga's
-# serde surface is four enums. See §3 item 6.
+# Display impl (Rust's `impl Display`, not serde). Through 6.5.29
+# #derive(Serialize) on an enum compiled clean and emitted no codec at all. At
+# the 6.7.18 pin it works, and `<Name>_to_json` writes the variant name ("Dark"),
+# which is serde's own wire form for a unit variant. Rust derives serde on 14
+# ranga types and the port has no codec for any of them yet. That decision is
+# tracked in docs/development/roadmap.md (2.4.x).
 #must_use
 fn pixel_format_name(f) {
     if (f == PF_RGBA8) { return "RGBA8"; }

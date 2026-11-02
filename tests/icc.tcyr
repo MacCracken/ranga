@@ -67,11 +67,11 @@ assert_eq(approx(_icc_read_s15fixed16(d, 16, 4, err), f64_div(f64_neg(F64_ONE), 
   "s15Fixed16 of -1 raw is -1/65536 — the sign survives the scale");
 
 # Every read is bounds-checked; this is untrusted input.
-_icc_read_u32_be(d, 16, 13, err);
+assert_eq(_icc_read_u32_be(d, 16, 13, err), 0, "a rejected u32 read returns 0");
 assert_eq(load64(err), RG_ERR_PARSE, "a u32 read past the end is rejected");
-_icc_read_u16_be(d, 16, 15, err);
+assert_eq(_icc_read_u16_be(d, 16, 15, err), 0, "a rejected u16 read returns 0");
 assert_eq(load64(err), RG_ERR_PARSE, "a u16 read past the end is rejected");
-_icc_read_u32_be(d, 16, (0 - 1), err);
+assert_eq(_icc_read_u32_be(d, 16, (0 - 1), err), 0, "a negative-offset read returns 0");
 assert_eq(load64(err), RG_ERR_PARSE, "a negative offset is rejected");
 fl_free(d);
 
@@ -243,6 +243,19 @@ var bd7 = bv_data(bad7);
 store8(bd7 + 204, 122);
 assert_eq(icc_profile_from_bytes(bd7, plen, err), 0, "an XYZ tag with a wrong type signature is rejected");
 bv_free(bad7);
+
+# A tag count of ZERO. Rust parses an empty tag table and then fails the first tag
+# lookup, so both parsers report InvalidFormat. Since cyrius 6.6.7 `fl_calloc(0)`
+# returns 0, and from 2.0.3 to 2.1.1 the empty table was reported as
+# RG_ERR_ALLOCATION instead. That code reads as out-of-memory, not as a bad file.
+var bad8 = bv_clone(pbv);
+var bd8 = bv_data(bad8);
+_icc_write_u32_be(bd8, 128, 0);
+assert_eq(icc_profile_from_bytes(bd8, plen, err), 0, "a profile with zero tags is rejected");
+assert_eq(load64(err), RG_ERR_INVALID_FORMAT, "zero tags is INVALID_FORMAT, not ALLOCATION");
+assert_eq(icc_lut_profile_from_bytes(bd8, plen, err), 0, "the LUT parser rejects zero tags too");
+assert_eq(load64(err), RG_ERR_INVALID_FORMAT, "and reports it as a missing A2B0, INVALID_FORMAT");
+bv_free(bad8);
 
 # ================================================================
 # curv TABLE and para curves — the paths srgb_v2_profile never takes
@@ -674,10 +687,15 @@ test_group("lut profile");
 # were indexed b-fastest or r-fastest, and the ICC ordering is the easiest
 # thing in this parser to get backwards.
 fn build_lut_profile(scale16, grid, out_len) {
+    return build_lut_profile_n(scale16, grid, 2, out_len);
+}
+
+# `n_in` is mft2's declared input/output table length. mft1's is fixed at 256.
+fn build_lut_profile_n(scale16, grid, n_in, out_len) {
     var width = 1;
     var in_entries = 256;
     var hdr = 48;
-    if (scale16 == 1) { width = 2; in_entries = 2; hdr = 52; }
+    if (scale16 == 1) { width = 2; in_entries = n_in; hdr = 52; }
 
     var tag_off = 144;
     var in_start = tag_off + hdr;
@@ -814,6 +832,26 @@ assert_eq(approx(load64(lz), 0.03125048, 0.000001), 1, "and blue by fb, which is
 
 icc_lut_profile_free(m2p);
 bv_free(m2bv);
+
+# --- mft2 with ZERO input-table entries ---
+# Rust parses this and applies identity input curves (`apply_curve` on an empty
+# curve returns its input). Since cyrius 6.6.7 `fl_alloc(0)` returns 0, and from
+# 2.0.3 to 2.1.1 the port rejected the profile as RG_ERR_ALLOCATION. The CLUT is the
+# same asymmetric 2x2x2 as above, so identity curves must give the same corners.
+var m0bv = build_lut_profile_n(1, 2, 0, llen);
+var m0p = icc_lut_profile_from_bytes(bv_data(m0bv), load64(llen), err);
+assert_eq(load64(err), RG_ERR_NONE, "an mft2 with zero input entries parses, as in Rust");
+assert_eq(m0p != 0, 1, "and returns a profile");
+if (m0p != 0) {
+    assert_eq(icc_lut_profile_curve_len(m0p), 0, "its input curves are empty");
+    icc_lut_profile_apply(m0p, F64_ONE, 0, 0, lx, ly, lz);
+    assert_eq(approx(load64(lx), 0.50000763, 0.000001), 1, "empty curves are identity: pure red reads the r=1 cell");
+    icc_lut_profile_apply(m0p, 0.5, 0, 0.25, lx, ly, lz);
+    assert_eq(approx(load64(lx), 0.25000381, 0.000001), 1, "half red passes through unchanged into the grid");
+    assert_eq(approx(load64(lz), 0.03125048, 0.000001), 1, "quarter blue passes through unchanged too");
+    icc_lut_profile_free(m0p);
+}
+bv_free(m0bv);
 
 # --- mft1, 8-bit with fixed 256-entry tables ---
 var m1bv = build_lut_profile(0, 2, llen);

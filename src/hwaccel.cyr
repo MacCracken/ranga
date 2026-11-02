@@ -1,4 +1,4 @@
-# hwaccel.cyr -- hardware accelerator detection over ai-hwaccel 2.3.17
+# hwaccel.cyr -- hardware accelerator detection over ai-hwaccel (pinned in cyrius.cyml)
 # Ported from rust-old/src/hwaccel.rs. Private prefix: _hw_
 #
 # OPTIONAL. Not in the core `[lib]` bundle. This was a non-default cargo feature

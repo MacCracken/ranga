@@ -145,13 +145,19 @@ assert_eq(_rg_exp(_RG_INF), _RG_INF, "exp(+inf) == +inf (Rust), not NaN");
 assert_eq(f64_to(_rg_exp(f64_from(0))), 1, "exp(0) == 1 delegates");
 
 # --- _rg_sin / _rg_cos: domain guard ---
-# x86 fsin/fcos are undefined for |x| >= 2^63 and return the argument
-# unchanged, so an unclamped caller angle would silently produce a "sine"
-# outside [-1, 1]. The shim reports the loss as NaN instead of fabricating.
+# A non-finite angle gives NaN, as Rust's sin/cos do. A HUGE finite angle must
+# reduce correctly. Through cyrius 6.6.x, x86 fsin/fcos returned the argument for
+# |x| >= 2^63, so the shim reported NaN there. Since then f64_sin/f64_cos reduce
+# every finite argument and match libm, which is what Rust calls. The old
+# 2^63 guard had become a divergence: affine_rotate(1e20) was NaN where Rust is
+# finite. The expected bits below are glibc's sin/cos(1e20).
 assert_eq(f64_to(_rg_sin(f64_from(0))), 0, "sin(0) == 0 delegates");
 assert_eq(f64_to(_rg_cos(f64_from(0))), 1, "cos(0) == 1 delegates");
 assert_eq(_rg_sin(_RG_INF), _RG_NAN, "sin(+inf) is NaN, not the argument");
 assert_eq(_rg_cos(_RG_INF), _RG_NAN, "cos(+inf) is NaN, not the argument");
+assert_eq(_rg_sin(_RG_NAN), _RG_NAN, "sin(NaN) is NaN");
+assert_eq(_rg_sin(0x4415AF1D78B58C40), 0xBFE4A5E605FD6450, "sin(1e20) reduces like libm, not NaN");
+assert_eq(_rg_cos(0x4415AF1D78B58C40), 0x3FE872720FC60D3D, "cos(1e20) reduces like libm, not NaN");
 
 # ================================================================
 # ganita 1.1.0 f32 tier — the shim ranga does NOT have to write

@@ -2,6 +2,99 @@
 
 ## [Unreleased]
 
+## [2.1.2] - 2026-11-02
+
+Closes out the toolchain bumps from 2.0.3 to 2.1.1 (cyrius 6.6.9 → 6.7.18) with a
+P(-1) review: [`docs/audit/2026-11-02-audit.md`](docs/audit/2026-11-02-audit.md). That
+review found 9 items (2 medium, 4 low, 3 info). Eight are fixed here; the ninth is
+upstream. Each behavioural fix comes with a test that fails on 2.1.1.
+
+### Fixed
+
+- **ICC: an `mft2` LUT profile with zero input-table entries is accepted again.** Since
+  cyrius 6.6.7 `fl_alloc(0)` returns 0. From 2.0.3 on, the profile was therefore
+  rejected as `RG_ERR_ALLOCATION`, where Rust parses it with identity input curves.
+  Empty curves are now left unallocated, and `_icc_apply_curve` treats them as
+  identity, as Rust does.
+- **`affine_rotate` and the Oklch/CIEDE2000 trig no longer turn a huge angle into NaN.**
+  `_rg_sin`/`_rg_cos` returned NaN for |x| ≥ 2^63, a guard for x87 `fsin`/`fcos`
+  returning their argument there. At the 6.7.18 pin `f64_sin`/`f64_cos` reduce every
+  finite argument and match glibc bit for bit, which is what Rust calls. So
+  `affine_rotate(1e20)` was NaN where Rust is finite. NaN now comes out only for a NaN
+  or infinite angle.
+- **ICC: a profile with zero tags reports `RG_ERR_INVALID_FORMAT`, not
+  `RG_ERR_ALLOCATION`.** This is the same `fl_calloc(0)` change. Rust parses the empty
+  table and fails the first lookup with InvalidFormat, from both parsers.
+- **`src/blend.cyr:143` compiler warning.** ColorBurn subtracted an `: i64`-declared
+  call's f32 bits with a bare `-`. It now uses the typed `_bl_sub`. The exhaustive
+  probe (12 modes × 65,536 pairs) is still byte-identical to Rust.
+- **`tests/icc.tcyr`: three discarded `#must_use` results** are now asserted to be 0,
+  which removes three warnings. ranga's own code now compiles with zero warnings.
+
+### Changed
+
+- **prakash `2.15.0` → `2.15.1`** (feature `spectral`; pins 6.7.18). Only
+  `lib/prakash.cyr` changed. The lock records 69 files and 7 commit pins, each matching
+  its GitHub tag, and `cyrius deps --verify` reports 69 verified, 0 failed.
+- **`lib/flags.cyr` and `lib/hashmap_fast.cyr` removed** (after the 2.1.1 commit).
+  6.7.18's `cyrius deps` reports both as outside the declared footprint and no longer
+  vendors them, and nothing includes either one. They were dropped with
+  `rm … && cyrius deps --lock`, and a CI-style resolve does not bring them back.
+  `src/simd_u8.cyr` and `docs/development/port-mechanics.md` cited
+  `lib/hashmap_fast.cyr:66` as the in-tree `asm { }` precedent, and now name the cyrius
+  stdlib's copy.
+- **`scripts/bench-history.sh` rewritten for Cyrius.** It was still the Rust script
+  (`cargo bench` into a `benches/` directory that does not exist), so it failed on every
+  run and no Cyrius history had ever been recorded. It now runs `cyrius bench`, and
+  each row records the version, commit, cyrius pin and timer-floor regime. The new
+  `bench-history.csv` holds the 2.1.1 baseline and the 2.1.2 run: 34 of 35 are within
+  ±10%, and the median ratio is 1.01.
+- **CI lint gate:** a single `cyrius lint --strict --strict-deferrals` call replaces the
+  per-file loop that parsed printed totals. The loop's comment ("takes ONE path, ALWAYS
+  exits 0") has been false since cyrius 6.6.5. The strict form was checked at the pin:
+  it exits 2 on a warning or an untracked deferral and 0 on the repo.
+- **Source comments that stated toolchain or dependency facts the bumps made false**
+  are corrected, with no code change:
+  - the `error.cyr` shim table;
+  - ganita's NaN min/max and the old cosine limit in `composite.cyr`;
+  - `#derive(Serialize)` on enums, which works at 6.7.18 and emits serde's variant
+    names;
+  - prakash's three renamed re-exports;
+  - the ai-hwaccel and mabda version headers;
+  - the GPU lowerer limits mabda 4.1.0 lifted.
+
+  The GPU workarounds themselves stay, and are retired in roadmap 2.5.x.
+- **Docs:**
+  - `docs/development/parity-rust-v-cyrius.md` is a new item-by-item review of all 303
+    Rust public items;
+  - `docs/development/roadmap.md` is rewritten future-facing, with milestones 2.2.x
+    to 2.x;
+  - `docs/architecture/001` records what mabda 4.2.0's native GPU path accepts;
+  - `ROADMAP.md` is now a summary.
+- **Bundles** were regenerated for the changes above. The sidecars are unchanged.
+
+### Corrected
+
+- **There is no real fuzz harness.** `tests/ranga.fcyr` is still the 16-line `cyrius port`
+  scaffold stub: it includes no ranga module, calls an empty `fuzz_main` once and prints
+  "fuzz: ok". The "fuzz re-verified" lines in the 2.0.3, 2.0.4, 2.1.0 and 2.1.1 entries
+  meant only that the stub ran. They have been removed from 2.0.4, 2.1.0 and 2.1.1, and
+  none of the 8
+  Rust fuzz targets is ported. Tracked in `docs/development/roadmap.md` (2.3.x).
+
+### Known
+
+- prakash 2.15.1 brings three warnings into every compile that includes it:
+  `num_fft` undefined, and two f64/int comparisons. `cyrius distlib` reports `num_fft`
+  as undefined in `ranga-spectral.cyr`. These are upstream, and vendored `lib/` is not
+  modified here.
+- `cyrius deps` still warns that stdlib `sakshi` overlaps the sakshi package hisab
+  resolves. The kept stdlib snapshot is byte-identical to sakshi 2.5.10.
+- The P(-1) cross-toolchain diff shows that ICC results computed through `pow` move by
+  1–2 ULP between stdlib snapshots: net toward Rust, but not stable across pins. Every
+  other probed output was identical under 6.6.9 and 6.7.18, except one, which the bump
+  fixed: `gradient_linear_angled` at 1e25°.
+
 ## [2.1.1] - 2026-11-02
 
 ### Fixed
@@ -30,30 +123,14 @@
   - Transitive pins moved with them: hisab `3.4.0` → `3.4.1`, sakshi `2.5.8` → `2.5.10`.
     samvada `1.0.1` and chitra `1.0.3` are unchanged.
 - **`lib/`:** 42 files updated, plus a new `lib/unicode/` (7 files) that the 6.7.18
-  `lib/bayan.cyr` includes. The `[deps] stdlib` list is unchanged. ai-hwaccel 2.5.6's
-  sidecar adds `atomic`, but its bundle includes `lib/atomic.cyr` itself and
-  `cyrius deps` asks for nothing more.
-- **`lib/flags.cyr` and `lib/hashmap_fast.cyr` removed.** 6.7.18's `cyrius deps`
-  reports both as outside the declared footprint, so the resolve no longer vendors
-  them, and nothing includes either one. They were dropped with
-  `rm … && cyrius deps --lock`, and a CI-style resolve does not bring them back. The
-  lock records 69 files and 7 commit pins, each matching its GitHub tag, and
-  `cyrius deps --verify` reports 69 verified, 0 failed. The comment in
-  `src/simd_u8.cyr` that cited `lib/hashmap_fast.cyr:66` as the in-tree precedent for
-  hand-encoded `asm { }` now names the cyrius stdlib's copy, as does
-  `docs/development/port-mechanics.md`.
-- **Bundles:** besides the version line, the rename above and the `simd_u8.cyr`
-  comment, the 6.7.18 `cyrius distlib` trims two sidecars and their `# Requires`
-  blocks: `freelist` from `ranga-hwaccel` and `math` from `ranga-spectral`. Both still
-  arrive through other leaves.
-
-### Corrected
-
-- **There is no real fuzz harness.** `tests/ranga.fcyr` is still the 16-line `cyrius port`
-  scaffold stub: it includes no ranga module, calls an empty `fuzz_main` once and prints
-  "fuzz: ok". The "fuzz re-verified" lines in the 2.0.3, 2.0.4 and 2.1.0 entries meant
-  only that the stub ran. They have been removed from 2.0.4 and 2.1.0, and none of the 8
-  Rust fuzz targets is ported. Tracked in `docs/development/roadmap.md` (2.3.x).
+  `lib/bayan.cyr` includes. The lock records 71 files and 7 commit pins, each matching
+  its GitHub tag, and `cyrius deps --verify` reports 71 verified, 0 failed. The
+  `[deps] stdlib` list is unchanged. ai-hwaccel 2.5.6's sidecar adds `atomic`, but its
+  bundle includes `lib/atomic.cyr` itself and `cyrius deps` asks for nothing more.
+- **Bundles:** besides the version line and the rename above, the 6.7.18
+  `cyrius distlib` trims two sidecars and their `# Requires` blocks: `freelist` from
+  `ranga-hwaccel` and `math` from `ranga-spectral`. Both still arrive through other
+  leaves.
 
 ### Known
 

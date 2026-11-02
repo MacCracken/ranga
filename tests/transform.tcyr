@@ -121,6 +121,13 @@ affine_apply(rot, 0.0, F64_ONE, pt);
 assert_eq(approx(load64(pt), f64_neg(F64_ONE), 0.000001), 1, "rotate 90deg: x of (0,1) -> -1 (pins the sign of c)");
 assert_eq(approx(load64(pt + 8), 0, 0.000001), 1, "rotate 90deg: y of (0,1) -> 0");
 
+# A huge angle is still a rotation. Rust's `sin_cos(1e20)` is finite, and before
+# 2.1.2 the port's 2^63 trig guard made this matrix NaN. The bits are glibc's.
+var rot_huge = affine_rotate(0x4415AF1D78B58C40);
+assert_eq(affine_a(rot_huge), 0x3FE872720FC60D3D, "rotate(1e20): a is cos(1e20), as in Rust");
+assert_eq(affine_b(rot_huge), 0xBFE4A5E605FD6450, "rotate(1e20): b is sin(1e20), not NaN");
+affine_free(rot_huge);
+
 # Inverse round-trip on a matrix with non-zero b and c. The earlier round-trip
 # used translate-then-scale, where b == c == 0, so the sign of the off-diagonal
 # terms in affine_inverse was never exercised — dropping the negation on b
