@@ -2,6 +2,38 @@
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-11-02
+
+### Changed
+
+- **Toolchain `6.6.20` → `6.7.9`**, the first pin on the 6.7 language minor (checked
+  traits, `dyn`, slices, tuples). ranga uses none of the new constructs, and none of the
+  new compile errors fire on it. `lib/` re-vendored with
+  `cyrius deps --features spectral,hwaccel,gpu`, `cyrius.lock` resolved from scratch,
+  all four bundles regenerated with `scripts/version-bump.sh`. `src/` and `tests/` are
+  untouched. Build, the full test suite (19 files, 1,921 assertions), lint (41 files,
+  0 warnings, 0 untracked deferrals), bench, fuzz and `cyrius distlib --check`
+  re-verified.
+- **Optional deps moved to the releases that pin the 6.7.9 line.**
+  - prakash `2.10.1` → `2.11.0` (feature `spectral`; pins 6.7.9)
+  - mabda `4.1.7` → `4.2.0` (feature `gpu`; pins 6.7.5)
+  - ai-hwaccel stays at `2.4.2` (feature `hwaccel`; pins 6.6.20). It has no release
+    between 6.6.20 and 6.7.9, and the next tag, 2.5.0, pins 6.7.18.
+  - Transitive pins moved with them: hisab `3.3.7` → `3.4.0`, sakshi `2.5.7` → `2.5.8`.
+    samvada `1.0.1` and chitra `1.0.3` are unchanged.
+- The lock records 64 files and 7 commit pins, each matching its GitHub tag, and
+  `cyrius deps --verify` reports 64 verified, 0 failed. No file was added to or
+  removed from `lib/`, and the `[deps] stdlib` list is unchanged.
+- The bundles differ from 2.0.4 only in the `# Version:` line; the `.deps` sidecars
+  are unchanged.
+
+### Known
+
+- The compiler warnings are the same set as 2.0.4 under 6.6.20, including
+  `src/blend.cyr:143:62` ("f32 arithmetic with a non-f32 right operand"). 6.7.9 adds
+  none. `cyrius deps` still warns that stdlib `sakshi` overlaps the sakshi package
+  hisab resolves; the kept stdlib snapshot is byte-identical to sakshi 2.5.8.
+
 ## [2.0.4] - 2026-11-02
 
 ### Changed
