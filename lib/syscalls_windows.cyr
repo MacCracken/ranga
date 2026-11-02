@@ -34,8 +34,8 @@ enum SysNr {
     SYS_CLOSE = 3;      # → CloseHandle
     SYS_LSEEK = 8;      # → SetFilePointerEx
     SYS_MMAP = 9;       # → VirtualAlloc(MEM_COMMIT|MEM_RESERVE)
-    SYS_BRK = 12;       # → VirtualAlloc (grow-at-end via committed pages)
-    SYS_MUNMAP = 11;    # → VirtualFree(MEM_RELEASE)
+    SYS_BRK = 12;       # NOT rerouted: -38 (-ENOSYS). The PE heap is mmap → VirtualAlloc
+    SYS_MUNMAP = 11;    # → VirtualFree(addr, 0, MEM_RELEASE) since 6.6.20 (before: unrouted, -38)
     SYS_EXIT = 60;      # → ExitProcess
     SYS_EXIT_GROUP = 231; # NOT rerouted — call sys_exit_group(), never syscall(231)
     # v6.5.25 — NOT rerouted (Windows has no ioctl; DeviceIoControl is a different
@@ -83,6 +83,24 @@ enum SysNr {
     SYS_PROCESS_VM_READV = 310;
     SYS_PROCESS_VM_WRITEV = 311;
     SYS_MKNODAT = 259;
+    # 6.6.12 — the xattr family, fchown, statx and getrlimit: the same "the constant exists so
+    # cross-platform source COMPILES" contract, NOT rerouted — Windows has no extended-attribute,
+    # POSIX-owner, statx or rlimit syscall. The stubs below decline explicitly. CHANGELOG [6.6.12]
+    SYS_SETXATTR = 188;
+    SYS_LSETXATTR = 189;
+    SYS_FSETXATTR = 190;
+    SYS_GETXATTR = 191;
+    SYS_LGETXATTR = 192;
+    SYS_FGETXATTR = 193;
+    SYS_LISTXATTR = 194;
+    SYS_LLISTXATTR = 195;
+    SYS_FLISTXATTR = 196;
+    SYS_REMOVEXATTR = 197;
+    SYS_LREMOVEXATTR = 198;
+    SYS_FREMOVEXATTR = 199;
+    SYS_FCHOWN = 93;
+    SYS_STATX = 332;
+    SYS_GETRLIMIT = 97;
 }
 
 # File descriptors mirror Linux convention. GetStdHandle maps
@@ -396,18 +414,24 @@ fn sys_mmap(addr, length, prot, flags, fd, offset) {
     return syscall(SYS_MMAP, addr, length, prot, flags, fd, offset);
 }
 
-# Release a VirtualAlloc'd region. Rerouted to kernel32!VirtualFree
-# with MEM_RELEASE. `length` is ignored for MEM_RELEASE per Win32
-# semantics (the whole reservation is released), but the Linux-
-# compat surface keeps it for source-level portability.
+# Release a VirtualAlloc'd region: 0, or a negative errno when VirtualFree refuses. Rerouted
+# to kernel32!VirtualFree(addr, 0, MEM_RELEASE) since 6.6.20. `length` is DROPPED — MEM_RELEASE
+# requires dwSize 0 and frees the WHOLE reservation — and kept only for source portability.
+# ⚠ So a PARTIAL or OFFSET munmap is not supported on PE: an address that is not a
+# reservation's base fails harmlessly, but the base with a SHORTER length releases all of it,
+# leaving any later use of the tail a use-after-free. Every PE-reachable caller frees a base
+# with its full length (lib/freelist.cyr's large blocks). ⛔ Until 6.6.20 this comment claimed
+# the reroute while none existed: syscall 11 returned -38 and every large fl_free on Windows
+# leaked its mapping (lib/freelist.cyr). CHANGELOG [6.6.20]
 fn sys_munmap(addr, length) {
     return syscall(SYS_MUNMAP, addr, length);
 }
 
-# brk-shaped allocator anchor. Reroutes to VirtualAlloc-based
-# growable region so lib/alloc.cyr's bump logic works unchanged.
-# See lib/alloc_windows.cyr for the Windows-specific alloc_init
-# that bootstraps the heap.
+# brk-shaped allocator anchor — NOT rerouted on PE: syscall 12 returns -38 (-ENOSYS). Nothing
+# on Windows needs it: lib/alloc_windows.cyr reserves its heap, and maps each request too large
+# for it, through mmap (syscall 9 → VirtualAlloc) — since v6.0.39 found that the brk reroute this
+# comment used to promise had never been implemented. Kept so Linux-shaped source still compiles
+# for PE. CHANGELOG [6.6.20]
 fn sys_brk(addr) {
     return syscall(SYS_BRK, addr);
 }
@@ -421,9 +445,11 @@ fn sys_brk(addr) {
 # (uninitialised buffer / clock-ns / PID-mix) — a predictable mask/TXID/key is
 # worse than a failed op (exactly what CVE-19 closed). `flags` is ignored
 # (Linux getrandom flags have no ProcessPrng analog). See
-# issues/2026-06-11-windows-entropy-primitive.md.
+# issues/archived/2026-06-11-windows-entropy-primitive.md.
+# The BOOL is masked to 32 bits: EPROCPRNG_PE defines only eax, so a failure whose upper half
+# was dirty would read as success and hand back an unfilled buffer. CHANGELOG [6.6.20]
 fn sys_getrandom(buf, len, flags): i64 {
-    if (syscall(0xF01A, buf, len) != 0) { return len; }
+    if ((syscall(0xF01A, buf, len) & 0xFFFFFFFF) != 0) { return len; }   # BOOL: only eax is defined
     return 0 - 1;
 }
 
@@ -473,6 +499,11 @@ fn sys_mkdir(path, mode): i64 { return syscall(83, path, mode); }
 # (_pe_ensure_deletef, v5.11.22). Returns 0 on success, -1 on failure. (Was a
 # no-op `return 0` stub through v6.3.42 — VR-01 surfaced the file was never deleted.)
 fn sys_unlink(path): i64 { return syscall(87, path); }
+# Remove an empty directory — kernel32!RemoveDirectoryW through the 0xF03B reroute (the one
+# lib/io.cyr's xrmdir already uses). Returns 0 on success, -1 on failure. 6.6.10: the reroute
+# existed since 6.6.6 but no `sys_rmdir` did, so a portable caller of the POSIX name failed to
+# COMPILE for PE (tests/tcyr/platform/fs.tcyr). CHANGELOG [6.6.10]
+fn sys_rmdir(path): i64 { return syscall(0xF03B, path); }
 
 # --- v6.5.25: raw floor wrappers this STANDALONE peer never defined ---
 # This file includes nothing, so it inherits nothing: a name missing here is missing for
@@ -540,26 +571,18 @@ enum Statfs {
 }
 
 # access(path, mode) — 0xF019 (61465) → kernel32!GetFileAttributesW, live since v6.1.18.
-# ⚠ THE REROUTE TAKES AN ALREADY-WIDE (UTF-16) PATH, which is the one non-obvious part; the
-# widen loop below is the same shape lib/io.cyr uses for its own CreateFileW calls.
+# The reroute takes the NARROW UTF-8 path and widens it in the emitter — invalid UTF-8 is
+# refused, and a path of 248+ units is made absolute and `\\?\`-prefixed. ⛔ 6.6.12: it took a
+# path widened HERE with no prefix and a 260-unit cap, so access() of an existing long path was
+# -1 on real Windows while open() of the same path worked.
 # INVALID_FILE_ATTRIBUTES is 0xFFFFFFFF → the path does not exist (or is unreachable).
 # Returns 0 on success and -1 otherwise, the POSIX contract callers expect.
 # NOTE: existence only. W_OK is deliberately NOT modelled from FILE_ATTRIBUTE_READONLY —
 # a read-only ACL, a directory and a locked file all differ from the DOS attribute bit, and
 # a wrong "writable" answer is worse than an unmodelled one. Callers needing write
-# permission should attempt the open and handle the failure.
+# permission should attempt the open and handle the failure. CHANGELOG [6.6.12]
 fn sys_access(path, mode): i64 {
-    var wp[520];
-    var i = 0;
-    while (i < 259) {
-        var c = load8(path + i);
-        store8(&wp + i * 2, c);
-        store8(&wp + i * 2 + 1, 0);
-        if (c == 0) { i = 259; } else { i = i + 1; }
-    }
-    store8(&wp + 518, 0);
-    store8(&wp + 519, 0);
-    var attrs = syscall(61465, &wp);
+    var attrs = syscall(61465, path);
     if (attrs == 4294967295) { return 0 - 1; }
     return 0;
 }
@@ -610,20 +633,80 @@ fn sys_truncate(path, length): i64 {
     return r;
 }
 
-# Widen a UTF-8 (ASCII) path into `dst` as UTF-16LE with '/' → '\', at most `cap` - 1 units
-# plus a NUL. Returns the unit count. The peer's own copy: it includes nothing, so it cannot
-# borrow lib/fs_win.cyr's `_fs_widen`, and a stack buffer needs no allocator. CHANGELOG [6.6.9]
-fn _win_widen(dst, src, cap): i64 {
+# Decode EXACTLY `n` bytes of UTF-8 at `src` into UTF-16LE at `dst` ('/' → '\'), at most
+# `cap` - 1 units plus a NUL; a code point past U+FFFF becomes a surrogate pair. Returns the unit
+# count, or -1 — and then `dst` must not be used — for an embedded NUL (a NUL inside the bytes
+# would silently cut the path), invalid UTF-8 (a stray continuation byte, a truncated or overlong
+# sequence, an encoded surrogate, anything past U+10FFFF) or no room. REFUSE, NEVER TRUNCATE: the
+# byte-per-unit loops this replaced zero-extended UTF-8 as Latin-1 and cut at their cap, so a
+# non-ASCII name was answered as some other name and a long one as its own prefix. It is the ONE
+# stdlib decoder, behind `_win_widen` below — which `sys_symlink` uses for CreateSymbolicLinkW
+# (0xF03E), the one reroute that still takes wide paths. Since 6.6.12 the stat/list reroutes
+# (0xF016 FindFirstFileW, 0xF019 GetFileAttributesW) take narrow paths and are decoded by the
+# emitter, like open. CHANGELOG [6.6.11], [6.6.12]
+fn _win_widen_n(dst, src, n, cap): i64 {
     var i = 0;
-    while (i < cap - 1) {
+    var o = 0;
+    while (i < n) {
         var c = load8(src + i);
-        if (c == 0) { break; }
-        if (c == 47) { c = 92; }
-        store16(dst + i * 2, c);
-        i = i + 1;
+        var cp = c;
+        var k = 0;
+        if (c == 0) { return 0 - 1; }
+        if (c >= 0x80) {
+            if (c < 0xC2) { return 0 - 1; }             # continuation byte / overlong 2-byte lead
+            if (c >= 0xF5) { return 0 - 1; }            # past U+10FFFF
+            k = 1;
+            cp = c & 0x1F;
+            if (c >= 0xE0) { k = 2; cp = c & 0x0F; }
+            if (c >= 0xF0) { k = 3; cp = c & 0x07; }
+            if (i + k >= n) { return 0 - 1; }           # truncated sequence
+            var j = 1;
+            while (j <= k) {
+                var cc = load8(src + i + j);
+                if ((cc & 0xC0) != 0x80) { return 0 - 1; }
+                cp = (cp << 6) | (cc & 0x3F);
+                j = j + 1;
+            }
+            if (k == 2) {
+                if (cp < 0x800) { return 0 - 1; }       # overlong
+                if ((cp & 0xF800) == 0xD800) { return 0 - 1; }   # an encoded surrogate
+            }
+            if (k == 3) {
+                if (cp < 0x10000) { return 0 - 1; }     # overlong
+                if (cp > 0x10FFFF) { return 0 - 1; }
+            }
+        }
+        if (cp == 47) { cp = 92; }                      # '/' → '\'
+        if (cp >= 0x10000) {
+            if (o + 2 >= cap) { return 0 - 1; }
+            var v = cp - 0x10000;
+            store16(dst + o * 2, 0xD800 | (v >> 10));
+            store16(dst + o * 2 + 2, 0xDC00 | (v & 0x3FF));
+            o = o + 2;
+        } else {
+            if (o + 1 >= cap) { return 0 - 1; }
+            store16(dst + o * 2, cp);
+            o = o + 1;
+        }
+        i = i + 1 + k;
     }
-    store16(dst + i * 2, 0);
-    return i;
+    store16(dst + o * 2, 0);
+    return o;
+}
+
+# Widen a NUL-terminated UTF-8 path into `dst` (`cap` units including the NUL) via
+# `_win_widen_n`. Returns the unit count, or -1 when the path does not fit or is not valid
+# UTF-8 — it never cuts a path to fit (it did until 6.6.11: `sys_symlink` then created its link
+# at the path's first 518 units). This peer includes nothing, which is why the one decoder lives
+# here for the other modules to call; the stack buffers its callers pass need no allocator.
+# CHANGELOG [6.6.9], [6.6.11]
+fn _win_widen(dst, src, cap): i64 {
+    var n = 0;
+    while (load8(src + n) != 0) {
+        n = n + 1;
+        if (n >= cap * 3) { return 0 - 1; }             # more bytes than `cap` units can hold
+    }
+    return _win_widen_n(dst, src, n, cap);
 }
 
 # symlink(target, linkpath) — REAL since 6.6.9: CreateSymbolicLinkW (reroute 0xF03E). Windows
@@ -638,38 +721,44 @@ fn _win_widen(dst, src, cap): i64 {
 fn sys_symlink(target, linkpath): i64 {
     var wl[1040];
     var wt[1040];
-    var wr[2080];
-    _win_widen(&wl, linkpath, 519);
+    var rr[3120];
+    if (_win_widen(&wl, linkpath, 519) < 0) { return 0 - 1; }   # 6.6.11: refused, never cut
     var tn = _win_widen(&wt, target, 519);
-    # Resolve the target as the link will: absolute ('\...', 'X:...') as-is, else against
-    # the link's directory (the part of linkpath up to its last separator).
+    if (tn < 0) { return 0 - 1; }
+    # Resolve the target as the link will: absolute ('\...', '/...', 'X:...') as-is, else against
+    # the link's directory (the part of linkpath up to its last separator). Built NARROW (UTF-8):
+    # the GetFileAttributesW reroute takes a narrow path since 6.6.12. Both inputs passed
+    # `_win_widen` at 519 units, so each is under 1557 bytes and `rr` holds the two plus a NUL.
     var abs = 0;
-    if (tn > 0) {
-        if (load16(&wt) == 92) { abs = 1; }
-    }
-    if (tn > 1) {
-        if (load16(&wt + 2) == 58) { abs = 1; }
+    var t0 = load8(target);
+    if (t0 == 92) { abs = 1; }
+    if (t0 == 47) { abs = 1; }
+    if (t0 != 0) {
+        if (load8(target + 1) == 58) { abs = 1; }
     }
     var ri = 0;
     if (abs == 0) {
         var ls = 0 - 1;
         var li = 0;
-        while (load16(&wl + li * 2) != 0) {
-            if (load16(&wl + li * 2) == 92) { ls = li; }
+        while (load8(linkpath + li) != 0) {
+            var lc = load8(linkpath + li);
+            if (lc == 92) { ls = li; }
+            if (lc == 47) { ls = li; }
             li = li + 1;
         }
         while (ri <= ls) {
-            store16(&wr + ri * 2, load16(&wl + ri * 2));
+            store8(&rr + ri, load8(linkpath + ri));
             ri = ri + 1;
         }
     }
     var ti = 0;
-    while (ti <= tn) {
-        store16(&wr + (ri + ti) * 2, load16(&wt + ti * 2));
+    while (load8(target + ti) != 0) {
+        store8(&rr + ri + ti, load8(target + ti));
         ti = ti + 1;
     }
+    store8(&rr + ri + ti, 0);
     var kind = 0;
-    var at = syscall(61465, &wr);                 # GetFileAttributesW
+    var at = syscall(61465, &rr);                 # GetFileAttributesW (narrow; 6.6.12)
     if (at != 4294967295) {
         if ((at & 16) != 0) { kind = 1; }         # SYMBOLIC_LINK_FLAG_DIRECTORY
     }
@@ -716,6 +805,41 @@ fn sys_process_vm_readv(pid, local_iov, liovcnt, remote_iov, riovcnt, flags): i6
 fn sys_process_vm_writev(pid, local_iov, liovcnt, remote_iov, riovcnt, flags): i64 { return 0 - 38; }
 # Create a filesystem node (FIFO / device). Declines: Windows named pipes live in \\.\pipe\.
 fn sys_mknodat(dirfd, path, mode, dev): i64 { return 0 - 38; }
+# ── 6.6.12: PE peers for the xattr / fchown / statx / getrlimit wrappers in
+# lib/syscalls_linux_common.cyr. Windows has none of them as a syscall (alternate data
+# streams, security descriptors and job-object limits are different object models, not
+# renumbers), so each declines with -38/-ENOSYS; the caller's `r < 0` fires. Present so a
+# portable consumer (kriya) BUILDS for PE. CHANGELOG [6.6.12]
+# Set an extended attribute. Declines: NTFS alternate data streams are a different object model.
+fn sys_setxattr(path, name, value, size, flags): i64 { return 0 - 38; }
+# Set an extended attribute on a symlink itself. Declines, same reason as sys_setxattr.
+fn sys_lsetxattr(path, name, value, size, flags): i64 { return 0 - 38; }
+# Set an extended attribute by descriptor. Declines, same reason as sys_setxattr.
+fn sys_fsetxattr(fd, name, value, size, flags): i64 { return 0 - 38; }
+# Read an extended attribute. Declines, same reason as sys_setxattr.
+fn sys_getxattr(path, name, value, size): i64 { return 0 - 38; }
+# Read an extended attribute of a symlink itself. Declines, same reason as sys_setxattr.
+fn sys_lgetxattr(path, name, value, size): i64 { return 0 - 38; }
+# Read an extended attribute by descriptor. Declines, same reason as sys_setxattr.
+fn sys_fgetxattr(fd, name, value, size): i64 { return 0 - 38; }
+# List extended attribute names. Declines, same reason as sys_setxattr.
+fn sys_listxattr(path, list, size): i64 { return 0 - 38; }
+# List a symlink's own extended attribute names. Declines, same reason as sys_setxattr.
+fn sys_llistxattr(path, list, size): i64 { return 0 - 38; }
+# List extended attribute names by descriptor. Declines, same reason as sys_setxattr.
+fn sys_flistxattr(fd, list, size): i64 { return 0 - 38; }
+# Remove an extended attribute. Declines, same reason as sys_setxattr.
+fn sys_removexattr(path, name): i64 { return 0 - 38; }
+# Remove a symlink's own extended attribute. Declines, same reason as sys_setxattr.
+fn sys_lremovexattr(path, name): i64 { return 0 - 38; }
+# Remove an extended attribute by descriptor. Declines, same reason as sys_setxattr.
+fn sys_fremovexattr(fd, name): i64 { return 0 - 38; }
+# Change a descriptor's owner and group. Declines: Windows ownership lives in a security descriptor, not a uid/gid pair.
+fn sys_fchown(fd, uid, gid): i64 { return 0 - 38; }
+# Extended stat. Declines: Windows has no statx.
+fn sys_statx(dirfd, path, flags, mask, buf): i64 { return 0 - 38; }
+# Read a resource limit. Declines: Windows has no rlimits; per-process limits are job-object settings.
+fn sys_getrlimit(resource, rlim): i64 { return 0 - 38; }
 # ── v6.6.8: PE peers for the fcntl surface in lib/syscalls_linux_common.cyr. Windows has no
 # fcntl (non-blocking I/O is ioctlsocket(FIONBIO) on a SOCKET, or OVERLAPPED on a HANDLE —
 # different object models, not a renumber), so all three decline with -38/-ENOSYS. A caller
@@ -740,16 +864,57 @@ fn sys_fcntl(fd, cmd, arg): i64 { return 0 - 38; }
 fn fd_set_nonblocking(fd): i64 { return 0 - 38; }
 # Restore saved fd status flags. Declines on Windows.
 fn fd_restore_flags(fd, saved): i64 { return 0 - 38; }
+# The calling thread's last Winsock error, negated: -WSAGetLastError (0xF024). WSAGetLastError
+# returns a C `int` and the reroute defines only eax (no extension in the emitter), so the
+# value is masked to 32 bits before it is negated. Never 0: a failure must not read as
+# success. Same contract as lib/net.cyr's _net_wsa_err, which this file cannot include.
+# CHANGELOG [6.6.16]
+fn _sw_wsa_err(): i64 {
+    var e = syscall(61476) & 0xFFFFFFFF;            # WSAGetLastError (0xF024)
+    if (e == 0) { return 0 - 1; }
+    return 0 - e;
+}
+# Wait until SOCKET `fd` is readable (`want_write` == 0) or writable (`want_write` != 0), for at
+# most `timeout_ms` ms (< 0 waits indefinitely; clamped to INT_MAX). Returns 1 ready — including
+# an error or hang-up, so the next recv/send reports it — 0 on timeout, or -WSAGetLastError
+# (-10038 WSAENOTSOCK for something that is not an open socket: WSAPoll flags it POLLNVAL; a
+# negative fd — INVALID_SOCKET from a failed socket()/accept() — is refused the same way at once,
+# because WSAPoll IGNORES it and would report a timeout, or with timeout_ms < 0 never return).
+# ws2_32!WSAPoll (0xF04A, sign-extended) over one WSAPOLLFD { SOCKET; SHORT events, revents },
+# with POLLRDNORM 0x100 / POLLWRNORM 0x10 — Windows refuses POLLIN's POLLPRI half. Sockets only:
+# WSAPoll knows nothing of file or pipe HANDLEs. Same contract as the POSIX peer. CHANGELOG [6.6.13]
+# The error read goes through _sw_wsa_err: WSAGetLastError returns a C `int`, and the 0xF024
+# reroute defines only eax, so rax[63:32] is the callee's to leave dirty. CHANGELOG [6.6.16]
+fn fd_wait_ready(fd, want_write, timeout_ms): i64 {
+    if (fd < 0) { return 0 - 10038; }                   # INVALID_SOCKET → -WSAENOTSOCK
+    var ms = timeout_ms;
+    if (ms < 0) { ms = 0 - 1; }
+    if (ms > 0x7FFFFFFF) { ms = 0x7FFFFFFF; }
+    var pfd[16];
+    store64(&pfd, fd);
+    if (want_write != 0) { store16(&pfd + 8, 0x10); }   # POLLWRNORM
+    else { store16(&pfd + 8, 0x100); }                  # POLLRDNORM
+    store16(&pfd + 10, 0);
+    store32(&pfd + 12, 0);
+    var r = syscall(0xF04A, &pfd, 1, ms);               # WSAPoll
+    if (r < 0) { return _sw_wsa_err(); }                # -WSAGetLastError (0xF024)
+    if (r == 0) { return 0; }
+    if ((load16(&pfd + 10) & 0x4) != 0) { return 0 - 10038; }  # POLLNVAL → -WSAENOTSOCK
+    return 1;
+}
 
 # ── PE peers for the linux_common wrappers a cross-platform consumer names on paths that
 # are dead on Windows (yukti's optical / eject / netlink-monitor / network-probe / mount /
 # TOCTOU-lstat paths since 2.3.12). Without them a PE build that merely REACHES such a
 # path is refused: `refusing to emit binary with N reachable undefined function(s)`.
 # Same contract as the block above: each declines with -38/-ENOSYS, so the caller's
-# `if (r < 0)` fires; none emulates. ⚠ The socket four are NOT a missing reroute: the
-# ws2_32 band (0xF022…) returns a SOCKET handle that must be closed with closesocket and
-# reports errors through WSAGetLastError, so a BSD-shaped fd peer is an fd↔SOCKET
-# namespace design, not a renumber (the sys_socketpair note above). CHANGELOG [6.6.7]
+# `if (r < 0)` fires; none emulates. ⚠ The socket four still decline ON PURPOSE. Since
+# 6.6.11 lib/net.cyr IS the Windows socket surface (tcp_socket … sock_close over ws2_32, a
+# SOCKET as the fd, Winsock option constants, closesocket). These raw wrappers are the
+# Linux-shaped ABI: their callers pass Linux option numbers (SOL_SOCKET = 1 is not Winsock's
+# 0xFFFF) and close with sys_close, which is CloseHandle here and does not close a SOCKET — so
+# routing them would turn an honest -38 into wrong options and leaked sockets. Use lib/net.cyr.
+# CHANGELOG [6.6.7], [6.6.11]
 # Device control. Declines: Windows has no ioctl (DeviceIoControl takes a HANDLE and
 # Windows control codes, not Linux device requests).
 fn sys_ioctl(fd, request, argp): i64 { return 0 - 38; }
@@ -789,25 +954,38 @@ fn sys_fdatasync(fd): i64 { return syscall(75, fd); }
 # on Windows. Winsock returns 0 on success, SOCKET_ERROR (-1) with WSAGetLastError =
 # WSAENOTCONN (10057) on an unconnected socket (NOT the POSIX errno space). Consumers
 # still treat <0 as "peer unknown" and fail open — sandhi's peer API already does.
-# Closes docs/development/issues/2026-07-14-windows-getpeername-reroute-missing.md
+# Closes docs/development/issues/archived/2026-07-14-windows-getpeername-reroute-missing.md
 #
 # Normalize to the POSIX contract consumers check (`r < 0` = failure): ws2_32
-# returns 0 on success (peer written) or SOCKET_ERROR (int -1, which cyrius sees
-# ZERO-extended as 0xFFFFFFFF — a POSITIVE value that would defeat a `< 0` check
-# and let a caller fabricate a peer, cf. sandhi_server_peer_sockaddr's
-# `if (r < 0) return 0`). On failure return `-WSAGetLastError` (negative, and it
-# carries the real Winsock error, e.g. -10057 WSAENOTCONN). WSAGetLastError is read
-# immediately, before any other call can reset the per-thread last-error.
+# returns 0 on success (peer written) or SOCKET_ERROR (int -1). These reroutes define
+# ONLY eax — the emitter does not extend the C `int` — so rax[63:32] is whatever the
+# callee left: 0xFFFFFFFF on the builds measured, a POSITIVE value that would defeat a
+# `< 0` check and let a caller fabricate a peer (cf. sandhi_server_peer_sockaddr's
+# `if (r < 0) return 0`), and in principle dirty upper bits over a 0 that would read a
+# success as a failure. So the result is tested masked to 32 bits. On failure return
+# `-WSAGetLastError` through _sw_wsa_err (negative, never 0, and it carries the real
+# Winsock error, e.g. -10057 WSAENOTCONN). WSAGetLastError is read immediately, before
+# any other call can reset the per-thread last-error. CHANGELOG [6.6.16]
 fn sys_getpeername(fd, addr, addrlen): i64 {
     var r = syscall(61494, fd, addr, addrlen);
-    if (r == 0) { return 0; }
-    return 0 - syscall(61476);      # -WSAGetLastError (0xF024)
+    if ((r & 0xFFFFFFFF) == 0) { return 0; }
+    return _sw_wsa_err();           # -WSAGetLastError (0xF024)
 }
 # getsockname (0xF037 → ws2_32!getsockname): same normalization as getpeername.
 fn sys_getsockname(fd, addr, addrlen): i64 {
     var r = syscall(61495, fd, addr, addrlen);
-    if (r == 0) { return 0; }
-    return 0 - syscall(61476);
+    if ((r & 0xFFFFFFFF) == 0) { return 0; }
+    return _sw_wsa_err();
+}
+# listen (0xF033 → ws2_32!listen): same normalization as getsockname — 0, or -WSAGetLastError.
+# 6.6.10: the reroute existed since v6.4.44 but no `sys_listen` did, so a portable caller of
+# the POSIX name failed to COMPILE for PE (tests/tcyr/platform/socket_syscalls.tcyr).
+# `fd` is a ws2_32 SOCKET (lib/net.cyr's tcp_socket on PE, real since 6.6.11 — until then it
+# returned -38 there and this comment described a socket nothing could create). CHANGELOG [6.6.10]
+fn sys_listen(fd, backlog): i64 {
+    var r = syscall(0xF033, fd, backlog);
+    if ((r & 0xFFFFFFFF) == 0) { return 0; }
+    return _sw_wsa_err();           # -WSAGetLastError (0xF024)
 }
 
 # ================================================================
@@ -826,7 +1004,7 @@ fn sys_getsockname(fd, addr, addrlen): i64 {
 # 10 MHz on Win10+, i.e. a 100 ns tick) and is monotonic since system start.
 #
 # Both return BOOL (nonzero = success) and write a 64-bit count at the pointer arg.
-# Filed as part of docs/development/issues/2026-09-16-mabda-lib-bench-min-minus-mean-floor.md
+# Filed as part of docs/development/issues/archived/2026-09-16-mabda-lib-bench-min-minus-mean-floor.md
 # QueryPerformanceCounter(&count): writes the current 64-bit performance count at `ptr`.
 # Returns the Win32 BOOL (nonzero = success). Monotonic since system start.
 fn sys_qpc(ptr): i64 {
@@ -912,3 +1090,81 @@ fn sys_rename(oldpath, newpath): i64 { return syscall(61492, oldpath, newpath); 
 # and a tool that derives an install root from its own GRANDPARENT directory (the
 # scaffolder's templates dir) gets the wrong answer or none. CHANGELOG [6.6.6].
 fn sys_self_exe_w(wbuf, cch): i64 { return syscall(61498, wbuf, cch); }
+
+# ================================================================
+# Job objects (6.6.10) — a Windows process TREE
+# ================================================================
+# Win32 has no process group and no parent-death signal, and a deadline that could only
+# TerminateProcess the direct child left the child's own children running — one of them
+# holding a capture pipe kept `exec_capture_status` blocked long past its bound (measured on
+# cass: a 2000 ms deadline returned after 19,437 ms). A Job object is both missing pieces:
+# every process a member starts joins the job too, TerminateJobObject ends all of them, and
+# with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE the kernel ends all of them when the last handle to
+# the job closes — including when OUR process dies (the Windows PR_SET_PDEATHSIG). A child is
+# created CREATE_SUSPENDED, assigned, and only then resumed, so nothing it starts can be born
+# outside the job. Reroutes 0xF040-0xF044 (src/backend/x86/emit.cyr). Used by
+# lib/process_win.cyr, lib/async_win.cyr and cbt's `_win_run_timed`. CHANGELOG [6.6.10]
+
+# Set (`on` = 1) or clear (`on` = 0) JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE (0x2000) — the only
+# limit these jobs carry. JOBOBJECT_EXTENDED_LIMIT_INFORMATION is 144 bytes on x64 and its
+# LimitFlags is the DWORD at offset 16; class 9 = JobObjectExtendedLimitInformation.
+# Returns the SetInformationJobObject BOOL (non-zero = success).
+fn _win_job_set_kill(job, on): i64 {
+    var info[144];
+    var z = 0;
+    while (z < 144) { store64(&info + z, 0); z = z + 8; }
+    if (on == 1) { store32(&info + 16, 0x2000); }
+    return syscall(0xF044, job, 9, &info, 144);
+}
+
+# 1 iff `r`, a job reroute's answer, is a success: a HANDLE, or a BOOL / DWORD the call reports
+# as done. Success is > 0, never merely != 0: a reroute this compiler does not route answers
+# -ENOSYS (-38), which is non-zero too — a lib built against a cycc without `_PE_ROUTE_JOB`
+# took -38 as a job handle and as a successful assignment. CHANGELOG [6.6.10]
+fn _win_ok(r): i64 {
+    if (r > 0) { return 1; }
+    return 0;
+}
+
+# 1 iff ResumeThread's answer `rs` means the thread was resumed: its previous suspend count,
+# 0..0xFFFFFFFE. 0xFFFFFFFF ((DWORD)-1) is the Win32 failure and a negative value is an
+# unrouted reroute (-ENOSYS) — both leave the child SUSPENDED, so the caller must end it.
+# CHANGELOG [6.6.10]
+fn _win_resumed(rs): i64 {
+    if (rs < 0) { return 0; }
+    if (rs == 4294967295) { return 0; }
+    return 1;
+}
+
+# Create an unnamed job, KILL_ON_JOB_CLOSE when `kill_on_close` is 1. Returns its handle, or 0
+# when it could not be created or configured (nothing is left open then).
+fn _win_job_new(kill_on_close): i64 {
+    var job = syscall(0xF040, 0, 0);                 # CreateJobObjectW(NULL, NULL)
+    if (_win_ok(job) == 0) { return 0; }
+    if (kill_on_close == 1) {
+        if (_win_ok(_win_job_set_kill(job, 1)) == 0) { syscall(3, job); return 0; }
+    }
+    return job;
+}
+
+# Put the CREATE_SUSPENDED process in PROCESS_INFORMATION `pi` into a new job, then resume
+# it. Returns the job handle; 0 when the process could not be put in a job (it runs anyway,
+# untracked — the caller loses the TREE, never the child); -1 when it could not be RESUMED,
+# in which case it has been terminated and the caller must report a failed spawn (a
+# suspended child would otherwise wait for ever).
+fn _win_job_start(pi, kill_on_close): i64 {
+    var job = _win_job_new(kill_on_close);
+    if (job != 0) {
+        if (_win_ok(syscall(0xF041, job, load64(pi))) == 0) { syscall(3, job); job = 0; }
+    }
+    var rs = syscall(0xF043, load64(pi + 8));        # ResumeThread(hThread)
+    if (_win_resumed(rs) == 0) {
+        syscall(61469, load64(pi), 1);               # TerminateProcess — never left suspended
+        if (job != 0) { syscall(3, job); }
+        return 0 - 1;
+    }
+    return job;
+}
+
+# End every process in `job` with exit code `code` (TerminateJobObject). Returns the BOOL.
+fn _win_job_kill(job, code): i64 { return syscall(0xF042, job, code); }

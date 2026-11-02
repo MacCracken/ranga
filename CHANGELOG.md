@@ -2,6 +2,52 @@
 
 ## [Unreleased]
 
+## [2.0.4] - 2026-11-02
+
+### Changed
+
+- **Toolchain `6.6.9` → `6.6.20`.** `lib/` re-vendored with
+  `cyrius deps --features spectral,hwaccel,gpu` (the way CI resolves), `cyrius.lock`
+  regenerated, all four bundles regenerated with `scripts/version-bump.sh`. `src/` and
+  `tests/` are untouched. Build, the full test suite (19 files, 1,921 assertions), lint
+  (41 files, 0 warnings, 0 untracked deferrals), bench, fuzz and `cyrius distlib --check`
+  re-verified.
+- **Optional deps moved to the releases that pin the 6.6.20 line.**
+  - prakash `2.2.8` → `2.10.1` (feature `spectral`; pins 6.6.20)
+  - ai-hwaccel `2.3.18` → `2.4.2` (feature `hwaccel`; pins 6.6.20)
+  - mabda `4.1.1` → `4.1.7` (feature `gpu`; pins 6.6.18). mabda has no 6.6.20 release,
+    and the next tag, 4.2.0, pins 6.7.5.
+  - Transitive pins moved with them: hisab `2.11.2` → `3.3.7`, samvada `0.4.1` → `1.0.1`,
+    chitra `0.3.1` → `1.0.3`, sakshi `2.4.11` → `2.5.7`.
+- **`sync` and `chrono` added to `[deps] stdlib`.** ai-hwaccel 2.4.2's sidecar needs
+  `sync` and mabda 4.1.7's needs `chrono`; neither serves a core module. The declared
+  subset is 31 leaves, the last 15 for the optional libraries. `lib/poison.cyr` is also
+  new: the 6.6.20 `alloc.cyr` and `freelist.cyr` include it.
+- **Bundle headers and sidecars.** The 6.6.20 `cyrius distlib` opens each bundle with a
+  compile-verified `# Requires` block that includes its sidecar leaves, and trims each
+  `.deps` sidecar to the leaves that bundle needs (`ranga.deps` 29 → 4). The bundle
+  bodies are unchanged; only the header and the `# Version:` line differ.
+
+### Fixed (lock)
+
+- `cyrius.lock` carried the old commit pins next to the new ones after the re-resolve
+  (14 `commit` lines for 7 deps). It was deleted and resolved from scratch with the
+  features: 64 files locked, 7 commit-pinned, each pin matching its GitHub tag, and
+  `cyrius deps --verify` reports 64 verified, 0 failed. The file-hash lines are
+  identical to the ones the merged lock held.
+
+### Known
+
+- **New compiler warning at `src/blend.cyr:143:62`:** "f32 arithmetic with a non-f32
+  right operand". The line is `one - ganita_f32_min(..)`. The callee is declared `: i64`
+  but returns f32 bits, so the value is right at runtime. The cyrius 6.6.10 downstream
+  survey reported this exact site. Not fixed here because `src/` is untouched in this
+  release. Every other warning in the test run (`num_fft`, the `#must_use` results in
+  the icc suite, two comparisons inside `lib/prakash.cyr`) also appears in 2.0.3
+  under 6.6.9.
+- `cyrius deps` warns that stdlib `sakshi` overlaps the sakshi package hisab 3.3.7
+  resolves. It keeps the stdlib snapshot, which is byte-identical to sakshi 2.5.7.
+
 ## [2.0.3] - 2026-09-28
 
 ### Fixed

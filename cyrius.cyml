@@ -14,7 +14,7 @@ description = "ranga — core image processing: colour spaces, blend modes, pixe
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/ranga"
 language = "cyrius"
-cyrius = "6.6.9"
+cyrius = "6.6.20"
 
 [build]
 entry = "src/main.cyr"
@@ -108,7 +108,7 @@ spectral = ["prakash"]
 hwaccel = ["ai-hwaccel"]
 gpu = ["mabda"]
 
-# The last 13 leaves serve the optional libraries, not any core module. They are
+# The last 15 leaves serve the optional libraries, not any core module. They are
 # declared here because that is where the resolver looks — a leaf named only in a
 # library's own sidecar is vendored but not auto-included, which surfaces as
 # undefined symbols at link time rather than a missing file.
@@ -143,24 +143,26 @@ stdlib = [
     "dynlib",
     "sankoch",
     "thread_local",
+    "sync",
+    "chrono",
 ]
 
 # Pinned by tag, optional, no `path =` override — a path override resolves
 # locally and bypasses the commit-pin verification cyrius.lock records.
 [deps.prakash]
 git = "https://github.com/MacCracken/prakash.git"
-tag = "2.2.8"
+tag = "2.10.1"
 modules = ["dist/prakash.cyr"]
 optional = true
 
 [deps.ai-hwaccel]
 git = "https://github.com/MacCracken/ai-hwaccel.git"
-tag = "2.3.18"
+tag = "2.4.2"
 modules = ["dist/ai-hwaccel.cyr"]
 optional = true
 
 [deps.mabda]
 git = "https://github.com/MacCracken/mabda.git"
-tag = "4.1.1"
+tag = "4.1.7"
 modules = ["dist/mabda.cyr"]
 optional = true
