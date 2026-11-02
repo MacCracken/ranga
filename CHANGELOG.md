@@ -2,6 +2,55 @@
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-11-02
+
+### Fixed
+
+- **`src/icc.cyr`: the private tone-curve size `_TC_SIZE` is now `_ICC_TC_SIZE`.**
+  The 6.7.18 stdlib `lib/bayan.cyr` declares its own `const _TC_SIZE = 80`, and 6.7.18
+  refuses a `var` that reuses a top-level const name. `tests/icc.tcyr` therefore failed
+  to compile ("'_TC_SIZE' is already declared as a top-level const"), and so would any
+  consumer that loads a ranga bundle next to bayan 6.7.18. The new name follows the
+  module's `_ICC_` prefix. No public name changed. Every top-level `var` / `const` /
+  `fn` / `enum` name in `src/` was checked against `lib/` (stdlib and dep bundles,
+  enum members included), and this was the only collision.
+
+### Changed
+
+- **Toolchain `6.7.9` → `6.7.18`.** `lib/` re-vendored with
+  `cyrius deps --features spectral,hwaccel,gpu`, `cyrius.lock` resolved from scratch,
+  all four bundles regenerated with `scripts/version-bump.sh`. Build, the full test suite
+  (19 files, 1,921 assertions), lint (41 files, 0 warnings, 0 untracked deferrals),
+  bench, fuzz and `cyrius distlib --check` re-verified.
+- **Optional deps moved to their latest releases.**
+  - prakash `2.11.0` → `2.15.0` (feature `spectral`; pins 6.7.18). 2.15.1 is not
+    released yet.
+  - ai-hwaccel `2.4.2` → `2.5.6` (feature `hwaccel`; pins 6.7.18)
+  - mabda stays at `4.2.0` (feature `gpu`; pins 6.7.5). It is still the newest release.
+  - Transitive pins moved with them: hisab `3.4.0` → `3.4.1`, sakshi `2.5.8` → `2.5.10`.
+    samvada `1.0.1` and chitra `1.0.3` are unchanged.
+- **`lib/`:** 42 files updated, plus a new `lib/unicode/` (7 files) that the 6.7.18
+  `lib/bayan.cyr` includes. The lock records 71 files and 7 commit pins, each matching
+  its GitHub tag, and `cyrius deps --verify` reports 71 verified, 0 failed. The
+  `[deps] stdlib` list is unchanged. ai-hwaccel 2.5.6's sidecar adds `atomic`, but its
+  bundle includes `lib/atomic.cyr` itself and `cyrius deps` asks for nothing more.
+- **Bundles:** besides the version line and the rename above, the 6.7.18
+  `cyrius distlib` trims two sidecars and their `# Requires` blocks: `freelist` from
+  `ranga-hwaccel` and `math` from `ranga-spectral`. Both still arrive through other
+  leaves.
+
+### Known
+
+- The compiler warnings are the same set as 2.1.0, including `src/blend.cyr:143:62`.
+  `cyrius distlib` reports `num_fft` as undefined in `ranga-spectral.cyr`. The name
+  comes from prakash, 6.7.9 reported it too, and it matches the "undefined function
+  'num_fft'" warning in the test run.
+- `cyrius deps` notes that `lib/flags.cyr` and `lib/hashmap_fast.cyr` are outside the
+  declared footprint. The resolve no longer vendors them, so they keep their earlier
+  content, and nothing includes either one. They are left in place and still locked.
+- `cyrius deps` still warns that stdlib `sakshi` overlaps the sakshi package hisab
+  resolves. The kept stdlib snapshot is byte-identical to sakshi 2.5.10.
+
 ## [2.1.0] - 2026-11-02
 
 ### Changed
