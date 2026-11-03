@@ -62,8 +62,9 @@ differently.
 `probe_core.cyr` hashes each group's lines (FNV-1a 64 over the exact text, newline
 included) and counts them. `golden_rust.cyr` holds Rust 1.0.1's count and digest for
 every exact group, so `cyrius test` checks the port against Rust's output with no
-`cargo` and no `rust-old/`. The three groups ADR 002 accepts within a bound are not
-exact by design; they are listed as skipped and stay with the live oracle.
+`cargo` and no `rust-old/`. The groups accepted within a bound (three by ADR 002, and
+`bilateral` by ADR 004) are not exact by design; they are listed as skipped and stay
+with the live oracle.
 
 A digest says THAT a group moved, not where. While `rust-old/` exists, `run.sh` with
 `--detail` says where.

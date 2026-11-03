@@ -8,7 +8,7 @@ for porting mistakes, until the port is complete.
 | Milestone | Theme |
 | --- | --- |
 | ~~2.2.x~~ | **Done in 2.2.0.** Bit-exact again: `scripts/oracle` against `rust-old/`, with every CPU divergence fixed or ADR'd |
-| ~~2.3.x~~ | **Done in 2.3.0–2.3.1.** Verification parity: 8 fuzz targets in CI, 31 properties, Rust's integration and edge-case tests, golden vectors from the oracle, the oracle in CI, all 134 benchmarks (GPU on the AMD dev host). Rust's blur darkening is fixed, not kept (ADR 003). Open: NVIDIA coverage, which needs NVIDIA hardware |
+| **2.3.x** | Verification parity, done in 2.3.0–2.3.2: 8 fuzz targets in CI, 31 properties, Rust's integration and edge-case tests, golden vectors from the oracle, the oracle in CI, all 134 benchmarks (GPU on the AMD dev host). Rust's blur and bilateral darkening fixed, not kept (ADR 003, 004). Open: guard NVIDIA contexts, which can't compute until mabda compiles SPIR-V for SM75 (checked on a GTX 1660 SUPER) |
 | **2.4.x** | CPU surface completion: the serde decision, clone/eq for heap records, `Lut3d::from_cube`, writable records |
 | **2.5.x** | GPU: the wgpu decision, `GpuChain`, native blur/blend/bilinear, rounding and size fixes |
 | **2.6.x** | Performance: vectorised blur, histogram ops, contrast/saturation, the YUV inverse |

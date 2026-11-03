@@ -8,11 +8,11 @@
 
 ## Where things stand
 
-The port shipped as **2.0.0** and is at **2.3.1** on cyrius 6.7.18. The 2026-11-02 review
+The port shipped as **2.0.0** and is at **2.3.2** on cyrius 6.7.18. The 2026-11-02 review
 of all 303 public Rust items, updated for 2.1.2 and 2.2.0, found:
 
-- 208 at parity;
-- 8 improved on Rust (3 of them the blurs, since 2.3.1);
+- 207 at parity;
+- 9 improved on Rust (the three blurs since 2.3.1, `bilateral` since 2.3.2);
 - 29 that diverge on purpose, with the reason written down;
 - 19 partial and 33 missing;
 - **6 that compute something different from Rust without a documented reason**. All
@@ -33,8 +33,8 @@ left open apart from NVIDIA (below). The port now has Rust's 8 fuzz targets in C
 allocator redzones, its 31 properties, its integration, edge-case and Photoshop tests,
 golden vectors that capture the oracle's Rust outputs in `tests/`, and all 134 of its
 benchmarks. Five GPU benchmarks print `MISSING`, because their operations are not
-ported yet (2.5.x). The blurs no longer reproduce Rust's darkening (ADR 003). Still
-missing: examples, and any Cyrius consumer.
+ported yet (2.5.x). The blurs (ADR 003) and `bilateral` (ADR 004) no longer reproduce
+Rust's darkening. Still missing: examples, and any Cyrius consumer.
 
 Several of the original 2.0.0 criteria were never met, and they are carried below.
 
@@ -72,14 +72,42 @@ settled two of the three items it left:
   recorded in `bench-history.csv`. Five print `MISSING`: blend, blur, noise, bilinear
   resize and `GpuChain` (2.5.x).
 
-One item is left:
+2.3.2 rounded `bilateral` the same way
+([ADR 004](../adr/004-bilateral-rounds-its-weighted-mean.md)). It also ran the GPU
+suites against `gpu_context_new_nvidia` on `chew`, a GeForce GTX 1660 SUPER (TU116,
+SM75) on nouveau and NVK, which is exactly what mabda's NVIDIA backend targets:
 
-- [ ] **(S) NVIDIA coverage.** `gpu_context_new_nvidia` has no test at all; every
-      gated GPU suite opens an AMD context. The dev host has an AMD Radeon Vega iGPU
-      and no NVIDIA card, so testing it needs NVIDIA hardware. Otherwise, write an
-      ADR that the path is unverified.
+- **Working:** context creation and buffer upload/download. 45 of 46 pass in
+  `gpu.tcyr`; the 46th is the AMD-only backend-name check.
+- **Not working:** every compute dispatch. mabda 4.2.0's NVIDIA backend takes
+  precompiled SM75 SASS (its SPIR-V→SASS compiler is mabda phase N9, not shipped)
+  and binds one output buffer.
+- **Harmful today:** ranga's SPIR-V is uploaded verbatim and executed as machine
+  code, and nouveau kills the channel (`Xid:13 … Out Of Range Register`).
 
-**Done when** NVIDIA is tested or ADR'd.
+What is left:
+
+- [ ] **(S) Guard NVIDIA contexts.** Until mabda compiles SPIR-V for SM75, every
+      `gpu_*` compute operation on an NVIDIA context should return
+      `RG_GPU_ERR_UNSUPPORTED` before anything is uploaded, as the four missing AMD
+      kernels do. Record this in an ADR.
+- [ ] **(S) An NVIDIA-gated test** that opens `gpu_context_new_nvidia`, round-trips a
+      buffer and checks that the guard holds. It prints SKIPPED without an NVIDIA
+      GPU, and runs on `chew` from a binary built here.
+- [ ] **(S) Fail, don't crash.** `run_kernel` in `gpu_kernels.tcyr` and the geometry
+      checks in `gpu_pipeline.tcyr` read through a null result after a failed
+      dispatch.
+- **Blocked upstream in mabda,** filed 2026-11-02 in mabda's
+  `docs/development/issues/`:
+  - `2026-11-02-n9-spirv-to-sass-compiler-request.md`: the SPIR-V→SASS compiler;
+  - `2026-11-02-compute-dispatch-bindings-differ-amd-nvidia.md`: NVIDIA reads
+    `gpu_compute_dispatch`'s `bp` as one buffer, AMD as a binding array;
+  - `2026-11-02-nvidia-shader-module-create-ignores-source-kind.md`: SPIR-V is
+    accepted as SASS instead of being refused.
+
+  When the first two land, run the four GPU suites on `chew`.
+
+**Done when** NVIDIA contexts are guarded and tested on `chew`.
 
 ## 2.4.x — Surface completion (CPU)
 
@@ -187,8 +215,10 @@ run.
         `gpu_buffer_write` and `gpu_buffer_read` are each one stdlib `memcpy`, so a
         1080p GPU operation spends about 30 ms copying 16 MB at about 530 MB/s. Rust's
         wgpu path does the same operation in 2.4–3 ms on the same iGPU. The fix is
-        upstream (mabda or the stdlib). A `GpuChain` that keeps buffers resident would
-        avoid most of the copies (2.5.x).
+        upstream: filed in mabda as
+        `docs/development/issues/2026-11-02-native-buffer-copies-are-byte-loops.md`,
+        which asks for a wide copy or a buffer-map API. A `GpuChain` that keeps buffers
+        resident would avoid most of the copies (2.5.x).
 - [ ] **(S–M) Inline the per-byte f32 helper calls** in `fade` (57×), `dissolve`
       (50×), the angled and radial gradients (37–42×), `vibrance` (27×),
       `color_balance` (21×), `channel_mixer` and `contrast` (16–17×), as was done for

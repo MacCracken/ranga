@@ -727,6 +727,12 @@ fn median(buf, radius, err_out) {
 #
 # The spatial weights are PRECOMPUTED into a (2r+1)^2 table — they depend only
 # on (kx, ky), so evaluating exp() per sample per pixel was pure waste.
+#
+# ⚠ THE WEIGHTED MEAN IS ROUNDED, NOT TRUNCATED, a deliberate divergence from
+# Rust 1.0.1 (docs/adr/004-bilateral-rounds-its-weighted-mean.md). Rust's
+# `(sum / sum_w) as u8` dropped the fraction, so every output sat up to one count
+# low and a uniform image could come back one count darker. The weights are
+# unchanged and still single precision, as in Rust.
 #must_use
 fn bilateral(buf, radius, sigma_space, sigma_color, err_out) {
     var rc = _fk_validate_rgba8(buf);
@@ -778,6 +784,7 @@ fn bilateral(buf, radius, sigma_space, sigma_color, err_out) {
     if (out == 0) { fl_free(sw_tab); return 0; }
     var sp = pixel_buffer_data(buf);
     var dp = pixel_buffer_data(out);
+    var half: f32 = f32_from(0.5);
 
     var y = 0;
     while (y < h) {
@@ -825,9 +832,14 @@ fn bilateral(buf, radius, sigma_space, sigma_color, err_out) {
             # A zero total weight would divide by zero; Rust falls back to the
             # centre pixel unchanged rather than emitting NaN.
             if (f64_gt(f32_to(sum_w), 0) == 1) {
-                store8(dp + di, _fk_f32_to_u8(_fk_div(sum_r, sum_w)));
-                store8(dp + di + 1, _fk_f32_to_u8(_fk_div(sum_g, sum_w)));
-                store8(dp + di + 2, _fk_f32_to_u8(_fk_div(sum_b, sum_w)));
+                # Round half up. On a uniform image the mean is v within a few
+                # f32 ULPs, far inside the 0.5 that rounding absorbs.
+                var mr: f32 = sum_r / sum_w + half;
+                var mg: f32 = sum_g / sum_w + half;
+                var mb: f32 = sum_b / sum_w + half;
+                store8(dp + di, _fk_f32_to_u8(mr));
+                store8(dp + di + 1, _fk_f32_to_u8(mg));
+                store8(dp + di + 2, _fk_f32_to_u8(mb));
             }
             if (f64_gt(f32_to(sum_w), 0) == 0) {
                 store8(dp + di, load8(sp + ci));

@@ -15,8 +15,9 @@
 #         which is then 0. Rust 1.0.1 truncated between passes and darkened a
 #         uniform image by up to 2 (gaussian in 979 of 2,816 measured cases, box
 #         in 4,278 of 13,824), so up to 2.3.0 this target asserted [v - 2, v].
-#       - bilateral: [v - 1, v], measured against the Rust 1.0.1 crate over every
-#         v and radii 0..10.
+#       - bilateral returns v exactly too. It rounds its weighted mean
+#         (docs/adr/004-bilateral-rounds-its-weighted-mean.md). Rust 1.0.1
+#         truncated it, and this target asserted [v - 1, v] up to 2.3.1.
 #   - bilateral with a NaN sigma is a copy (every weight NaN, so `sum_w > 0`
 #     fails and each pixel is copied, as in Rust).
 
@@ -34,21 +35,6 @@ fn ok_same_shape(out, src, what) {
     fz_check(fz_dims(out, pixel_buffer_width(src), pixel_buffer_height(src)), "a filter changed the dimensions");
     fz_check(pixel_buffer_format(out) == PF_RGBA8, "a filter changed the format");
     return 0;
-}
-
-# 1 if every byte of `out` is within [src + lo, src + hi], clamped to 0..255.
-fn within(out, src, lo, hi) {
-    var n = pixel_buffer_len(src);
-    var po = pixel_buffer_data(out);
-    var ps = pixel_buffer_data(src);
-    var i = 0;
-    while (i < n) {
-        var d = load8(po + i) - load8(ps + i);
-        if (d < lo) { return 0; }
-        if (d > hi && load8(po + i) != 255) { return 0; }
-        i = i + 1;
-    }
-    return 1;
 }
 
 # Runs each filter at `radius` on `src`.
@@ -88,7 +74,7 @@ fn run_all(src, radius, expect) {
     var bl = bilateral(src, br, ss, sc, ERR);
     ok_same_shape(bl, src, "bilateral failed");
     if (expect == 1) { fz_check(fz_same(bl, src), "bilateral radius 0 is not a copy"); }
-    if (expect == 2) { fz_check(within(bl, src, 0 - 1, 0), "bilateral left [v - 1, v] on a uniform image"); }
+    if (expect == 2) { fz_check(fz_same(bl, src), "bilateral changed a uniform image"); }
     pixel_buffer_free(bl);
     return 0;
 }

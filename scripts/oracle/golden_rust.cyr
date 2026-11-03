@@ -6,6 +6,7 @@
 # skipped (accepted within a bound by an ADR, see compare.py): oklch_to_oklab.a
 # skipped (accepted within a bound by an ADR, see compare.py): oklch_to_oklab.b
 # skipped (accepted within a bound by an ADR, see compare.py): color_temperature
+# skipped (accepted within a bound by an ADR, see compare.py): bilateral
 
 fn golden_check_all() {
     golden_expect("srgb_to_linear", 256, 0xF9DF3F28CEB155BA);
@@ -33,7 +34,6 @@ fn golden_check_all() {
     golden_expect("hue_shift.code", 9, 0x0662AE878E95C1BB);
     golden_expect("hue_shift", 9, 0xDF3B638DE3EFA5C7);
     golden_expect("bilateral.code", 9, 0x08880F9E46A5B64B);
-    golden_expect("bilateral", 7, 0xAE80A7B19D935AEF);
     golden_expect("affine_inverse.a", 206, 0xE8D490BA45FC98D5);
     golden_expect("affine_inverse.b", 206, 0xF908045001BA9D95);
     golden_expect("affine_inverse.c", 206, 0x891D23B7D10CF22C);

@@ -28,6 +28,10 @@
 > PARITY to IMPROVED. Rust's blur darkening is fixed in Cyrius, not reproduced
 > ([ADR 003](../adr/003-blur-keeps-an-f32-intermediate-and-rounds-once.md)), and the
 > 26 GPU benchmarks are ported.
+>
+> **Updated for 2.3.2.** `bilateral` moves from PARITY to IMPROVED: it rounds its
+> weighted mean, where Rust truncated
+> ([ADR 004](../adr/004-bilateral-rounds-its-weighted-mean.md)).
 
 ## How each item is classified
 
@@ -49,10 +53,10 @@ item is either ported or given an ADR. Nothing stays SUSPECT.
 | Area (Rust files) | Items | PARITY | IMPROVED | DIV-DOC | PARTIAL | MISSING | SUSPECT |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | error, lib, pixel, color, convert | 88 | 58 | 3 | 16 | 7 | 4 | 0 |
-| filter, transform, histogram | 73 | 54 | 4 | 4 | 0 | 11 | 0 |
+| filter, transform, histogram | 73 | 53 | 5 | 4 | 0 | 11 | 0 |
 | composite, blend, icc, spectral, hwaccel | 70 | 57 | 1 | 5 | 3 | 4 | 0 |
 | gpu (context, buffer, shaders, pipeline) | 72 | 39 | 0 | 4 | 9 | 14 | 6 |
-| **Total** | **303** | **208** | **8** | **29** | **19** | **33** | **6** |
+| **Total** | **303** | **207** | **9** | **29** | **19** | **33** | **6** |
 
 An item is a pub fn (impl methods included), struct, enum, const, or trait impl/derive.
 Each derive counts once per type. The M7 audit counted 318 under a looser
@@ -119,6 +123,10 @@ convention, so the two totals are not comparable line for line.
   output about one count dark (mean −1.00, worst −1.94) and darkened a uniform image
   by up to 2. Now the mean error is 0.00, the worst 0.50, a uniform image is exact,
   and the blurs are 12% faster.
+- **`bilateral`** (2.3.2, ADR 004): rounds its weighted mean. Rust truncated it, which
+  biased output half a count dark (mean −0.47, worst −1.00) and darkened a uniform
+  image by 1 in about half of all cases. Now the mean error is 0.00, the worst 0.50,
+  and a uniform image is exact.
 
 ## Deliberate divergences (documented; not to be re-litigated)
 
@@ -181,7 +189,8 @@ convention, so the two totals are not comparable line for line.
 
 | Rust item | Port | Status | What is wrong or missing |
 | --- | --- | --- | --- |
-| `levels`, `hue_shift`, `bilateral`, `Affine::inverse`, `affine_transform`, `Affine::is_identity` | filter_point.cyr, filter_kernel.cyr, transform.cyr | PARITY (2.2.0) | Were SUSPECT: f64 where Rust is f32 (levels, hue_shift, bilateral), a reassociated inverse, a NaN-passing identity test. Also bilateral's σ ≤ 0 → OTHER and NaN σ proceeding. Bit-exact on every oracle case. |
+| `levels`, `hue_shift`, `Affine::inverse`, `affine_transform`, `Affine::is_identity` | filter_point.cyr, filter_kernel.cyr, transform.cyr | PARITY (2.2.0) | Were SUSPECT: f64 where Rust is f32 (levels, hue_shift, and bilateral's weights), a reassociated inverse, a NaN-passing identity test. Also bilateral's σ ≤ 0 → OTHER and NaN σ proceeding. Bit-exact on every oracle case. |
+| `bilateral` | filter_kernel.cyr | IMPROVED (2.3.2) | PARITY in 2.2.0 (f32 weights, σ guards). 2.3.2 rounds the weighted mean where Rust truncated it (ADR 004). The weights are still bit-exact; outputs move 0 or +1 against Rust, and the oracle bounds them at 1. |
 | `gaussian_blur`, `box_blur`, `unsharp_mask` | filter_kernel.cyr | IMPROVED (2.3.1) | Were PARITY with a Rust defect: truncation after each separable pass darkened a uniform image by up to 2 and biased every image about one count dark. Fixed in Cyrius by ADR 003; values move 0 to +2 against Rust, never down. |
 | `Affine::rotate` | transform.cyr:100 | PARITY (2.1.2) | The review counted this as parity with a documented NaN for \|θ\| ≥ 2^63. That guard had outlived the toolchain fault it worked around, so `rotate(1e20)` was NaN where Rust is finite. 2.1.2 delegates every finite angle; the item is not counted twice. |
 | `Lut3d` Clone | — | MISSING | Heap-owning, and there is no `lut3d_clone`. |
@@ -262,7 +271,7 @@ That is counted as PARITY.
 | Photoshop golden vectors (7 modes on one fixed pixel pair) | **Pinned since 2.3.0,** within Rust's ±2. |
 | 134 benchmarks (108 CPU, 26 GPU) | **All 134:** the 108 CPU benchmarks since 2.3.0 (`ranga.bcyr`, `spectral.bcyr`) and the 26 GPU ones since 2.3.1 (`gpu.bcyr`, run on the AMD dev host), under Rust's names and on its workloads. Five GPU benchmarks print `MISSING` until their operations are ported (2.5.x). |
 | 8 fuzz targets | **All 8 since 2.3.0** (`fuzz/`), with invariants, run by CI under `--poison`. |
-| Oracle outputs (no Rust counterpart) | **Captured since 2.3.0:** `oracle_golden.tcyr` checks 53 exact groups (~2.1M values) against Rust 1.0.1's digests. |
+| Oracle outputs (no Rust counterpart) | **Captured since 2.3.0:** `oracle_golden.tcyr` checks 52 exact groups (53 until `bilateral` left the exact set in 2.3.2) (~2.1M values) against Rust 1.0.1's digests. |
 | 11 examples | **0.** `docs/examples/` is empty, and the guides are Rust-era. |
 
 Further detail on test coverage:
@@ -271,7 +280,9 @@ Further detail on test coverage:
   without one prints `SKIPPED: N hardware assertions` per suite, and the checks that
   need no context (stubs, guards, null context, workgroup arithmetic) run
   everywhere. Assertion totals in `state.md` are **AMD-host** counts. The NVIDIA
-  backend has no test at all (roadmap 2.3.x).
+  backend has no checked-in test. A hardware run on a GTX 1660 SUPER (2026-11-02)
+  found context and buffers working and compute blocked on mabda's SPIR-V→SASS
+  compiler (roadmap 2.3.x).
 - **Some tests pin behaviour that contradicts Rust,** with no ADR:
   - the error strings;
   - bilateral's error codes;

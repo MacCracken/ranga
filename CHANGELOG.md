@@ -2,6 +2,63 @@
 
 ## [Unreleased]
 
+## [2.3.2] - 2026-11-02
+
+`bilateral` no longer darkens: it rounds its weighted mean, the same class of fix as
+2.3.1's blurs. And NVIDIA was checked on real hardware for the first time: a GTX 1660
+SUPER (TU116, SM75) on nouveau, which is exactly the target mabda's NVIDIA backend
+names. Context creation and buffers work. Compute does not, and the cause is upstream.
+
+### Changed
+
+- **`bilateral` rounds its weighted mean**
+  ([ADR 004](docs/adr/004-bilateral-rounds-its-weighted-mean.md)). Rust 1.0.1 and
+  the port up to 2.3.1 truncated it with `as u8`. Measured on 40,824 channel values
+  against the exact weighted mean:
+
+  | | Mean error | Worst error |
+  |---|---:|---:|
+  | Before | −0.47 | 1.00 |
+  | Now | 0.00 | 0.50 |
+
+  A uniform image used to come back one count darker in 1,423 of 3,072 measured
+  cases, and now in none. The weights are unchanged (f32, as in Rust), and the speed
+  is unchanged (141 ms against 140 ms). Against Rust, values move by 0 or +1, never
+  down.
+- **The oracle accepts `bilateral` within 1 count** (`compare.py`, ADR 004);
+  `bilateral.code` stays exact. `golden_rust.cyr` is regenerated and skips it, so
+  `tests/oracle_golden.tcyr` checks 52 exact groups, down from 53 (105 assertions,
+  down from 107). The total stays at 2,265.
+- **`fuzz_blur`** asserts that bilateral leaves a uniform image exactly unchanged,
+  replacing Rust's [v − 1, v]. The unused `within()` helper is gone.
+- **`tests/filter_kernel.tcyr`**: two new tests, 140 assertions in all, up from 138.
+  Both fail on 2.3.1:
+  - every value 0..255 at radii 1..3 with two sigma pairs;
+  - a pin on the rounding: the middle of (0, 0, 96) with both sigmas at 1000 is
+    31.706, which rounds to 32 where Rust gave 31.
+
+### Found: NVIDIA compute is blocked upstream, and ranga makes it fault
+
+The four GPU suites were run against `gpu_context_new_nvidia` on a GeForce GTX 1660
+SUPER (nouveau kernel driver, Mesa NVK) by building them here and copying the static
+binaries over:
+
+- **What works:** the context opens and buffer upload and download round-trip. 45 of
+  46 in `gpu.tcyr` pass; the 46th is the AMD-only backend-name check.
+- **What doesn't:** every compute dispatch fails. mabda 4.2.0's NVIDIA backend takes
+  **precompiled SM75 SASS**, not SPIR-V; its SPIR-V→SASS compiler is mabda's
+  unshipped phase N9. Its dispatch also binds a single output buffer, not a binding
+  array.
+- **ranga makes it worse.** ranga hands its SPIR-V words over, mabda uploads them
+  verbatim, and the GPU executes them as machine code. nouveau then kills the
+  channel (`Xid:13 Graphics SM Warp Exception … Out Of Range Register`). The driver
+  recovered each time.
+- **Two test helpers segfault** once a dispatch has failed. They read through the
+  null buffer that comes back, instead of failing an assertion.
+
+Nothing in `src/gpu_*` changed in this release. Guarding NVIDIA contexts and making
+the helpers fail cleanly are next (roadmap 2.3.x).
+
 ## [2.3.1] - 2026-11-02
 
 Closes two of the three items 2.3.0 left open. Rust's blur darkening is **fixed, not

@@ -535,6 +535,46 @@ assert_eq(load64(err), RG_ERR_NONE, "bilateral succeeds");
 assert_eq(chan(bl2, 5, 0), 120, "a uniform image is unchanged by bilateral");
 pixel_buffer_free(bl2);
 
+# Every value at small radii, two sigma pairs: no darkening anywhere. Rust 1.0.1
+# truncated the weighted mean, and a flat neighbourhood's f32 mean lands a few
+# ULPs either side of v, so it came back v - 1 in about half of these cases.
+# ranga rounds (docs/adr/004-bilateral-rounds-its-weighted-mean.md).
+var bu = mkbuf(5, 5);
+var bdark = 0;
+var bval = 0;
+while (bval < 256) {
+    fill(bu, bval);
+    var brad = 1;
+    while (brad <= 3) {
+        var bo1 = bilateral(bu, brad, f32c(3.0), f32c(30.0), err);
+        var bo2 = bilateral(bu, brad, f32c(10.0), f32c(7.0), err);
+        var bpx = 0;
+        while (bpx < 25) {
+            if (chan(bo1, bpx, 0) != bval || chan(bo1, bpx, 2) != bval) { bdark = bdark + 1; }
+            if (chan(bo2, bpx, 0) != bval || chan(bo2, bpx, 2) != bval) { bdark = bdark + 1; }
+            bpx = bpx + 1;
+        }
+        pixel_buffer_free(bo1);
+        pixel_buffer_free(bo2);
+        brad = brad + 1;
+    }
+    bval = bval + 1;
+}
+assert_eq(bdark, 0, "every uniform value 0..255 survives bilateral at radii 1..3");
+pixel_buffer_free(bu);
+
+# ROUNDED, not truncated. With both sigmas at 1000 the weights are all close to 1,
+# and the middle of (0, 0, 96) averages to 31.706 (an f32 replica of the formula,
+# computed outside Cyrius). Rust 1.0.1 truncated that to 31.
+var br = mkbuf(3, 1);
+put(br, 0, 0, 0, 0, 255);
+put(br, 1, 0, 0, 0, 255);
+put(br, 2, 96, 96, 96, 255);
+var bro = bilateral(br, 1, f32c(1000.0), f32c(1000.0), err);
+assert_eq(chan(bro, 1, 0), 32, "the weighted mean 31.706 rounds to 32, not 31 (Rust's truncation)");
+pixel_buffer_free(bro);
+pixel_buffer_free(br);
+
 # EDGE PRESERVATION — the defining property. A hard step edge must survive
 # bilateral almost intact, where a gaussian blur of the same radius smears it.
 var e1 = mkbuf(6, 1);

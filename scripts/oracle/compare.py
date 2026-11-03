@@ -17,10 +17,12 @@ from collections import OrderedDict, defaultdict
 # fails like any other, so an acceptance cannot hide a new, larger difference.
 # The bound is in the group's distance unit (ULPs for floats).
 _ADR002 = "ADR 002: glibc's f32 libm is not correctly rounded; ranga's is"
+_ADR004 = "ADR 004: bilateral rounds its weighted mean; Rust truncated it"
 ACCEPTED = {
     "oklch_to_oklab.a": (2, _ADR002),
     "oklch_to_oklab.b": (2, _ADR002),
     "color_temperature": (2, _ADR002),
+    "bilateral": (1, _ADR004),
 }
 
 
