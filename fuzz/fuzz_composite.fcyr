@@ -1,0 +1,131 @@
+# Fuzz: compositing and transitions.
+# Rust 1.0.1 target: rust-old/fuzz/fuzz_targets/fuzz_composite.rs (dissolve,
+# composite_at with offsets -128..127, apply_mask, premultiply → unpremultiply;
+# no crash).
+# Invariants (from Rust's definitions):
+#   - dissolve(a, b, t) for t in [0, 1] keeps each channel between a's and b's,
+#     is exactly a at t = 0 and exactly b at t = 1, and reports
+#     RG_ERR_DIMENSION_MISMATCH for different sizes.
+#   - composite_at never touches a destination pixel outside the source's
+#     placed rectangle, wherever the offset puts it, including entirely outside.
+#   - premultiply then unpremultiply leaves every alpha unchanged and every opaque
+#     pixel unchanged.
+#   - apply_mask changes only alpha, to div255(alpha * mask.r).
+
+include "src/error.cyr"
+include "src/bytevec.cyr"
+include "src/simd_u8.cyr"
+include "src/pixel.cyr"
+include "src/composite.cyr"
+include "fuzz/fz_common.cyr"
+
+var ERR = 0;
+
+fn div255(v) { var t = v + 128; return (t + (t >> 8)) >> 8; }
+
+fn one(iter) {
+    var w1 = 1 + fz_u(32);
+    var h1 = 1 + fz_u(32);
+    var a = fz_rgba(w1, h1);
+    var b = fz_rgba(w1, h1);
+    var n = w1 * h1;
+    var pa = pixel_buffer_data(a);
+    var pb = pixel_buffer_data(b);
+
+    # dissolve
+    var t = fz_unit();
+    var k = fz_u(4);
+    if (k == 0) { t = 0; }
+    if (k == 1) { t = f32_from(F64_ONE); }
+    var d = dissolve(a, b, t, ERR);
+    fz_check(d != 0 && load64(ERR) == RG_ERR_NONE, "dissolve failed on equal sizes");
+    var pd = pixel_buffer_data(d);
+    var i = 0;
+    while (i < n * 4) {
+        var x = load8(pa + i);
+        var y = load8(pb + i);
+        var o = load8(pd + i);
+        var lo = x; var hi = y;
+        if (y < x) { lo = y; hi = x; }
+        fz_check(o >= lo && o <= hi, "dissolve left the range of its inputs");
+        if (k == 0) { fz_check(o == x, "dissolve at 0 is not a"); }
+        if (k == 1) { fz_check(o == y, "dissolve at 1 is not b"); }
+        i = i + 1;
+    }
+    pixel_buffer_free(d);
+    var other = fz_rgba(w1 + 1, h1);
+    store64(ERR, 0);
+    fz_check(dissolve(a, other, t, ERR) == 0 && load64(ERR) == RG_ERR_DIMENSION_MISMATCH,
+      "dissolve of different sizes did not report DIMENSION_MISMATCH");
+    pixel_buffer_free(other);
+
+    # composite_at: nothing outside the placed rectangle changes.
+    var w2 = 1 + fz_u(32);
+    var h2 = 1 + fz_u(32);
+    var dst = fz_rgba(w2, h2);
+    var before = pixel_buffer_clone(dst);
+    var ox = fz_u(256) - 128;
+    var oy = fz_u(256) - 128;
+    composite_at(a, dst, ox, oy, fz_f32_any());
+    var pdst = pixel_buffer_data(dst);
+    var pbef = pixel_buffer_data(before);
+    var yy = 0;
+    while (yy < h2) {
+        var xx = 0;
+        while (xx < w2) {
+            var inside = 0;
+            if (xx >= ox && xx < ox + w1 && yy >= oy && yy < oy + h1) { inside = 1; }
+            if (inside == 0) {
+                var q = (yy * w2 + xx) * 4;
+                fz_check(load8(pdst + q) == load8(pbef + q) && load8(pdst + q + 3) == load8(pbef + q + 3),
+                  "composite_at changed a pixel outside the source rectangle");
+            }
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    pixel_buffer_free(before); pixel_buffer_free(dst);
+
+    # premultiply then unpremultiply.
+    var rt = pixel_buffer_clone(a);
+    fz_check(premultiply_alpha(rt) == RG_ERR_NONE, "premultiply_alpha failed");
+    fz_check(unpremultiply_alpha(rt) == RG_ERR_NONE, "unpremultiply_alpha failed");
+    var pr = pixel_buffer_data(rt);
+    i = 0;
+    while (i < n) {
+        fz_check(load8(pr + i * 4 + 3) == load8(pa + i * 4 + 3), "premultiply round trip changed alpha");
+        if (load8(pa + i * 4 + 3) == 255) {
+            fz_check(load8(pr + i * 4) == load8(pa + i * 4), "premultiply round trip changed an opaque pixel");
+            fz_check(load8(pr + i * 4 + 2) == load8(pa + i * 4 + 2), "premultiply round trip changed an opaque pixel");
+        }
+        i = i + 1;
+    }
+    pixel_buffer_free(rt);
+
+    # apply_mask touches alpha only.
+    var mk = pixel_buffer_clone(a);
+    fz_check(apply_mask(mk, b) == RG_ERR_NONE, "apply_mask failed on equal sizes");
+    var pm = pixel_buffer_data(mk);
+    i = 0;
+    while (i < n) {
+        fz_check(load8(pm + i * 4) == load8(pa + i * 4), "apply_mask changed red");
+        fz_check(load8(pm + i * 4 + 1) == load8(pa + i * 4 + 1), "apply_mask changed green");
+        fz_check(load8(pm + i * 4 + 2) == load8(pa + i * 4 + 2), "apply_mask changed blue");
+        fz_check(load8(pm + i * 4 + 3) == div255(load8(pa + i * 4 + 3) * load8(pb + i * 4)),
+          "apply_mask alpha is not div255(alpha * mask.r)");
+        i = i + 1;
+    }
+    pixel_buffer_free(mk);
+
+    pixel_buffer_free(a); pixel_buffer_free(b);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    ERR = fl_alloc(8);
+    return fz_run("fuzz_composite", 1500, &one);
+}
+
+var r = main();
+sys_exit_group(r);

@@ -1,124 +1,285 @@
-# Benchmarks — Rust v1.0.1 vs. Cyrius v2.0
+# Benchmarks — Rust 1.0.1 vs. Cyrius 2.3.0
 
-Reference snapshot for the ranga Rust → Cyrius port. The Rust side is frozen at
-tag `1.0.1` (`git checkout 1.0.1` to inspect it, or `git checkout 1.0.1 -- rust-old/`
-after `rust-old/` is retired); the Cyrius side is the v2.0.x tree.
+The Rust side is the crate frozen at tag `1.0.1` and kept at `rust-old/`. The Cyrius
+side is 2.3.0. Since 2.3.0 every one of Rust's 108 CPU benchmarks has a Cyrius
+counterpart **under the same name and on the same workload**: `tests/ranga.bcyr` (100)
+and `tests/spectral.bcyr` (8, which needs prakash). Rust's 26 GPU benchmarks wait on a
+decision about GPU hardware (roadmap 2.3.x).
 
-The full Rust-era benchmark series — 534 rows spanning 0.20.3 → 1.0.1 — is
-preserved in [`rust-v1-bench-history.csv`](rust-v1-bench-history.csv). It is
-lifted here **before** running `cyrius port`, because `_port_move` sweeps
-`benches/` into `rust-old/` and [ADR 007](decisions/007-final-rust-release.md)
-designates this series as the Cyrius implementation's performance target.
+The full Rust-era series, 534 rows from 0.20.3 to 1.0.1, is preserved in
+[`rust-v1-bench-history.csv`](rust-v1-bench-history.csv).
+[ADR 007](decisions/007-final-rust-release.md) makes it the Cyrius implementation's
+performance target. Cyrius runs are recorded in `bench-history.csv` by
+`scripts/bench-history.sh`.
 
 ## Source size
 
-| | Rust v1.0.1 | Cyrius v2.0 | Delta |
-|---|---:|---:|---:|
-| Library source | 13,958 LOC across 18 files | — | — |
-| Benchmark harness | 1,353 LOC across 10 criterion suites | — (`tests/ranga.bcyr`) | — |
-| Tests | 2,292 LOC across 6 integration files | — (`tests/*.tcyr`) | — |
-| Fuzz targets | 532 LOC across 8 targets | — (`tests/ranga.fcyr`) | — |
-| Examples | 893 LOC across 11 examples | — | — |
+| | Rust 1.0.1 | Cyrius 2.3.0 |
+|---|---:|---:|
+| Library source | 13,958 lines across 18 files | 11,961 lines across 22 files |
+| Benchmark harness | 1,353 lines across 10 criterion suites | 755 lines across 2 suites |
+| Tests | 2,292 lines across 6 integration files, plus in-module tests | 9,782 lines across 23 suites |
+| Fuzz targets | 532 lines across 8 targets | 1,292 lines across 8 harnesses |
+| Examples | 893 lines across 11 examples | none (roadmap 2.7.x) |
 
-Test surface to reach parity: **214** in-module `#[test]` fns, **123**
-integration tests, **161** doctests, **134** named benchmarks, **8** fuzz targets.
-Doctests have no direct Cyrius equivalent — their assertions fold into the
-`.tcyr` suite rather than being dropped.
+## How these numbers were taken
 
-## Benchmark methodology
+Both sides ran on the same machine in the same session on 2026-11-02, one after the
+other: an AMD Ryzen 7 5800H (8 cores, 16 threads) under the `powersave` governor, in a
+desktop session with a load average of 2.3–2.8. That is **not a quiesced machine**, so
+read the ratios, which share the conditions, rather than the absolutes.
 
-Rust numbers are criterion's point estimate (the middle value of its
-`[low estimate high]` triple), normalised to nanoseconds from criterion's mixed
-ps/ns/µs/ms output. Cyrius numbers will come from `tests/ranga.bcyr` via
-`bench_new`/`bench_run`/`bench_report`, recorded to `bench-history.csv`.
+- **Rust:** `rust-old/` at 1.0.1, built by the current stable rustc (1.99.1) from a
+  scratch copy, so `rust-old/` itself was not touched. criterion 0.8 with
+  `--warm-up-time 1 --measurement-time 2`; the figure is criterion's point estimate.
+  ```sh
+  cargo bench --features spectral --bench blend --bench color_convert --bench color_science \
+    --bench filter --bench transform --bench composite --bench histogram --bench icc \
+    --bench spectral -- --warm-up-time 1 --measurement-time 2 --noplot
+  ```
+- **Cyrius:** cyrius 6.7.18, `./scripts/bench-history.sh`. The figure is the mean over
+  a fixed batch, sized to take roughly 50–300 ms, with the timer floor subtracted.
 
-⚠ **The Rust baseline below is not a clean-room measurement.** It was taken on a
-loaded machine — AMD Ryzen 7 5800H, 16 cores, `powersave` governor, load average
-≈4.5, cores scaling at 76%. Sub-microsecond entries are the least trustworthy.
-An A/B against the same tree without the 1.0.1 dependency changes confirmed the
-release itself was performance-neutral, so these numbers are a fair
-representation of the Rust implementation *on that machine* — but the Cyrius
-comparison run must be taken on a quiesced machine, and ideally the Rust side
-re-run there too before any delta is published.
+The "frozen series" column is the 1.0.1 row of `rust-v1-bench-history.csv`, recorded
+in August 2026 with that era's toolchain. This run's Rust numbers agree with it to a
+median of 0.98×. The exceptions are the separable blurs: `gaussian_blur_r3` and
+`box_blur_r3` take 61 ms today against 18.5 ms then, and `unsharp_mask_r2` 59 ms
+against 28 ms, with tight intervals on both runs. The most likely cause is codegen in
+the newer rustc, which was not investigated. `resize_bicubic` went the other way,
+55 ms against 105 ms. Against the frozen series the blurs would be about 22× rather
+than about 7×.
 
-Amplification will be needed on the Cyrius side for the sub-timer-floor entries:
-14 benchmarks land under 100 ns, the fastest at 1.04 ns.
+**What "same workload" means.** The inputs and parameters are Rust's: uniform 128
+frames where Rust uses `make_buf`, `i % 256` where it uses `make_varied_buf`, opacity
+200 for blend, a 640×480 source at (100, 100) for `composite_at`, the 17-point
+identity cube, and so on. In-place operations run repeatedly on one buffer, as Rust's
+do. Two differences remain:
+
+- Rust's colour structs live on the stack and `.into()` allocates nothing. The port
+  returns heap handles, so `srgb_to_lab`, `cmyk_roundtrip`, `hsl_roundtrip`,
+  `pixel_view_create`, `spd_to_xyz`, `wavelength_to_xyz` and
+  `xyz_conversion_roundtrip` each include an allocation and a free.
+- `curves_1080p` builds its LUT in f64 rather than f32. The table only has to be a
+  plausible curve, since `curves` is a lookup either way.
+
+Up to 2.2.0, 35 benchmarks existed, and several shared a Rust name but not its
+workload. Two were also renamed to Rust's names in 2.3.0 (`composite_at_1080p` and
+`rgba_to_yuv420p_1080p`). So `bench-history.csv` rows from before 2.3.0 do not compare
+with later ones.
 
 ## Results
 
-Cyrius numbers are from `cyrius bench tests/ranga.bcyr` (35 benchmarks, CPU
-only — GPU and spectral land with M5/M6). Rust numbers are the frozen 1.0.1
-series. **Both were taken on the same loaded machine under a `powersave`
-governor**, so the ratio is more trustworthy than either absolute.
+**Median 8.0× slower than Rust, from 0.5× to 367×.**
 
-**Median ratio: 8.6× slower than Rust; range 3.2×–46.0×.** The first
-measurement was 10.6× median over 3.8×–79.9×; three performance passes have
-since landed. That is the expected
-shape for a scalar-first port and is not alarming on its own — Rust's numbers
-include SSE2/AVX2 kernels for the paths that dominate this list, and ranga's
-Cyrius side currently has vector code only in `brightness`. The interesting
-information is in the spread, not the median.
-
-| Benchmark | Rust v1.0.1 | Cyrius v2.0 | Ratio |
-|---|---:|---:|---:|
-| `blend_pixel_normal` | 12.8 ns | 83.0 ns | 6.5× |
-| `blend_pixel_modes/Multiply` | 13.8 ns | 88.0 ns | 6.4× |
-| `blend_pixel_modes/SoftLight` | 17.1 ns | 143.0 ns | 8.3× |
-| `blend_pixel_argb_normal` | 14.4 ns | 134.0 ns | 9.3× |
-| `delta_e_cie76` | 2.4 ns | 9.0 ns | 3.8× |
-| `delta_e_cie94` | 7.4 ns | 37.0 ns | 5.0× |
-| `delta_e_ciede2000` | 111.3 ns | 557.0 ns | 5.0× |
-| `blend_row_1920px` | 3.63 µs | 46.59 µs | 12.8× |
-| `blend_row_argb_1920px` | 3.94 µs | 47.56 µs | 12.1× |
-| `brightness_1080p` | 277.91 µs | 3.87 ms | 13.9× |
-| `grayscale_1080p` | 1.50 ms | 10.62 ms | 7.1× |
-| `invert_1080p` | 1.06 ms | 3.39 ms | 3.2× |
-| `contrast_1080p` | 7.32 ms | 89.18 ms | 12.2× |
-| `saturation_1080p` | 5.89 ms | 86.97 ms | 14.8× |
-| `threshold_1080p` | 2.75 ms | 11.39 ms | 4.1× |
-| `flip_horizontal_1080p` | 1.80 ms | 25.12 ms | 13.9× |
-| `flip_vertical_1080p` | 583.61 µs | 13.97 ms | 23.9× |
-| `crop_1080p_to_720p` | 139.96 µs | 6.44 ms | 46.0× |
-| `resize_bilinear_1080p_to_720p` | 19.72 ms | 85.08 ms | 4.3× |
-| `resize_nearest_1080p_to_720p` | 1.59 ms | 12.45 ms | 7.8× |
-| `rgba_to_yuv420p_1080p` | — | 9.07 ms | — |
-| `yuv420p_to_rgba_bt601_1080p` | 1.20 ms | 37.27 ms | 31.1× |
-| `rgba8_to_argb8_1080p` | 2.16 ms | 14.19 ms | 6.6× |
-| `premultiply_alpha_1080p` | 3.53 ms | 30.20 ms | 8.6× |
-| `fill_solid_1080p` | 149.61 µs | 3.16 ms | 21.1× |
-| `composite_at_1080p` | — | 59.34 ms | — |
-| `luminance_histogram_1080p` | 4.70 ms | 18.34 ms | 3.9× |
-| `equalize_1080p` | 10.37 ms | 202.01 ms | 19.5× |
-| `auto_levels_1080p` | 8.18 ms | 188.28 ms | 23.0× |
-| `box_blur_r3_1080p` | 18.60 ms | 394.97 ms | 21.2× |
-| `gaussian_blur_r3_1080p` | 18.50 ms | 396.32 ms | 21.4× |
-| `median_r1_512x512` | 29.34 ms | 185.59 ms | 6.3× |
-| `bilateral_r2_256x256` | 14.90 ms | 126.75 ms | 8.5× |
-| `vignette_1080p` | 12.80 ms | 122.04 ms | 9.5× |
-| `noise_gaussian_1080p` | 59.61 ms | 430.76 ms | 7.2× |
+| Ratio | Benchmarks |
+|---|---:|
+| faster than Rust (< 1×) | 2 |
+| 1–2× | 2 |
+| 2–4× | 6 |
+| 4–8× | 43 |
+| 8–16× | 24 |
+| 16× and over | 31 |
 
 ### Reading the spread
 
-- **The 3.8×–8× band** (`delta_e_*`, `luminance_histogram`, `median`,
-  `bilateral`, `noise_gaussian`) is arithmetic-bound work with no Rust SIMD
-  counterpart. This is roughly the honest cost of the language difference today,
-  and it is the band everything else should be pulled toward.
-- **The 10×–20× band** is mostly Rust SIMD versus Cyrius scalar — `grayscale`,
-  `blend_row`, `contrast`, `saturation`, the blurs. These are the targets for
-  the remaining `asm { }` kernels.
-- **`crop` at 79.9× and `flip_vertical` at 40.2× are the outliers worth fixing
-  first**, and neither is a SIMD problem: both are pure `memcpy` in Rust. The
-  Cyrius versions allocate a fresh `PixelBuffer` (which zero-fills via
-  `fl_calloc`) and then overwrite every byte of it. For `crop` the zero-fill is
-  most of the work. An uninitialised-allocation path for the
-  "about to overwrite everything" case should close most of that gap, and it
-  would help `flip_horizontal`, `rgba8_to_argb8` and `fill_solid` too.
-- **`yuv420p_to_rgba` at 44.2×** stands out because Rust has an SSE2 kernel
-  processing 8 pixels per iteration there; the Cyrius side is per-pixel scalar
-  with a chroma-index computation per pixel. Hoisting the chroma row pointers
-  out of the inner loop is worth trying before reaching for assembly.
+- **Faster or level:** `blend_row` (0.5×, both widths), an SSE2 kernel, and
+  `checkerboard` (1.0×). `gradient_linear` (1.3×) computes one row and copies it down.
+- **The 4–8× band,** where most benchmarks sit, is per-pixel arithmetic with no Rust
+  SIMD counterpart: the blend modes, the delta-E formulas, `median`, the YUV forward
+  converters and the blurs as measured today. This is roughly the cost of the language
+  difference, and the band the rest should be pulled toward.
+- **Byte loops in the standard library.** At cyrius 6.7.18, `memcpy` and `memset` in
+  `lib/string.cyr` move one byte per iteration. The x86 `rep movsb` path was removed
+  because the aarch64 backend emitted it too and lost instruction alignment. Rust's
+  are vectorised. This accounts for:
+  - `buffer_pool_acquire_release` (127×): every acquire re-zeroes an 8.3 MB buffer,
+    as Rust's `resize(size, 0)` does;
+  - `crop` (53×) and `flip_vertical` (32×), which copy whole rows with `memcpy`;
+  - `flip_horizontal` (18×) and `fill_solid` (18.5×), which store per pixel.
 
-### The allocator, not the arithmetic
+  An architecture-guarded fast path belongs upstream. A word-at-a-time copy in ranga
+  is the local alternative (roadmap 2.6.x).
+- **Per-byte f32 through helper calls:** `fade` (57×), `dissolve` (50×), the angled
+  and radial gradients (37–42×), `vibrance` (27×), `color_balance` (21×),
+  `channel_mixer` and `contrast` (16–17×). `fade` makes four helper calls per
+  channel, and Cyrius does not inline (see "What the inline experiment showed"
+  below). Inlining these by hand, as was done for the blurs in 2.0.x, is the first
+  thing to try (roadmap 2.6.x).
+- **`equalize` (31×) and `auto_levels` (41×)** make two passes over the frame, the
+  second converting each channel through f32 helper calls.
+- **The YUV inverses (37×) and `nv12_to_rgba` (52×)** are SSE2 in Rust, 8 pixels per
+  iteration, and scalar here.
+- **Nanosecond scalars:** `xyz_conversion_roundtrip` (53×), `wavelength_to_xyz` (25×),
+  `cie_cmf_at`, `p3_to_linear_srgb` and the tone curves (18×). Rust inlines these to a
+  few instructions; here each is a call, often with a heap handle.
+- **`color_rendering_index` (367×) is upstream:** 310 µs per call in prakash 2.15.1
+  against 0.84 µs in Rust. ranga only forwards to it.
+- **`srgb_v2_profile_generation` (40×) and `icc_from_bytes_srgb_v2` (18×)** build and
+  parse the profile field by field with byte stores and loads, plus an allocation
+  each.
+
+The full table follows, grouped by Rust bench file in Rust's order.
+
+### `blend.rs`
+
+| Benchmark | Rust 1.0.1 (frozen series) | Rust 1.0.1 (this run) | Cyrius 2.3.0 | Ratio |
+|---|---:|---:|---:|---:|
+| `blend_pixel_normal` | 12.8 ns | 13.0 ns | 88.0 ns | 6.8× |
+| `blend_row_1920px` | 3.63 µs | 3.67 µs | 1.77 µs | 0.5× |
+| `blend_row_1080p_width` | 3.64 µs | 3.67 µs | 1.78 µs | 0.5× |
+| `blend_pixel_modes/Normal` | 12.8 ns | 12.9 ns | 87.0 ns | 6.7× |
+| `blend_pixel_modes/Multiply` | 13.8 ns | 13.6 ns | 94.0 ns | 6.9× |
+| `blend_pixel_modes/Screen` | 15.2 ns | 15.4 ns | 102.0 ns | 6.6× |
+| `blend_pixel_modes/Overlay` | 15.6 ns | 15.6 ns | 104.0 ns | 6.7× |
+| `blend_pixel_modes/Darken` | 15.1 ns | 13.5 ns | 132.0 ns | 9.8× |
+| `blend_pixel_modes/Lighten` | 14.9 ns | 13.5 ns | 134.0 ns | 9.9× |
+| `blend_pixel_modes/ColorDodge` | 16.2 ns | 15.9 ns | 146.0 ns | 9.2× |
+| `blend_pixel_modes/ColorBurn` | 17.0 ns | 16.7 ns | 155.0 ns | 9.3× |
+| `blend_pixel_modes/SoftLight` | 17.1 ns | 17.1 ns | 131.0 ns | 7.7× |
+| `blend_pixel_modes/HardLight` | 15.0 ns | 14.7 ns | 110.0 ns | 7.5× |
+| `blend_pixel_modes/Difference` | 14.1 ns | 14.2 ns | 104.0 ns | 7.3× |
+| `blend_pixel_modes/Exclusion` | 14.9 ns | 14.9 ns | 116.0 ns | 7.8× |
+| `blend_pixel_argb_normal` | 14.4 ns | 14.3 ns | 150.0 ns | 10.5× |
+| `blend_row_argb_1920px` | 3.94 µs | 3.90 µs | 52.44 µs | 13.4× |
+
+### `color_convert.rs`
+
+| Benchmark | Rust 1.0.1 (frozen series) | Rust 1.0.1 (this run) | Cyrius 2.3.0 | Ratio |
+|---|---:|---:|---:|---:|
+| `rgba_to_yuv420p_bt601_1080p` | 2.19 ms | 2.38 ms | 9.97 ms | 4.2× |
+| `yuv420p_to_rgba_bt601_1080p` | 1.20 ms | 1.11 ms | 41.29 ms | 37.0× |
+| `rgba_to_yuv420p_bt709_1080p` | 2.22 ms | 2.18 ms | 9.93 ms | 4.6× |
+| `yuv420p_to_rgba_bt709_1080p` | 1.21 ms | 1.10 ms | 41.31 ms | 37.6× |
+| `nv12_to_rgba_1080p` | 1.02 ms | 806.93 µs | 41.78 ms | 51.8× |
+| `rgb8_to_rgba8_1080p` | 2.54 ms | 2.50 ms | 14.25 ms | 5.7× |
+| `argb8_to_rgba8_1080p` | 2.11 ms | 2.02 ms | 13.81 ms | 6.8× |
+| `rgbaf32_to_rgba8_1080p` | 15.02 ms | 14.63 ms | 99.38 ms | 6.8× |
+| `rgba_to_yuv420p_bt2020_1080p` | 2.48 ms | 2.63 ms | 9.97 ms | 3.8× |
+| `yuv420p_to_rgba_bt2020_1080p` | 1.26 ms | 1.13 ms | 41.28 ms | 36.6× |
+| `argb_to_nv12_1080p` | 4.68 ms | 4.79 ms | 20.77 ms | 4.3× |
+| `rgba8_to_argb8_1080p` | 2.16 ms | 1.86 ms | 14.26 ms | 7.6× |
+| `rgba8_to_rgb8_1080p` | 2.37 ms | 2.25 ms | 12.07 ms | 5.4× |
+| `rgba8_to_rgbaf32_1080p` | 7.62 ms | 7.27 ms | 31.22 ms | 4.3× |
+
+### `color_science.rs`
+
+| Benchmark | Rust 1.0.1 (frozen series) | Rust 1.0.1 (this run) | Cyrius 2.3.0 | Ratio |
+|---|---:|---:|---:|---:|
+| `srgb_to_lab` | 87.5 ns | 83.3 ns | 1.33 µs | 16.0× |
+| `delta_e_cie76` | 2.4 ns | 2.3 ns | 11.0 ns | 4.8× |
+| `delta_e_cie94` | 7.4 ns | 6.9 ns | 37.0 ns | 5.4× |
+| `delta_e_ciede2000` | 111.3 ns | 120.2 ns | 530.0 ns | 4.4× |
+| `p3_to_linear_srgb` | 1.5 ns | 1.5 ns | 27.0 ns | 17.8× |
+| `cmyk_roundtrip` | 13.1 ns | 13.0 ns | 109.0 ns | 8.4× |
+| `color_temperature_6600K` | 7.8 ns | 8.0 ns | 64.0 ns | 8.0× |
+| `hsl_roundtrip` | 20.2 ns | 19.1 ns | 144.0 ns | 7.5× |
+| `icc_tone_curve_apply` | 11.4 ns | 11.4 ns | 207.0 ns | 18.2× |
+| `buffer_pool_acquire_release` | 107.81 µs | 92.66 µs | 11.80 ms | 127.4× |
+| `pixel_view_create` | 8.6 ns | 8.9 ns | 43.0 ns | 4.8× |
+
+### `composite.rs`
+
+| Benchmark | Rust 1.0.1 (frozen series) | Rust 1.0.1 (this run) | Cyrius 2.3.0 | Ratio |
+|---|---:|---:|---:|---:|
+| `premultiply_alpha_1080p` | 3.53 ms | 3.54 ms | 33.80 ms | 9.5× |
+| `composite_at_640x480_on_1080p` | 1.73 ms | 1.75 ms | 9.63 ms | 5.5× |
+| `dissolve_1080p` | 9.45 ms | 9.43 ms | 475.47 ms | 50.4× |
+| `fade_1080p` | 7.00 ms | 5.52 ms | 315.92 ms | 57.3× |
+| `wipe_1080p` | 2.23 ms | 2.16 ms | 14.54 ms | 6.7× |
+| `gradient_linear_1080p` | 10.37 ms | 10.50 ms | 13.55 ms | 1.3× |
+| `checkerboard_1080p` | 6.32 ms | 6.38 ms | 6.68 ms | 1.0× |
+| `unpremultiply_alpha_1080p` | 6.35 ms | 6.37 ms | 17.79 ms | 2.8× |
+| `apply_mask_1080p` | 1.47 ms | 1.56 ms | 12.84 ms | 8.2× |
+| `gradient_radial_1080p` | 16.08 ms | 16.16 ms | 600.02 ms | 37.1× |
+| `gradient_linear_angled_1080p` | 13.80 ms | 13.75 ms | 580.25 ms | 42.2× |
+| `fill_solid_1080p` | 149.61 µs | 148.77 µs | 2.75 ms | 18.5× |
+| `composite_at_argb_640x480_on_1080p` | 1.82 ms | 1.81 ms | 9.55 ms | 5.3× |
+
+### `filter.rs`
+
+| Benchmark | Rust 1.0.1 (frozen series) | Rust 1.0.1 (this run) | Cyrius 2.3.0 | Ratio |
+|---|---:|---:|---:|---:|
+| `brightness_1080p` | 277.91 µs | 282.41 µs | 3.65 ms | 12.9× |
+| `contrast_1080p` | 7.32 ms | 5.83 ms | 93.76 ms | 16.1× |
+| `saturation_1080p` | 5.89 ms | 7.07 ms | 84.72 ms | 12.0× |
+| `grayscale_1080p` | 1.50 ms | 1.48 ms | 8.86 ms | 6.0× |
+| `invert_1080p` | 1.06 ms | 1.03 ms | 3.38 ms | 3.3× |
+| `levels_1080p` | 2.01 ms | 2.00 ms | 8.48 ms | 4.2× |
+| `curves_1080p` | 2.02 ms | 1.99 ms | 9.08 ms | 4.6× |
+| `gaussian_blur_r3_1080p` | 18.50 ms | 61.40 ms | 407.10 ms | 6.6× |
+| `box_blur_r3_1080p` | 18.60 ms | 60.49 ms | 406.92 ms | 6.7× |
+| `unsharp_mask_r2_1080p` | 28.38 ms | 58.73 ms | 471.02 ms | 8.0× |
+| `hue_shift_1080p` | 48.81 ms | 47.08 ms | 382.88 ms | 8.1× |
+| `color_balance_1080p` | 10.04 ms | 10.42 ms | 213.29 ms | 20.5× |
+| `vignette_1080p` | 12.80 ms | 12.54 ms | 133.68 ms | 10.7× |
+| `lut3d_17cube_1080p` | 57.74 ms | 56.31 ms | 800.55 ms | 14.2× |
+| `noise_gaussian_1080p` | 59.61 ms | 58.39 ms | 467.63 ms | 8.0× |
+| `noise_salt_pepper_1080p` | 4.82 ms | 4.82 ms | 30.39 ms | 6.3× |
+| `median_r1_512x512` | 29.34 ms | 28.65 ms | 198.54 ms | 6.9× |
+| `median_r5_512x512` | 40.32 ms | 37.21 ms | 262.14 ms | 7.0× |
+| `bilateral_r2_256x256` | 14.90 ms | 12.82 ms | 134.12 ms | 10.5× |
+| `vibrance_1080p` | 8.42 ms | 8.60 ms | 227.62 ms | 26.5× |
+| `channel_mixer_1080p` | 5.23 ms | 6.40 ms | 107.83 ms | 16.8× |
+| `threshold_1080p` | 2.75 ms | 2.66 ms | 9.52 ms | 3.6× |
+| `flood_fill_1080p_uniform` | 18.00 ms | 18.10 ms | 158.79 ms | 8.8× |
+| `auto_white_balance_1080p` | 6.48 ms | 5.85 ms | 62.31 ms | 10.7× |
+
+### `histogram.rs`
+
+| Benchmark | Rust 1.0.1 (frozen series) | Rust 1.0.1 (this run) | Cyrius 2.3.0 | Ratio |
+|---|---:|---:|---:|---:|
+| `luminance_histogram_1080p` | 4.70 ms | 4.61 ms | 19.19 ms | 4.2× |
+| `rgb_histograms_1080p` | 1.80 ms | 1.68 ms | 11.57 ms | 6.9× |
+| `equalize_1080p` | 10.37 ms | 10.23 ms | 321.12 ms | 31.4× |
+| `auto_levels_1080p` | 8.18 ms | 7.44 ms | 301.15 ms | 40.5× |
+| `chi_squared_256bins` | 308.2 ns | 290.0 ns | 1.88 µs | 6.5× |
+
+### `icc.rs`
+
+| Benchmark | Rust 1.0.1 (frozen series) | Rust 1.0.1 (this run) | Cyrius 2.3.0 | Ratio |
+|---|---:|---:|---:|---:|
+| `srgb_v2_profile_generation` | 24.5 ns | 23.1 ns | 927.0 ns | 40.2× |
+| `icc_from_bytes_srgb_v2` | 76.2 ns | 68.7 ns | 1.23 µs | 17.8× |
+| `icc_apply_mid_gray` | 48.0 ns | 37.1 ns | 645.0 ns | 17.4× |
+| `icc_apply_white` | 30.6 ns | 26.0 ns | 62.0 ns | 2.4× |
+| `icc_apply_black` | 20.1 ns | 18.9 ns | 113.0 ns | 6.0× |
+| `icc_apply_saturated_red` | 22.0 ns | 19.9 ns | 98.0 ns | 4.9× |
+| `tone_curve_gamma_2_2` | 11.6 ns | 11.2 ns | 204.0 ns | 18.3× |
+| `tone_curve_table_256` | 4.5 ns | 4.4 ns | 19.0 ns | 4.3× |
+
+### `transform.rs`
+
+| Benchmark | Rust 1.0.1 (frozen series) | Rust 1.0.1 (this run) | Cyrius 2.3.0 | Ratio |
+|---|---:|---:|---:|---:|
+| `crop_1080p_to_720p` | 139.96 µs | 125.22 µs | 6.64 ms | 53.0× |
+| `resize_nearest_1080p_to_720p` | 1.59 ms | 1.47 ms | 4.16 ms | 2.8× |
+| `resize_bilinear_1080p_to_720p` | 19.72 ms | 18.13 ms | 92.66 ms | 5.1× |
+| `flip_horizontal_1080p` | 1.80 ms | 1.51 ms | 26.94 ms | 17.9× |
+| `flip_vertical_1080p` | 583.61 µs | 453.05 µs | 14.34 ms | 31.6× |
+| `affine_rotate_512x512` | 7.27 ms | 6.26 ms | 30.62 ms | 4.9× |
+| `resize_bicubic_1080p_to_720p` | 104.83 ms | 54.81 ms | 1.42 s | 25.9× |
+| `perspective_identity_512x512` | 8.80 ms | 7.96 ms | 34.72 ms | 4.4× |
+
+### `spectral.rs`
+
+| Benchmark | Rust 1.0.1 (frozen series) | Rust 1.0.1 (this run) | Cyrius 2.3.0 | Ratio |
+|---|---:|---:|---:|---:|
+| `spd_to_xyz` | 66.8 ns | 63.5 ns | 1.53 µs | 24.1× |
+| `xyz_to_cct` | 4.6 ns | 3.6 ns | 42.0 ns | 11.7× |
+| `wavelength_to_xyz` | 3.6 ns | 3.4 ns | 87.0 ns | 25.3× |
+| `blackbody_spd` | 985.0 ns | 941.2 ns | 9.85 µs | 10.5× |
+| `color_temperature_to_rgb` | 14.5 ns | 14.3 ns | 122.0 ns | 8.6× |
+| `cie_cmf_at` | 3.6 ns | 3.5 ns | 62.0 ns | 17.9× |
+| `color_rendering_index` | 885.4 ns | 844.0 ns | 309.64 µs | 366.9× |
+| `xyz_conversion_roundtrip` | 1.0 ns | 1.0 ns | 53.0 ns | 53.0× |
+
+## Earlier performance passes (2.0.x)
+
+These sections record how the first gaps were closed. Their numbers come from the
+2.0.x benchmarks, measured against the frozen series, and several of those benchmarks
+had workloads that differ from Rust's (see above).
+
+#### The allocator, not the arithmetic
 
 `crop` at 79.9x was almost entirely `fl_calloc`. It zeroes **byte at a time** on
 top of an `mmap` the kernel has already zeroed — measured **10.946 ms vs
@@ -141,7 +302,7 @@ wrong use only breaks once the allocator recycles). `affine_transform` and
 `perspective_transform` deliberately keep the zeroed path: their skipped pixels
 *are* the transparent black.
 
-### Vector kernels, in the order they were cheapest to write
+#### Vector kernels, in the order they were cheapest to write
 
 One SSE2 kernel (`_sx_luma_row_sse2`) ended up serving **four** call sites,
 because `grayscale`, `threshold` and all three YUV forward converters share the
@@ -162,7 +323,7 @@ luma byte across three lanes while leaving the fourth alone — punpck plus a
 masked merge, a second kernel's worth of hand assembly for the smaller half of
 the work.
 
-### First vector kernels + a loop hoist
+#### First vector kernels + a loop hoist
 
 | | before | after | speedup | vs Rust now |
 |---|---:|---:|---:|---:|
@@ -191,7 +352,7 @@ kernel that broadcast one pixel across both would fail. It also covers the
 alpha-is-ignored property, all three coefficient standards, the internal loop
 across multiple pairs, and the `pairs == 0` guard.
 
-### What the inline experiment showed
+#### What the inline experiment showed
 
 Cyrius leaves **general function inlining off by default** (`_INLINE_OK`, a
 compiler-internal default-0 that a consumer cannot switch on). Small helper
@@ -210,16 +371,11 @@ with every test still green. The readable factoring is right for module surface
 and for anything called once per image; it is wrong for anything on a per-pixel
 or per-tap path. See `port-mechanics.md`.
 
-### Caveats
+## Caveats
 
-⚠ Machine state is not benchmark-clean — AMD Ryzen 7 5800H, `powersave`
-governor, other work in flight. Absolutes will move on a quiesced machine; the
-Rust and Cyrius numbers were taken under the same conditions, so ratios are the
-figure to trust.
-
-⚠ `rgba_to_yuv420p_1080p` and `composite_at_1080p` have no Rust counterpart
-under those exact names in the 1.0.1 series, so they are baselines only.
-
-⚠ A correct SIMD path is invisible to assertions — see the note in
-`roadmap.md`. These benchmarks are currently the only evidence that vector code
-is executing at all.
+- Machine state is not benchmark-clean (see "How these numbers were taken"). Absolutes
+  will move on a quiesced machine; the ratios share the conditions.
+- A correct SIMD path is invisible to assertions. These benchmarks are the only
+  evidence that vector code is executing at all.
+- Rust's GPU benchmarks (`gpu.rs`, 26 of them, half of which are CPU baselines run
+  beside the GPU ones) are not ported. See roadmap 2.3.x.

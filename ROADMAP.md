@@ -7,12 +7,12 @@ preserved at `rust-old/` as the parity oracle until the port is complete.
 | Milestone | Theme |
 | --- | --- |
 | ~~2.2.x~~ | **Done in 2.2.0.** Bit-exact again: `scripts/oracle` against `rust-old/`, with every CPU divergence fixed or ADR'd |
-| **2.3.x** | Verification parity: a real fuzz harness (8 targets), property tests, golden vectors from the oracle, the oracle in CI, the missing benchmarks |
+| ~~2.3.x~~ | **Done in 2.3.0.** Verification parity: 8 fuzz targets in CI, 31 properties, Rust's integration and edge-case tests, golden vectors from the oracle, the oracle in CI, 108 CPU benchmarks. Three decisions remain (blur darkening, GPU benches, NVIDIA coverage) |
 | **2.4.x** | CPU surface completion: the serde decision, clone/eq for heap records, `Lut3d::from_cube`, writable records |
 | **2.5.x** | GPU: the wgpu decision, `GpuChain`, native blur/blend/bilinear, rounding and size fixes |
 | **2.6.x** | Performance: vectorised blur, histogram ops, contrast/saturation, the YUV inverse |
 | **2.7.x** | Docs, examples, security audit, a first Cyrius consumer |
-| **2.x** | Close the port: capture the oracle into tests, then retire `rust-old/` |
+| **2.x** | Close the port: retire `rust-old/` (its outputs are captured in `tests/oracle_golden.tcyr` since 2.3.0) |
 
 The per-item inventory behind these milestones:
 [docs/development/parity-rust-v-cyrius.md](docs/development/parity-rust-v-cyrius.md).

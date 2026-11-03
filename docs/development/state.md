@@ -5,6 +5,15 @@
 
 ## Version
 
+**2.3.0**: milestone 2.3.x, "verification parity". The port now carries Rust 1.0.1's
+whole verification surface outside the GPU benchmarks: the 8 fuzz targets (`fuzz/`,
+run by CI under allocator redzones), the 31 properties, all 123 integration,
+edge-case, Photoshop, visual-regression and spectral tests, and the 108 CPU
+benchmarks on Rust's workloads. The oracle runs in CI, and `tests/oracle_golden.tcyr`
+holds Rust's outputs for its 53 exact groups, so the evidence survives `rust-old/`.
+`src/` is unchanged. One inherited Rust behaviour is open for a decision: its blurs
+darken a uniform image by up to 2 counts (roadmap 2.3.x).
+
 **2.2.0**: milestone 2.2.x, "bit-exact again". `scripts/oracle` checks the port
 against the Rust 1.0.1 crate on identical inputs: 2.1 million values, and every
 output boundary of the f32 → byte conversions over all of [0, 1]. After this
@@ -121,6 +130,8 @@ and at 2.1.0 (6.7.9) only the `# Version:` line moved. At 2.1.1 (6.7.18) the bod
 changes only by the `_TC_SIZE` → `_ICC_TC_SIZE` rename, and distlib drops `freelist`
 from the hwaccel sidecar and `math` from the spectral one.
 
+At 2.3.0 only the `# Version:` line moved: `src/` is unchanged.
+
 `cyrius distlib` warns that `num_fft` is still undefined in `ranga-spectral.cyr`.
 The name comes from prakash (6.7.9 reported it too), so a consumer of that bundle
 must supply it.
@@ -134,43 +145,55 @@ before the tag.
 
 ## Tests
 
-**1,971 assertions across 19 suites, 0 failures, on an AMD host.** That is the 1,921
-that held through the 2.0.1–2.1.1 bumps, plus 18 from the 2.1.2 P(-1) review and 32
-from 2.2.0. Each of the 50 new ones fails on the release before it.
+**2,261 assertions across 23 suites, 0 failures, on an AMD host** (1,971 across 19 at
+2.2.0). 162 of them are GPU assertions that run only when an AMD context opens:
+22 in `gpu.tcyr`, 49 in `gpu_kernels.tcyr`, 83 in `gpu_pipeline.tcyr` and 8 in
+`gpu_spirv.tcyr`. A host without one, such as CI, prints `SKIPPED: N hardware
+assertions` for each suite and runs the other 2,099. On a GPU host each count is
+asserted, so it cannot drift. The NVIDIA backend has no test (roadmap 2.3.x).
 
-The differential oracle (`scripts/oracle/run.sh`) is a second line of evidence beside
-the suite. It compares 2.1 million values against the Rust 1.0.1 crate and is clean
-apart from ADR 002's three accepted groups. It needs `cargo` and is not run by CI
-yet (roadmap 2.3.x). ranga's own code compiles with zero warnings; the
-three left come from the vendored prakash. 152 GPU
-assertion sites run only when an AMD context opens. CI has no GPU, so it runs far
-fewer, and nothing on CI says how many were skipped.
-
-**There is no fuzzing.** `tests/ranga.fcyr` is the `cyrius port` scaffold stub and
-includes no ranga module, and none of the 8 Rust fuzz targets is ported. There are no
-property tests either. See [roadmap.md](roadmap.md) 2.3.x.
+The suites now carry Rust 1.0.1's whole test surface: its in-module tests, all 123
+integration tests (`integration.tcyr`, `edge_cases.tcyr`, `properties.tcyr`,
+`spectral.tcyr`) and, through `oracle_golden.tcyr`, the oracle's Rust outputs for
+its 53 exact groups (about 2.1 million values, checked by digest with no `cargo`).
 
 | Suite | Assertions |
 | --- | ---: |
 | `icc.tcyr` | 199 |
-| `filter_point.tcyr` | 161 |
+| `transform.tcyr` | 165 |
+| `filter_point.tcyr` | 163 |
 | `composite.tcyr` | 159 |
-| `transform.tcyr` | 159 |
 | `histogram.tcyr` | 150 |
-| `color.tcyr` | 139 |
-| `filter_kernel.tcyr` | 130 |
-| `pixel.tcyr` | 123 |
+| `color.tcyr` | 148 |
+| `filter_kernel.tcyr` | 134 |
+| `pixel.tcyr` | 126 |
+| `convert.tcyr` | 110 |
 | `blend.tcyr` | 107 |
-| `convert.tcyr` | 106 |
-| `gpu_pipeline.tcyr` | 99 |
+| `oracle_golden.tcyr` | 107 |
+| `gpu_pipeline.tcyr` | 102 |
+| `spectral.tcyr` | 66 |
 | `simd_u8.tcyr` | 65 |
+| `integration.tcyr` | 62 |
 | `gpu_shaders.tcyr` | 59 |
-| `spectral.tcyr` | 58 |
 | `ranga.tcyr` | 59 |
-| `gpu_spirv.tcyr` | 53 |
-| `gpu_kernels.tcyr` | 52 |
+| `edge_cases.tcyr` | 55 |
+| `gpu_spirv.tcyr` | 54 |
+| `gpu_kernels.tcyr` | 53 |
 | `hwaccel.tcyr` | 48 |
-| `gpu.tcyr` | 45 |
+| `gpu.tcyr` | 46 |
+| `properties.tcyr` | 24 |
+
+`properties.tcyr` has one assertion per property group, each over an edge grid plus
+4,096 seeded random inputs, so its count understates what it checks.
+
+**Fuzzing:** `fuzz/` holds the 8 Rust fuzz targets as invariant-checking harnesses.
+`cyrius fuzz --poison` runs them under allocator redzones in about 10 s, in CI too. A
+failure prints the seed that replays it.
+
+**Differential oracle:** `scripts/oracle/run.sh` compares 2.1 million values across 56
+groups against the Rust 1.0.1 crate. It is clean apart from ADR 002's three accepted
+groups, and CI runs it. ranga's own code compiles with zero warnings; the three left
+come from the vendored prakash.
 
 Every module is mutation-tested once it goes green; the discipline and its
 findings are in [`port-mechanics.md`](port-mechanics.md). Expected values come
@@ -179,15 +202,16 @@ Cyrius back.
 
 ### Lint
 
-**0 warnings and 0 untracked deferrals across all 41 files** — 22 in `src/`,
-19 in `tests/`. That is the standing bar, and as of 2.0.1 CI actually enforces
-it.
+**0 warnings and 0 untracked deferrals across all 57 files**: 22 in `src/`, 26 in
+`tests/` (23 suites, `gpu_hw.cyr` and the two bench suites) and 9 in `fuzz/`. That is
+the standing bar, and as of 2.0.1 CI actually enforces it.
 
 It did not before. Up to cyrius 6.6.4, `cyrius lint` accepted a single path and
 always exited 0, so the old step (`cyrius lint src/*.cyr tests/*.tcyr`) linted
 `src/blend.cyr` and passed no matter what it found. From 2.0.1 to 2.1.1 the gate
 looped over every file and parsed the printed totals. Since 2.1.2 it is one call,
-`cyrius lint --strict --strict-deferrals src/*.cyr tests/*.tcyr`. At the 6.7.18 pin
+`cyrius lint --strict --strict-deferrals src/*.cyr tests/*.tcyr tests/*.cyr tests/*.bcyr fuzz/*.fcyr fuzz/*.cyr`
+(the last four globs since 2.3.0). At the 6.7.18 pin
 that exits 2 on any warning or untracked deferral, while the plain form exits 0.
 
 Two quirks worth knowing before touching that step:
@@ -233,24 +257,25 @@ The WGSL fallback is never dispatched. The full inventory is in
 
 ## Performance
 
-35 CPU benchmarks in `tests/ranga.bcyr`, compared against the frozen Rust
-criterion series in
-[`benchmarks-rust-v-cyrius.md`](../benchmarks-rust-v-cyrius.md).
+All 108 of Rust 1.0.1's CPU benchmarks, under Rust's names and on Rust's workloads:
+`tests/ranga.bcyr` (100) and `tests/spectral.bcyr` (8). Rust's 26 GPU benchmarks are
+not ported (roadmap 2.3.x). The comparison in
+[`benchmarks-rust-v-cyrius.md`](../benchmarks-rust-v-cyrius.md) ran both sides on
+one machine in one session at 2.3.0.
 
-**Median 8.6x slower than Rust** (from 10.6x at the first pass), worst case
-46.0x (from 79.9x). `blend_row_1920px` is 0.5x — faster than Rust. The blurs
-(~21x) are slow because Rust auto-vectorises a loop Cyrius runs scalar.
-`equalize` (19.5x) and `auto_levels` (23x) are about as slow, and in their case the
-cause is per-channel call overhead.
+**Median 8.0× slower than Rust, from 0.5× to 367×.** 53 of the 108 are under 8×.
+`blend_row` is 0.5×, faster than Rust. Most of the worst ranga-side ratios have one of
+two causes. The 6.7.18 stdlib's `memcpy`/`memset` are byte loops: the buffer pool is
+127×, crop 53×, `flip_vertical` 32×. And the per-byte f32 helper calls are not
+inlined: fade 57×, dissolve 50×, the gradients around 40×. Both are in roadmap 2.6.x.
+The 367× is prakash's `color_rendering_index`.
+
+The 2.2.0 figure (median 8.6× over 35 benchmarks) is not comparable: several of those
+benchmarks ran different workloads from Rust's.
 
 Cyrius benchmark history is recorded by `scripts/bench-history.sh` into
-`bench-history.csv` (since 2.1.2). Each row carries the version, commit, cyrius pin
-and timer-floor regime. `noise_gaussian_1080p` runs one iteration and swings ±50%
-between runs, so do not read a single row of it as a trend.
-
-`benchmarks-rust-v-cyrius.md` is stale: its table still shows `blend_row` at 12.8x,
-and its Cyrius source-size column is empty. Only 35 of Rust's 134 benchmarks have a
-Cyrius counterpart.
+`bench-history.csv`, which runs both suites. Each row carries the version, commit,
+cyrius pin and timer-floor regime. Rows from before 2.3.0 measure the old workloads.
 
 ## Dependencies
 
@@ -301,7 +326,6 @@ still Rust crates on the Rust ranga.
 
 ## Next
 
-**2.3.x, verification parity:** a real fuzz harness, property tests, golden vectors
-captured from the oracle, the missing benchmarks, and the oracle in CI. After that
-come surface completion (2.4.x), GPU (2.5.x), performance (2.6.x) and
-docs/audit/consumers (2.7.x). See [`roadmap.md`](roadmap.md).
+**2.3.x** has three decisions open: Rust's blur darkening, the GPU benchmarks, and
+NVIDIA coverage. Then come surface completion (2.4.x), GPU (2.5.x), performance
+(2.6.x) and docs/audit/consumers (2.7.x). See [`roadmap.md`](roadmap.md).

@@ -354,6 +354,19 @@ assert_eq(load64(err), RG_ERR_NONE, "a 0-dimension source is not an error");
 pixel_buffer_free(rz2);
 pixel_buffer_free(s0);
 
+# Downscales, all three filters (Rust: resize_nearest, resize_bicubic). The
+# tests above all scale up or keep the size; the oracle pins the values.
+var s100 = pixel_buffer_zeroed(100, 100, PF_RGBA8, err);
+var rdf = 0;
+while (rdf < 3) {
+    var rd = resize(s100, 50, 50, rdf, err);
+    assert_eq(rd != 0 && pixel_buffer_width(rd) == 50 && pixel_buffer_height(rd) == 50, 1,
+      "a 100 x 100 -> 50 x 50 downscale has the requested size");
+    pixel_buffer_free(rd);
+    rdf = rdf + 1;
+}
+pixel_buffer_free(s100);
+
 assert_eq(resize(s22, 2, 2, 99, err), 0, "resize rejects an invalid filter");
 assert_eq(load64(err), RG_ERR_INVALID_PARAMETER, "invalid filter is INVALID_PARAMETER");
 assert_eq(resize(argb, 2, 2, SF_NEAREST, err), 0, "resize rejects non-Rgba8");
@@ -461,6 +474,17 @@ perspective_free(pinv);
 var psing = perspective_new(1.0, 2.0, 3.0, 2.0, 4.0, 6.0, 3.0, 6.0, 9.0);
 assert_eq(perspective_inverse(psing), 0, "a rank-deficient perspective returns 0");
 perspective_free(psing);
+
+# perspective_inverse_roundtrip: a general (non-affine) matrix maps (7, 13) and
+# its inverse maps it back within 1e-6.
+var pg = perspective_new(2.0, 0.1, 5.0, 0.05, 1.5, 10.0, 0.001, 0.002, 1.0);
+var pgi = perspective_inverse(pg);
+assert_eq(pgi != 0, 1, "a general perspective inverts");
+perspective_apply(pg, 7.0, 13.0, pt);
+perspective_apply(pgi, load64(pt), load64(pt + 8), pt);
+assert_eq(approx(load64(pt), 7.0, 0.000001), 1, "perspective_inverse_roundtrip x");
+assert_eq(approx(load64(pt + 8), 13.0, 0.000001), 1, "perspective_inverse_roundtrip y");
+perspective_free(pgi); perspective_free(pg);
 
 # ── from_quad: the 8x8 Gaussian elimination ──
 test_group("perspective from_quad");

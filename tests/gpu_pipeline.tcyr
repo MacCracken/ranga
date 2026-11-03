@@ -19,6 +19,7 @@ include "src/gpu_kernels.cyr"
 include "src/gpu_context.cyr"
 include "src/gpu_buffer.cyr"
 include "src/gpu_pipeline.cyr"
+include "tests/gpu_hw.cyr"
 
 alloc_init();
 
@@ -48,14 +49,71 @@ fn eq4(b, a0, a1, a2, a3, name) {
 }
 
 # ================================================================
+test_group("gpu pipeline without hardware");
+
+# Everything here is decided before a context is touched, so it runs on every
+# host. Up to 2.3.0 it sat inside the hardware gate and was skipped with it.
+
+# ⚠ The four operations the native backend cannot run. These MUST report
+# UNSUPPORTED. A missing kernel that returned success would be the worst outcome
+# available: mabda accepts a null shader module about as quietly as a bad one,
+# so the consumer would get an unchanged buffer and no error — exactly the silent
+# no-op that cost a bisect earlier in this port. None of the four reads the
+# context, so a null one is enough.
+var nh = pixel_buffer_zeroed(4, 2, PF_RGBA8, perr);
+assert_eq(gpu_resize(0, nh, 8, 4, SF_BILINEAR, err), 0, "bilinear resize is refused");
+assert_eq(load64(err), RG_GPU_ERR_UNSUPPORTED, "as UNSUPPORTED, not as a buffer error");
+assert_eq(gpu_resize(0, nh, 8, 4, SF_BICUBIC, err), 0, "bicubic resize is refused");
+assert_eq(load64(err), RG_GPU_ERR_UNSUPPORTED, "also UNSUPPORTED");
+gpu_blend(0, nh, nh, 0, F64_ONE, err);
+assert_eq(load64(err), RG_GPU_ERR_UNSUPPORTED, "gpu_blend reports UNSUPPORTED on native");
+gpu_noise_gaussian(0, nh, 0.1, 42, err);
+assert_eq(load64(err), RG_GPU_ERR_UNSUPPORTED, "gpu_noise_gaussian reports UNSUPPORTED");
+# ⚠ gaussian_blur PRODUCES a buffer in Rust (Result<PixelBuffer>), so its
+# return slot carries the buffer and failure must be 0. Returning an error
+# code here would be non-zero, and a caller following the documented
+# convention would dereference it.
+assert_eq(gpu_gaussian_blur(0, nh, 3, err), 0, "gpu_gaussian_blur returns a null buffer");
+assert_eq(load64(err), RG_GPU_ERR_UNSUPPORTED, "and reports UNSUPPORTED");
+# And UNSUPPORTED is a distinct code, not folded into BufferOp — a consumer
+# must be able to tell "this backend cannot" from "this attempt failed".
+assert_eq(RG_GPU_ERR_UNSUPPORTED == RG_GPU_ERR_BUFFER_OP, 0,
+  "UNSUPPORTED is distinguishable from BUFFER_OP");
+
+# The geometry operations check the format before the context.
+var nyuv = pixel_buffer_zeroed(4, 2, PF_YUV420P, perr);
+assert_eq(gpu_resize(0, nyuv, 8, 4, SF_NEAREST, err), 0, "a non-RGBA8 resize is refused");
+assert_eq(load64(err), RG_GPU_ERR_FORMAT, "with a GPU format error");
+assert_eq(RG_ERR_INVALID_FORMAT == RG_GPU_ERR_FORMAT, 0,
+  "and the RG_ERR_* and RG_GPU_ERR_* code spaces are not interchangeable");
+pixel_buffer_free(nyuv);
+
+# A null context is a coded error, not a fault — every sibling in the GPU
+# feature behaves this way and this layer used to dereference it.
+assert_eq(gpu_invert(0, nh, err), RG_ERR_OTHER, "a null context is refused");
+assert_eq(load64(err), RG_GPU_ERR_NO_ADAPTER, "reporting NoAdapter");
+pixel_buffer_free(nh);
+
+# Workgroup arithmetic, 256 lanes a group: the exact boundary, and 300 pixels
+# (the two-group dispatch the hardware section runs).
+assert_eq(_gp_groups(1), 1, "one pixel still needs one workgroup");
+assert_eq(_gp_groups(256), 1, "256 pixels is exactly one workgroup");
+assert_eq(_gp_groups(257), 2, "and 257 needs a second");
+assert_eq(_gp_groups(300), 2, "300 pixels is two workgroups of 256");
+
+# ================================================================
 test_group("gpu pipeline");
 
+# HW_N: the assertions below that need a GPU context (tests/gpu_hw.cyr).
+var HW_N = 83;
 var ctx = gpu_context_new_amd(err);
 if (ctx == 0) {
     assert_eq(load64(err) < 0, 1, "with no GPU, context creation reports an error");
+    gpu_hw_skipped(HW_N);
 }
 
 if (ctx != 0) {
+    var hw_from = _assert_total;
     # 4x1 RGBA8 — one workgroup, four live lanes, 252 guarded out.
     var buf = pixel_buffer_zeroed(4, 1, PF_RGBA8, perr);
     assert_eq(load64(perr), RG_ERR_NONE, "the working buffer allocates");
@@ -238,34 +296,6 @@ if (ctx != 0) {
     assert_eq(load32(rr + 124), 8, "and the last output pixel is the last source pixel");
     pixel_buffer_free(rz);
 
-    # ================================================================
-    # ⚠ The four the native backend cannot run.
-    #
-    # These MUST report UNSUPPORTED. A missing kernel that returned success
-    # would be the worst outcome available: mabda accepts a null shader module
-    # about as quietly as a bad one, so the consumer would get an unchanged
-    # buffer and no error — exactly the silent no-op that cost a bisect earlier
-    # in this port.
-    assert_eq(gpu_resize(ctx, geo, 8, 4, SF_BILINEAR, err), 0, "bilinear resize is refused");
-    assert_eq(load64(err), RG_GPU_ERR_UNSUPPORTED, "as UNSUPPORTED, not as a buffer error");
-    assert_eq(gpu_resize(ctx, geo, 8, 4, SF_BICUBIC, err), 0, "bicubic resize is refused");
-    assert_eq(load64(err), RG_GPU_ERR_UNSUPPORTED, "also UNSUPPORTED");
-
-    gpu_blend(ctx, geo, geo, 0, F64_ONE, err);
-    assert_eq(load64(err), RG_GPU_ERR_UNSUPPORTED, "gpu_blend reports UNSUPPORTED on native");
-    gpu_noise_gaussian(ctx, geo, 0.1, 42, err);
-    assert_eq(load64(err), RG_GPU_ERR_UNSUPPORTED, "gpu_noise_gaussian reports UNSUPPORTED");
-    # ⚠ gaussian_blur PRODUCES a buffer in Rust (Result<PixelBuffer>), so its
-    # return slot carries the buffer and failure must be 0. Returning an error
-    # code here would be non-zero, and a caller following the documented
-    # convention would dereference it.
-    assert_eq(gpu_gaussian_blur(ctx, geo, 3, err), 0, "gpu_gaussian_blur returns a null buffer");
-    assert_eq(load64(err), RG_GPU_ERR_UNSUPPORTED, "and reports UNSUPPORTED");
-    # And UNSUPPORTED is a distinct code, not folded into BufferOp — a consumer
-    # must be able to tell "this backend cannot" from "this attempt failed".
-    assert_eq(RG_GPU_ERR_UNSUPPORTED == RG_GPU_ERR_BUFFER_OP, 0,
-      "UNSUPPORTED is distinguishable from BUFFER_OP");
-
     # --- format guard ---
     var yuv = pixel_buffer_zeroed(4, 2, PF_YUV420P, perr);
     # ⚠ The RETURN is an RG_ERR_* code; the GPU code goes through err_out. The
@@ -274,8 +304,6 @@ if (ctx != 0) {
     # would hand back a plausible-looking code from the wrong space.
     assert_eq(gpu_invert(ctx, yuv, err), RG_ERR_INVALID_FORMAT, "a non-RGBA8 buffer is refused");
     assert_eq(load64(err), RG_GPU_ERR_FORMAT, "with a GPU format error through err_out");
-    assert_eq(RG_ERR_INVALID_FORMAT == RG_GPU_ERR_FORMAT, 0,
-      "and the two code spaces are not interchangeable");
     pixel_buffer_free(yuv);
 
     # --- the kernel cache serves the second call ---
@@ -294,7 +322,6 @@ if (ctx != 0) {
     var wr = pixel_buffer_data(wide);
     var wi = 0;
     while (wi < 300) { store32(wr + wi * 4, 0xFF204060); wi = wi + 1; }
-    assert_eq(_gp_groups(300), 2, "300 pixels is two workgroups of 256");
     assert_eq(gpu_invert(ctx, wide, err), RG_ERR_NONE, "invert across two workgroups succeeds");
     # Lane 0 is in the first group, lane 299 in the second. A single-group
     # dispatch leaves everything past 255 untouched.
@@ -312,11 +339,6 @@ if (ctx != 0) {
     }
     assert_eq(untouched, 0, "no pixel in either workgroup was skipped");
     pixel_buffer_free(wide);
-
-    # The exact boundary: 256 is one group, 257 is two.
-    assert_eq(_gp_groups(256), 1, "256 pixels is exactly one workgroup");
-    assert_eq(_gp_groups(257), 2, "and 257 needs a second");
-    assert_eq(_gp_groups(1), 1, "one pixel still needs one");
 
     # ⚠ The kernel cache is the only stateful thing here, and it is PER-CONTEXT.
     # A compiled module is staged in a buffer object on the context's own DRM
@@ -351,12 +373,7 @@ if (ctx != 0) {
         gpu_context_free(ctx2);
     }
 
-    # A null context is a coded error, not a fault — every sibling in the GPU
-    # feature behaves this way and this layer used to dereference it.
-    var b3 = pixel_buffer_zeroed(4, 1, PF_RGBA8, perr);
-    assert_eq(gpu_invert(0, b3, err), RG_ERR_OTHER, "a null context is refused");
-    assert_eq(load64(err), RG_GPU_ERR_NO_ADAPTER, "reporting NoAdapter");
-    pixel_buffer_free(b3);
+    gpu_hw_check(hw_from, HW_N);
 }
 
 var exit_code = assert_summary();

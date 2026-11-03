@@ -1,0 +1,127 @@
+# Fuzz: per-pixel filters.
+# Rust 1.0.1 target: rust-old/fuzz/fuzz_targets/fuzz_filter.rs (brightness, contrast,
+# saturation, grayscale, invert, levels, curves; parameters clamped to finite
+# -10..10; no crash). Here the parameters are arbitrary f32s, NaN and the
+# infinities included, because the port's float handling is what needs testing.
+# Invariants:
+#   - Every filter succeeds on RGBA8, and none touches alpha (Rust writes only
+#     channels 0..2).
+#   - brightness with a NaN offset, or offset 0, leaves the image unchanged
+#     (Rust's saturating `as` makes NaN a zero shift).
+#   - invert applied twice is the identity.
+#   - grayscale leaves r == g == b in every pixel.
+#   - curves is a pure table lookup: each channel becomes lut[channel].
+#   - levels(0, 1, 1) is the identity, and levels reports RG_ERR_OTHER exactly
+#     when gamma <= 0, as Rust's Other.
+
+include "src/error.cyr"
+include "src/bytevec.cyr"
+include "src/simd_u8.cyr"
+include "src/pixel.cyr"
+include "src/color.cyr"
+include "src/filter_point.cyr"
+include "fuzz/fz_common.cyr"
+
+fn fresh(src) { return pixel_buffer_clone(src); }
+
+fn check_alpha(a, b, what) {
+    fz_check(fz_same_alpha(a, b), what);
+    return 0;
+}
+
+fn one(iter) {
+    var w = 1 + fz_u(30);
+    var h = 1 + fz_u(30);
+    var src = fz_rgba(w, h);
+    var n = w * h;
+
+    var b = fresh(src);
+    var off = fz_f32_any();
+    fz_check(brightness(b, off) == RG_ERR_NONE, "brightness failed on RGBA8");
+    check_alpha(src, b, "brightness changed alpha");
+    if (f64_eq(f32_to(off), f32_to(off)) == 0) {
+        fz_check(fz_same(src, b), "brightness with a NaN offset changed the image");
+    }
+    pixel_buffer_free(b);
+    var b0 = fresh(src);
+    brightness(b0, 0);
+    fz_check(fz_same(src, b0), "brightness 0 changed the image");
+    pixel_buffer_free(b0);
+
+    var c = fresh(src);
+    fz_check(contrast(c, fz_f32_any()) == RG_ERR_NONE, "contrast failed on RGBA8");
+    check_alpha(src, c, "contrast changed alpha");
+    pixel_buffer_free(c);
+
+    var s = fresh(src);
+    fz_check(saturation(s, fz_f32_any()) == RG_ERR_NONE, "saturation failed on RGBA8");
+    check_alpha(src, s, "saturation changed alpha");
+    pixel_buffer_free(s);
+
+    var g = fresh(src);
+    fz_check(grayscale(g) == RG_ERR_NONE, "grayscale failed");
+    check_alpha(src, g, "grayscale changed alpha");
+    var gd = pixel_buffer_data(g);
+    var i = 0;
+    while (i < n) {
+        fz_check(load8(gd + i * 4) == load8(gd + i * 4 + 1), "grayscale left r != g");
+        fz_check(load8(gd + i * 4) == load8(gd + i * 4 + 2), "grayscale left r != b");
+        i = i + 1;
+    }
+    pixel_buffer_free(g);
+
+    var v = fresh(src);
+    invert(v);
+    check_alpha(src, v, "invert changed alpha");
+    invert(v);
+    fz_check(fz_same(src, v), "invert twice is not the identity");
+    pixel_buffer_free(v);
+
+    var l = fresh(src);
+    var one_f = f32_from(F64_ONE);
+    fz_check(levels(l, 0, one_f, one_f) == RG_ERR_NONE, "levels(0, 1, 1) failed");
+    fz_check(fz_same(src, l), "levels(0, 1, 1) is not the identity");
+    pixel_buffer_free(l);
+    var l2 = fresh(src);
+    var gm = fz_f32_any();
+    var rc = levels(l2, fz_f32_any(), fz_f32_any(), gm);
+    if (f64_le(f32_to(gm), 0) == 1) {
+        fz_check(rc == RG_ERR_OTHER, "levels with gamma <= 0 did not report OTHER");
+    } else {
+        fz_check(rc == RG_ERR_NONE, "levels with gamma > 0 or NaN did not succeed");
+    }
+    check_alpha(src, l2, "levels changed alpha");
+    pixel_buffer_free(l2);
+
+    var lut = fl_alloc(256);
+    var k = 0;
+    while (k < 256) { store8(lut + k, fz_byte()); k = k + 1; }
+    var cv = fresh(src);
+    fz_check(curves(cv, lut) == RG_ERR_NONE, "curves failed");
+    var sd = pixel_buffer_data(src);
+    var cd = pixel_buffer_data(cv);
+    i = 0;
+    while (i < n) {
+        var ch = 0;
+        while (ch < 3) {
+            fz_check(load8(cd + i * 4 + ch) == load8(lut + load8(sd + i * 4 + ch)),
+              "curves is not a table lookup");
+            ch = ch + 1;
+        }
+        fz_check(load8(cd + i * 4 + 3) == load8(sd + i * 4 + 3), "curves changed alpha");
+        i = i + 1;
+    }
+    pixel_buffer_free(cv);
+    fl_free(lut);
+
+    pixel_buffer_free(src);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    return fz_run("fuzz_filter", 2000, &one);
+}
+
+var r = main();
+sys_exit_group(r);

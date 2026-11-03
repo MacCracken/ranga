@@ -54,10 +54,12 @@ jobs:
         # stub didn't exist (Issue 1) and also wouldn't ever exercise
         # tests/${proj}.tcyr.
         #
-        # The GPU suites gate every hardware assertion on a context actually
-        # opening, so they pass on a runner with no GPU — see the note at the
-        # top of tests/gpu.tcyr. What they still exercise there is the SPIR-V
-        # emitter, the error mapping and every guard.
+        # The GPU suites gate their hardware assertions on an AMD context
+        # actually opening, so they pass on a runner with no GPU. What still runs
+        # there is the SPIR-V emitter, the error mapping, the stubs and every
+        # guard that is decided before the context is touched. Each gated section
+        # prints "SKIPPED: N hardware assertions" (tests/gpu_hw.cyr), so this log
+        # shows how much did not run; on a GPU host the count is asserted.
         run: cyrius test
 
       - name: Lint
@@ -75,9 +77,26 @@ jobs:
         #
         # The plain form still exits 0. Dropping either strict flag silently turns
         # this step back into a no-op for that class of finding.
-        run: cyrius lint --strict --strict-deferrals src/*.cyr tests/*.tcyr 2>&1
+        run: cyrius lint --strict --strict-deferrals src/*.cyr tests/*.tcyr tests/*.cyr tests/*.bcyr fuzz/*.fcyr fuzz/*.cyr 2>&1
 
       - name: Bundles are current
         # --check compares BYTES, so a source change that was never re-bundled
         # fails here instead of shipping a stale dist/. All four profiles.
         run: cyrius distlib --check
+
+      - name: Fuzz
+        # The eight harnesses in fuzz/, one per Rust 1.0.1 fuzz target. Each checks
+        # invariants taken from Rust's definitions, not just "no crash", and runs
+        # under allocator redzones, so an out-of-bounds write or use-after-free
+        # fails here. A failure prints the seed that replays it:
+        # `cyrius build fuzz/<h>.fcyr build/h && ./build/h 1 <seed>`.
+        run: cyrius fuzz --poison
+
+      - name: Differential oracle vs Rust 1.0.1
+        # Builds a driver against rust-old/ (the frozen Rust crate, the port's parity
+        # bar) and the Cyrius probe, runs both on identical inputs (~2.1M values),
+        # and fails on any difference not accepted by an ADR within a bound
+        # (scripts/oracle/README.md). It needs cargo, which the runner provides, and
+        # fetches rust-old's crates.io dependencies at the versions
+        # scripts/oracle/rust/Cargo.lock pins.
+        run: ./scripts/oracle/run.sh

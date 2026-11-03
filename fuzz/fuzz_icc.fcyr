@@ -1,0 +1,289 @@
+# Fuzz: ICC profile parsing, the one module that reads untrusted bytes.
+# Rust 1.0.1 target: rust-old/fuzz/fuzz_targets/fuzz_icc.rs (parse, apply, curves;
+# no crash). Inputs here, per iteration:
+#   - random bytes;
+#   - the sRGB v2 profile with random byte, field and length mutations;
+#   - a generated mft1/mft2 LUT profile (grid 1..5) with the same mutations.
+# Pure random bytes almost never pass the header, so most of the parser is
+# reached only through mutation.
+# Invariants:
+#   - Neither parser crashes, and under `cyrius fuzz --poison` neither touches
+#     memory outside its allocations.
+#   - A parser returns a profile exactly when err is RG_ERR_NONE. A failure is
+#     RG_ERR_INVALID_FORMAT (Rust's InvalidFormat) or RG_ERR_ALLOCATION.
+#   - A table tone curve with finite entries maps every finite input into
+#     [min, max] of its table: apply clamps to [0, 1] and interpolates.
+#   - A gamma curve maps 1 to 1 (powf(1, g) == 1), and 0 to 0 when g > 0.
+#   - A LUT profile maps finite inputs into [0, 1]: input curves and CLUT entries
+#     are u8/255 or u16/65535, and trilinear interpolation is a convex combination.
+
+include "src/error.cyr"
+include "src/bytevec.cyr"
+include "src/simd_u8.cyr"
+include "src/pixel.cyr"
+include "src/icc.cyr"
+include "fuzz/fz_common.cyr"
+
+var ERR = 0;
+var XYZ = 0;
+var LX = 0; var LY = 0; var LZ = 0;
+var SRGB = 0;       # the pristine sRGB v2 profile bytes
+var SRGB_LEN = 0;
+# How far the inputs got. A run that never parses a profile is not testing the
+# parser, so main() reports these and fails if either stays at zero.
+var N_MATRIX_OK = 0;
+var N_LUT_OK = 0;
+
+fn _fz_f64_finite(v) { return f64_lt(f64_abs(v), 0x7FF0000000000000); }
+
+# Every finite input to `tc` lands in [lo, hi] (table) or obeys the gamma rules.
+fn check_curve(tc) {
+    if (tc == 0) { return 0; }
+    if (tone_curve_kind(tc) == TC_GAMMA) {
+        var g = tone_curve_gamma_value(tc);
+        if (_fz_f64_finite(g) == 1) {
+            fz_check(f64_eq(tone_curve_apply(tc, F64_ONE), F64_ONE), "a gamma curve does not map 1 to 1");
+            if (f64_gt(g, 0) == 1) {
+                fz_check(f64_eq(tone_curve_apply(tc, 0), 0), "a gamma > 0 curve does not map 0 to 0");
+            }
+        }
+        return 0;
+    }
+    var n = tone_curve_len(tc);
+    var tab = load64(tc + 16);
+    if (n == 0) { return 0; }
+    var lo = load64(tab);
+    var hi = load64(tab);
+    var i = 0;
+    while (i < n) {
+        var v = load64(tab + i * 8);
+        if (_fz_f64_finite(v) == 0) { return 0; }   # Rust's NaN in, NaN out
+        if (f64_lt(v, lo) == 1) { lo = v; }
+        if (f64_gt(v, hi) == 1) { hi = v; }
+        i = i + 1;
+    }
+    var slack = 0.000000000001;
+    var probes = fl_alloc(56);
+    store64(probes, 0); store64(probes + 8, 0.5); store64(probes + 16, F64_ONE);
+    store64(probes + 24, f64_neg(F64_ONE)); store64(probes + 32, 2.0);
+    store64(probes + 40, f64_div(f64_from(fz_u(1001)), 1000.0));
+    store64(probes + 48, f64_div(f64_from(fz_u(65536)), 65535.0));
+    var p = 0;
+    while (p < 7) {
+        var out = tone_curve_apply(tc, load64(probes + p * 8));
+        fz_check(f64_ge(out, f64_sub(lo, slack)), "a table curve output fell below its table");
+        fz_check(f64_le(out, f64_add(hi, slack)), "a table curve output rose above its table");
+        p = p + 1;
+    }
+    fl_free(probes);
+    return 0;
+}
+
+fn check_matrix_profile(data, len) {
+    store64(ERR, 0x7777);
+    var p = icc_profile_from_bytes(data, len, ERR);
+    var e = load64(ERR);
+    if (p == 0) {
+        fz_check(e == RG_ERR_INVALID_FORMAT || e == RG_ERR_ALLOCATION,
+          "icc_profile_from_bytes failed with a code Rust cannot produce");
+        return 0;
+    }
+    fz_check(e == RG_ERR_NONE, "icc_profile_from_bytes returned a profile with an error set");
+    N_MATRIX_OK = N_MATRIX_OK + 1;
+    icc_profile_apply(p, 0, 0, 0, XYZ);
+    icc_profile_apply(p, F64_ONE, F64_ONE, F64_ONE, XYZ);
+    icc_profile_apply(p, 0.5, 0.5, 0.5, XYZ);
+    icc_profile_apply(p, f64_div(f64_from(fz_u(65536)), 65535.0),
+      f64_div(f64_from(fz_u(65536)), 65535.0), f64_div(f64_from(fz_u(65536)), 65535.0), XYZ);
+    check_curve(icc_profile_red_trc(p));
+    check_curve(icc_profile_green_trc(p));
+    check_curve(icc_profile_blue_trc(p));
+    icc_profile_free(p);
+    return 0;
+}
+
+fn _fz_unit_ok(v) {
+    if (f64_lt(v, f64_neg(0.000000000001)) == 1) { return 0; }
+    if (f64_gt(v, f64_add(F64_ONE, 0.000000000001)) == 1) { return 0; }
+    return 1;
+}
+
+fn check_lut_profile(data, len) {
+    store64(ERR, 0x7777);
+    var p = icc_lut_profile_from_bytes(data, len, ERR);
+    var e = load64(ERR);
+    if (p == 0) {
+        fz_check(e == RG_ERR_INVALID_FORMAT || e == RG_ERR_ALLOCATION,
+          "icc_lut_profile_from_bytes failed with a code Rust cannot produce");
+        return 0;
+    }
+    fz_check(e == RG_ERR_NONE, "icc_lut_profile_from_bytes returned a profile with an error set");
+    N_LUT_OK = N_LUT_OK + 1;
+    var k = 0;
+    while (k < 6) {
+        var r = f64_div(f64_from(fz_u(65536)), 65535.0);
+        var g = f64_div(f64_from(fz_u(65536)), 65535.0);
+        var b = f64_div(f64_from(fz_u(65536)), 65535.0);
+        if (k == 0) { r = 0; g = 0; b = 0; }
+        if (k == 1) { r = F64_ONE; g = F64_ONE; b = F64_ONE; }
+        if (k == 2) { r = f64_neg(F64_ONE); g = 2.0; b = 0.5; }
+        icc_lut_profile_apply(p, r, g, b, LX, LY, LZ);
+        fz_check(_fz_unit_ok(load64(LX)), "a LUT profile output left [0, 1] (x)");
+        fz_check(_fz_unit_ok(load64(LY)), "a LUT profile output left [0, 1] (y)");
+        fz_check(_fz_unit_ok(load64(LZ)), "a LUT profile output left [0, 1] (z)");
+        k = k + 1;
+    }
+    icc_lut_profile_free(p);
+    return 0;
+}
+
+# A valid LUT profile: tag table with one A2B0 tag holding an mft2 (16-bit) or
+# mft1 (8-bit) LUT with random curves and CLUT. Returns the bytevec; *len_out is
+# its length.
+fn build_lut(len_out) {
+    var scale16 = fz_u(2);
+    var grid = 1 + fz_u(5);
+    var width = 1;
+    var entries = 256;
+    var hdr = 48;
+    if (scale16 == 1) { width = 2; entries = fz_u(5); hdr = 52; }
+    var tag_off = 144;
+    var in_start = tag_off + hdr;
+    var cells = grid * grid * grid;
+    var lut_start = in_start + 3 * entries * width;
+    var out_start = lut_start + cells * 3 * width;
+    var total = out_start + 3 * entries * width;
+    var bv = bv_zeroed(total);
+    var d = bv_data(bv);
+    store64(len_out, total);
+    _icc_write_u32_be(d, 0, total);
+    store8(d + 8, 2);
+    store8(d + 9, 4 << 4);
+    _icc_write_sig(d, 16, _icc_sig4(82, 71, 66, 32));
+    _icc_write_sig(d, 36, _icc_sig_acsp());
+    _icc_write_u32_be(d, 128, 1);
+    _icc_write_sig(d, 132, _icc_sig4(65, 50, 66, 48));
+    _icc_write_u32_be(d, 136, tag_off);
+    _icc_write_u32_be(d, 140, total - tag_off);
+    if (scale16 == 1) { _icc_write_sig(d, tag_off, _icc_sig4(109, 102, 116, 50)); }
+    if (scale16 == 0) { _icc_write_sig(d, tag_off, _icc_sig4(109, 102, 116, 49)); }
+    store8(d + tag_off + 8, 3);
+    store8(d + tag_off + 9, 3);
+    store8(d + tag_off + 10, grid);
+    if (scale16 == 1) {
+        _icc_write_u16_be(d, tag_off + 48, entries);
+        _icc_write_u16_be(d, tag_off + 50, entries);
+    }
+    var i = in_start;
+    while (i < total) { store8(d + i, fz_byte()); i = i + 1; }
+    return bv;
+}
+
+# Apply 1..8 random mutations to `d` (length `len`, capacity `cap`) and return
+# the new length.
+fn mutate(d, len, cap) {
+    var n = 1 + fz_u(8);
+    var i = 0;
+    while (i < n) {
+        var k = fz_u(6);
+        if (k == 0 && len > 0) { store8(d + fz_u(len), fz_byte()); }
+        if (k == 1 && len > 4) {
+            # Header and tag-table fields are where the parser makes decisions.
+            var off = fz_u(48) * 4;
+            if (off + 4 <= len) {
+                var choice = fz_u(7);
+                var v = fz_rand() & 0xFFFFFFFF;
+                if (choice == 0) { v = 0; }
+                if (choice == 1) { v = 1; }
+                if (choice == 2) { v = 0xFFFFFFFF; }
+                if (choice == 3) { v = len; }
+                if (choice == 4) { v = len + 1; }
+                if (choice == 5) { v = 1025; }
+                _icc_write_u32_be(d, off, v);
+            }
+        }
+        if (k == 2 && len > 0) { len = fz_u(len + 1); }
+        if (k == 3 && len < cap) {
+            var grow = fz_u(cap - len + 1);
+            var j = 0;
+            while (j < grow) { store8(d + len + j, fz_byte()); j = j + 1; }
+            len = len + grow;
+        }
+        if (k == 4 && len > 144) { store8(d + 144 + 10, fz_u(70)); }   # a LUT grid byte
+        if (k == 5 && len > 132) { _icc_write_u32_be(d, 128, fz_u(4)); }   # a small tag count
+        i = i + 1;
+    }
+    return len;
+}
+
+fn one(iter) {
+    var cap = 4096;
+    var buf = fl_alloc(cap);
+    var mode = fz_u(3);
+    var len = 0;
+    if (mode == 0) {
+        len = fz_u(600);
+        var i = 0;
+        while (i < len) { store8(buf + i, fz_byte()); i = i + 1; }
+    }
+    if (mode == 1) {
+        memcpy(buf, SRGB, SRGB_LEN);
+        len = mutate(buf, SRGB_LEN, cap);
+    }
+    if (mode == 2) {
+        var lenp = fl_alloc(8);
+        var lbv = build_lut(lenp);
+        var ll = load64(lenp);
+        if (ll > cap) { ll = cap; }
+        memcpy(buf, bv_data(lbv), ll);
+        bv_free(lbv); fl_free(lenp);
+        len = ll;
+        if (fz_u(4) != 0) { len = mutate(buf, ll, cap); }
+    }
+    check_matrix_profile(buf, len);
+    check_lut_profile(buf, len);
+
+    # A table curve built straight from the bytes, as the Rust target does.
+    if (len >= 4) {
+        var n = (len + 1) / 2;
+        var tab = fl_alloc(n * 8);
+        var j = 0;
+        while (j < n) {
+            var lo = load8(buf + j * 2);
+            var hi = 0;
+            if (j * 2 + 1 < len) { hi = load8(buf + j * 2 + 1); }
+            store64(tab + j * 8, f64_div(f64_from(lo | (hi << 8)), 65535.0));
+            j = j + 1;
+        }
+        var tc = tone_curve_table(tab, n);
+        check_curve(tc);
+        tone_curve_free(tc);
+    }
+    # A gamma curve from 8 bytes as an f64, as the Rust target does.
+    if (len >= 8) {
+        var gc = tone_curve_gamma(load64(buf));
+        check_curve(gc);
+        tone_curve_free(gc);
+    }
+    fl_free(buf);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    ERR = fl_alloc(8);
+    XYZ = fl_alloc(24);
+    LX = fl_alloc(8); LY = fl_alloc(8); LZ = fl_alloc(8);
+    var lp = fl_alloc(8);
+    var sbv = srgb_v2_profile(lp);
+    SRGB_LEN = load64(lp);
+    SRGB = bv_data(sbv);
+    fz_run("fuzz_icc", 20000, &one);
+    print_num(N_MATRIX_OK); _fz_puts(" matrix and ");
+    print_num(N_LUT_OK); println(" LUT profiles parsed and checked");
+    if (N_MATRIX_OK == 0 || N_LUT_OK == 0) { fz_fail("no input reached past the header"); }
+    return 0;
+}
+
+var r = main();
+sys_exit_group(r);

@@ -12,6 +12,7 @@ include "src/bytevec.cyr"
 include "src/pixel.cyr"
 include "src/gpu_context.cyr"
 include "src/gpu_buffer.cyr"
+include "tests/gpu_hw.cyr"
 
 alloc_init();
 
@@ -77,15 +78,19 @@ test_group("gpu hardware");
 # wgpu path would require this binary to be compiled in `object;` mode and
 # entered from a launcher that builds a wgpu function table — a structure a
 # test suite cannot impose.
+# HW_N: the assertions below that need a GPU context (tests/gpu_hw.cyr).
+var HW_N = 22;
 var ctx = gpu_context_new_amd(err);
 
 if (ctx == 0) {
     # No AMD GPU here. Record why, and assert the failure was reported properly
     # rather than silently swallowed — that much IS testable without hardware.
     assert_eq(load64(err) < 0, 1, "with no GPU, context creation reports an error code");
+    gpu_hw_skipped(HW_N);
 }
 
 if (ctx != 0) {
+    var hw_from = _assert_total;
     assert_eq(streq(gpu_context_backend_name(ctx), "native-amd"), 1,
       "the native AMD backend reports itself as native-amd");
     # ⚠ This is the assertion that catches an unwrapped Result. Every mabda
@@ -155,6 +160,7 @@ if (ctx != 0) {
     pixel_buffer_free(pb);
     gpu_context_free(ctx);
     assert_eq(1, 1, "context and buffers release without faulting");
+    gpu_hw_check(hw_from, HW_N);
 }
 
 var exit_code = assert_summary();

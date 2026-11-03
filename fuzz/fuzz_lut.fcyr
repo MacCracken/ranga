@@ -1,0 +1,90 @@
+# Fuzz: 3D LUTs.
+# Rust 1.0.1 target: rust-old/fuzz/fuzz_targets/fuzz_lut.rs, which fuzzes
+# `Lut3d::from_cube` (the .cube text parser) and then apply_lut3d. The parser is
+# not ported (roadmap 2.4.x), so this harness builds LUTs through lut3d_new /
+# lut3d_set instead, with sizes 2..6 and arbitrary entries: NaN, the infinities
+# and values far outside [0, 1].
+# Invariants:
+#   - apply_lut3d succeeds on RGBA8 and never touches alpha.
+#   - An identity LUT returns every channel within 1 of its input (Rust's
+#     lut3d_identity_preserves_values uses the same bound).
+#   - lut3d_new rejects sizes below 2.
+
+include "src/error.cyr"
+include "src/bytevec.cyr"
+include "src/simd_u8.cyr"
+include "src/pixel.cyr"
+include "src/filter_kernel.cyr"
+include "fuzz/fz_common.cyr"
+
+fn one(iter) {
+    var w = 1 + fz_u(16);
+    var h = 1 + fz_u(16);
+    var src = fz_rgba(w, h);
+    var n = w * h;
+    var size = 2 + fz_u(5);
+
+    # Identity LUT.
+    var id = lut3d_new(size);
+    fz_check(id != 0, "lut3d_new failed for a valid size");
+    var den = f64_from(size - 1);
+    var r = 0;
+    while (r < size) {
+        var g = 0;
+        while (g < size) {
+            var b = 0;
+            while (b < size) {
+                lut3d_set(id, r, g, b, 0, f32_from(f64_div(f64_from(r), den)));
+                lut3d_set(id, r, g, b, 1, f32_from(f64_div(f64_from(g), den)));
+                lut3d_set(id, r, g, b, 2, f32_from(f64_div(f64_from(b), den)));
+                b = b + 1;
+            }
+            g = g + 1;
+        }
+        r = r + 1;
+    }
+    var img = pixel_buffer_clone(src);
+    fz_check(apply_lut3d(img, id) == RG_ERR_NONE, "apply_lut3d failed");
+    var ps = pixel_buffer_data(src);
+    var pi = pixel_buffer_data(img);
+    var i = 0;
+    while (i < n) {
+        var c = 0;
+        while (c < 3) {
+            var dlt = load8(pi + i * 4 + c) - load8(ps + i * 4 + c);
+            fz_check(dlt >= 0 - 1 && dlt <= 1, "an identity LUT moved a channel by more than 1");
+            c = c + 1;
+        }
+        fz_check(load8(pi + i * 4 + 3) == load8(ps + i * 4 + 3), "apply_lut3d changed alpha");
+        i = i + 1;
+    }
+    pixel_buffer_free(img);
+    lut3d_free(id);
+
+    # Arbitrary entries, specials included.
+    var lut = lut3d_new(size);
+    var e = 0;
+    while (e < size * size * size) {
+        lut3d_set(lut, e % size, (e / size) % size, e / (size * size), 0, fz_f32_any());
+        lut3d_set(lut, e % size, (e / size) % size, e / (size * size), 1, fz_f32_any());
+        lut3d_set(lut, e % size, (e / size) % size, e / (size * size), 2, fz_f32_any());
+        e = e + 1;
+    }
+    var img2 = pixel_buffer_clone(src);
+    fz_check(apply_lut3d(img2, lut) == RG_ERR_NONE, "apply_lut3d failed on arbitrary entries");
+    fz_check(fz_same_alpha(img2, src), "apply_lut3d changed alpha");
+    pixel_buffer_free(img2);
+    lut3d_free(lut);
+
+    fz_check(lut3d_new(fz_u(2)) == 0, "lut3d_new accepted a size below 2");
+    pixel_buffer_free(src);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    return fz_run("fuzz_lut", 2000, &one);
+}
+
+var r = main();
+sys_exit_group(r);

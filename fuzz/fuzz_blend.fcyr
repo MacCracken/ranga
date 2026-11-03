@@ -1,0 +1,104 @@
+# Fuzz: blend modes and the row blenders.
+# Rust 1.0.1 target: rust-old/fuzz/fuzz_targets/fuzz_blend.rs (blend_pixel over all
+# 12 modes, blend_row_normal; no crash).
+# Invariants:
+#   - blend_pixel returns dst unchanged whenever the effective source alpha,
+#     div255(src.a * opacity), is 0 (Rust's early return), for every mode.
+#   - blend_row_normal, which runs the hand-encoded SSE2 kernel plus a scalar
+#     tail, equals blend_pixel(Normal) applied pixel by pixel, byte for byte, for
+#     any length, odd ones included. This is the differential check that proves
+#     the vector path and the scalar definition agree on arbitrary data.
+#   - blend_row in every mode equals the per-pixel loop.
+#   - blend_row_normal_argb equals blend_pixel_argb(Normal) pixel by pixel.
+
+include "src/error.cyr"
+include "src/bytevec.cyr"
+include "src/simd_u8.cyr"
+include "src/pixel.cyr"
+include "src/blend.cyr"
+include "fuzz/fz_common.cyr"
+
+fn fill(p, n) {
+    var i = 0;
+    while (i < n) { store8(p + i, fz_byte()); i = i + 1; }
+    return 0;
+}
+
+fn bytes_eq(a, b, n) {
+    var i = 0;
+    while (i < n) {
+        if (load8(a + i) != load8(b + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn one(iter) {
+    var src = fl_alloc(8);
+    var dst = fl_alloc(8);
+    var out = fl_alloc(8);
+
+    # Single pixels, every mode.
+    fill(src, 4); fill(dst, 4);
+    if (fz_u(4) == 0) { store8(src + 3, 0); }
+    var op = fz_byte();
+    if (fz_u(8) == 0) { op = 0; }
+    var mode = 0;
+    while (mode < 12) {
+        blend_pixel(src, dst, mode, op, out);
+        if (_bl_div255(load8(src + 3) * op) == 0) {
+            fz_check(bytes_eq(out, dst, 4), "blend_pixel with zero effective alpha changed dst");
+        }
+        mode = mode + 1;
+    }
+
+    # Rows: vector kernel and row dispatch against the per-pixel definition.
+    var n = fz_u(70);
+    var sz = n * 4 + 4;
+    var rs = fl_alloc(sz);
+    var rd = fl_alloc(sz);
+    var rexp = fl_alloc(sz);
+    var rgot = fl_alloc(sz);
+    fill(rs, n * 4); fill(rd, n * 4);
+    var rop = fz_byte();
+
+    memcpy(rgot, rd, n * 4);
+    blend_row_normal(rs, rgot, n, rop);
+    var i = 0;
+    while (i < n) {
+        blend_pixel(rs + i * 4, rd + i * 4, BM_NORMAL, rop, rexp + i * 4);
+        i = i + 1;
+    }
+    fz_check(bytes_eq(rgot, rexp, n * 4), "blend_row_normal (SSE2) differs from per-pixel blend_pixel");
+
+    var m = fz_u(12);
+    memcpy(rgot, rd, n * 4);
+    fz_check(blend_row(rs, rgot, n, m, rop) == RG_ERR_NONE, "blend_row failed for a valid mode");
+    i = 0;
+    while (i < n) {
+        blend_pixel(rs + i * 4, rd + i * 4, m, rop, rexp + i * 4);
+        i = i + 1;
+    }
+    fz_check(bytes_eq(rgot, rexp, n * 4), "blend_row differs from per-pixel blend_pixel");
+
+    memcpy(rgot, rd, n * 4);
+    blend_row_normal_argb(rs, rgot, n, rop);
+    i = 0;
+    while (i < n) {
+        blend_pixel_argb(rs + i * 4, rd + i * 4, BM_NORMAL, rop, rexp + i * 4);
+        i = i + 1;
+    }
+    fz_check(bytes_eq(rgot, rexp, n * 4), "blend_row_normal_argb differs from per-pixel blend_pixel_argb");
+
+    fl_free(rs); fl_free(rd); fl_free(rexp); fl_free(rgot);
+    fl_free(src); fl_free(dst); fl_free(out);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    return fz_run("fuzz_blend", 5000, &one);
+}
+
+var r = main();
+sys_exit_group(r);

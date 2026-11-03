@@ -234,6 +234,14 @@ assert_eq(okview != 0, 1, "an exactly-sized buffer is accepted");
 assert_eq(load64(err), RG_ERR_NONE, "with no error");
 pixel_view_free(okview);
 bv_free(view_exact);
+
+# pixel_view_mut_modifies_original: a mutable view writes through to its buffer.
+var wt = pixel_buffer_zeroed(4, 4, PF_RGBA8, err);
+var wtv = pixel_buffer_as_view_mut(wt, err);
+store8(pixel_view_data(wtv), 42);
+pixel_view_free(wtv);
+assert_eq(load8(pixel_buffer_data(wt)), 42, "a write through as_view_mut reaches the buffer");
+pixel_buffer_free(wt);
 bv_free(big);
 
 pixel_buffer_free(buf);
@@ -308,15 +316,30 @@ var sp = buffer_pool_new(8);
 var c100 = bv_zeroed(100); var c50a = bv_zeroed(50); var c50b = bv_zeroed(50); var c200 = bv_zeroed(200);
 buffer_pool_release(sp, c100); buffer_pool_release(sp, c50a);
 buffer_pool_release(sp, c50b); buffer_pool_release(sp, c200);
-var got = buffer_pool_acquire(sp, 40);
-assert_eq(got, c50a, "best fit is the first of the equally small buffers");
+var sp1 = buffer_pool_acquire(sp, 40);
+assert_eq(sp1, c50a, "best fit is the first of the equally small buffers");
 var got2 = buffer_pool_acquire(sp, 40);
 assert_eq(got2, c50b, "then the other 50");
 var got3 = buffer_pool_acquire(sp, 150);
 assert_eq(got3, c200, "a larger request finds the 200 wherever swap_remove moved it");
 assert_eq(buffer_pool_len(sp), 1, "one buffer left");
-bv_free(got); bv_free(got2); bv_free(got3);
+bv_free(sp1); bv_free(got2); bv_free(got3);
 buffer_pool_free(sp);
+
+# buffer_pool_zero_filled: a buffer dirtied, released and acquired again comes
+# back zeroed, at the full length of the earlier use.
+var zp = buffer_pool_new(4);
+var zb = buffer_pool_acquire(zp, 16);
+bv_fill(zb, 255);
+buffer_pool_release(zp, zb);
+var zb2 = buffer_pool_acquire(zp, 16);
+assert_eq(zb2, zb, "the pooled buffer is the one reused");
+var zero_ok = 1;
+var zi = 0;
+while (zi < 16) { if (bv_get(zb2, zi) != 0) { zero_ok = 0; } zi = zi + 1; }
+assert_eq(zero_ok, 1, "a reused buffer is zeroed");
+bv_free(zb2);
+buffer_pool_free(zp);
 
 # A negative size has no Rust counterpart (usize). It is refused rather than
 # turned into a huge allocation.

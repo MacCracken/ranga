@@ -8,6 +8,7 @@ alloc_init();
 
 # f64 approximate equality — every colour assertion below is a float compare,
 # and exact equality would fail on the last mantissa bit for no useful reason.
+fn absd8(a, b) { if (a > b) { return a - b; } return b - a; }
 fn approx(a, b, eps) {
     if (f64_lt(f64_abs(f64_sub(a, b)), eps) == 1) { return 1; }
     return 0;
@@ -478,6 +479,62 @@ assert_streq(color_space_name(CS_BT601), "BT.601", "Display for BT.601");
 assert_streq(color_space_name(CS_BT709), "BT.709", "Display for BT.709");
 assert_streq(color_space_name(CS_CIE_LAB), "CIE L*a*b*", "Display for CIE Lab");
 assert_streq(color_space_name(CS_OKLAB), "Oklab", "Display for Oklab");
+
+# ================================================================
+# Round trips away from white (rust-old/src/color.rs tests). The groups above
+# check white, black and the primaries, where several terms vanish.
+# ================================================================
+test_group("non-white round trips");
+
+# xyz_roundtrip: LinRgba(0.5, 0.3, 0.8) -> XYZ -> LinRgba within 1e-3.
+var xo = lin_rgba_new(f32_from(0.5), f32_from(0.3), f32_from(0.8), f32_from(F64_ONE));
+var xx = lin_rgba_to_cie_xyz(xo);
+var xb = cie_xyz_to_lin_rgba(xx);
+assert_eq(approx(f32_to(lin_rgba_r(xb)), 0.5, 0.001), 1, "xyz_roundtrip r");
+assert_eq(approx(f32_to(lin_rgba_g(xb)), 0.3, 0.001), 1, "xyz_roundtrip g");
+assert_eq(approx(f32_to(lin_rgba_b(xb)), 0.8, 0.001), 1, "xyz_roundtrip b");
+lin_rgba_free(xb); cie_xyz_free(xx); lin_rgba_free(xo);
+
+# cmyk_roundtrip: (200, 100, 50) has k != 0 (k = 1 - 200/255), so every term of
+# the inverse is exercised.
+var co = srgba_new(200, 100, 50, 255);
+var cc = srgba_to_cmyk(co);
+assert_eq(f64_gt(f32_to(cmyk_k(cc)), 0.2), 1, "cmyk_roundtrip: k is not 0");
+var cb = cmyk_to_srgba(cc);
+assert_eq(absd8(srgba_r(cb), 200) <= 1 && absd8(srgba_g(cb), 100) <= 1 && absd8(srgba_b(cb), 50) <= 1, 1,
+  "cmyk_roundtrip within 1");
+srgba_free(cb); cmyk_free(cc); srgba_free(co);
+
+# hsl_roundtrip over Rust's four colours; (128, 64, 200) has l > 0.5, the other
+# branch of the saturation formula.
+fn hsl_rt_ok(r, g, b) {
+    var o = srgba_new(r, g, b, 255);
+    var h = srgba_to_hsl(o);
+    var back = hsl_to_srgba(h);
+    var ok = absd8(srgba_r(back), r) <= 1 && absd8(srgba_g(back), g) <= 1 && absd8(srgba_b(back), b) <= 1;
+    srgba_free(back); hsl_free(h); srgba_free(o);
+    return ok;
+}
+var hp = srgba_new(128, 64, 200, 255);
+var hph = srgba_to_hsl(hp);
+assert_eq(f64_gt(f32_to(hsl_l(hph)), 0.5), 1, "(128, 64, 200) has lightness above 0.5");
+hsl_free(hph); srgba_free(hp);
+assert_eq(hsl_rt_ok(255, 0, 0) && hsl_rt_ok(0, 255, 0) && hsl_rt_ok(0, 0, 255) && hsl_rt_ok(128, 64, 200), 1,
+  "hsl_roundtrip within 1 for red, green, blue and (128, 64, 200)");
+var hg = srgba_new(128, 128, 128, 255);
+var hgh = srgba_to_hsl(hg);
+var hgb = hsl_to_srgba(hgh);
+assert_eq(srgba_r(hgb) == srgba_g(hgb) && srgba_g(hgb) == srgba_b(hgb), 1, "hsl_gray_roundtrip stays grey");
+srgba_free(hgb); hsl_free(hgh); srgba_free(hg);
+
+# p3_srgb_roundtrip on an interior colour, within Rust's 1e-4.
+var p3a = fl_alloc(24);
+var p3b = fl_alloc(24);
+linear_srgb_to_p3(0.25, 0.6, 0.9, p3a);
+p3_to_linear_srgb(load64(p3a), load64(p3a + 8), load64(p3a + 16), p3b);
+assert_eq(approx(load64(p3b), 0.25, 0.0001) && approx(load64(p3b + 8), 0.6, 0.0001)
+  && approx(load64(p3b + 16), 0.9, 0.0001), 1, "p3 round trip of (0.25, 0.6, 0.9) within 1e-4");
+fl_free(p3b); fl_free(p3a);
 
 var exit_code = assert_summary();
 if (exit_code > 0) { exit_code = 1; }

@@ -13,7 +13,8 @@ diffs every output value.
 `run.sh` does the following:
 1. Builds `rust/` (a small driver that depends on `rust-old/` by path; it never builds
    inside it and never modifies it).
-2. Builds `probe.cyr` against `src/`.
+2. Builds `probe.cyr` against `src/`. The group code lives in `probe_core.cyr`, which
+   `probe.cyr` wraps in a `main`; the golden test includes the same file.
 3. Runs both, writing `build/oracle/{rust,cyrius}.out`.
 4. Runs `compare.py`.
 
@@ -55,9 +56,34 @@ evaluations per function. Two implementations agree everywhere exactly when thei
 boundaries are identical. A boundary 1 ULP apart means exactly one input value rounds
 differently.
 
+## Golden vectors: the evidence that outlives `rust-old/`
+
+`tests/oracle_golden.tcyr` runs every group in **golden mode**: instead of printing,
+`probe_core.cyr` hashes each group's lines (FNV-1a 64 over the exact text, newline
+included) and counts them. `golden_rust.cyr` holds Rust 1.0.1's count and digest for
+every exact group, so `cyrius test` checks the port against Rust's output with no
+`cargo` and no `rust-old/`. The three groups ADR 002 accepts within a bound are not
+exact by design; they are listed as skipped and stay with the live oracle.
+
+A digest says THAT a group moved, not where. While `rust-old/` exists, `run.sh` with
+`--detail` says where.
+
+Regenerate the digests only after a deliberate, reviewed change, or after adding a
+group:
+
+```sh
+./scripts/oracle/run.sh
+python3 -I scripts/oracle/make_golden.py build/oracle/rust.out > scripts/oracle/golden_rust.cyr
+cyrius test tests/oracle_golden.tcyr
+```
+
+`make_golden.py` digests `rust.out`, never `cyrius.out`: the golden values are
+Rust's, so a regenerated file cannot bless a port regression.
+
 ## Adding a group
 
-Add the group to both `rust/src/main.rs` and `probe.cyr`, keeping:
+Add the group to both `rust/src/main.rs` and `probe_core.cyr` (and wire it into
+`run_groups`), keeping:
 - the same group name;
 - the same keys;
 - the same generator calls in the same order. Both sides use the same xorshift64.
@@ -67,5 +93,7 @@ the same f32 operation on both sides (`_o_fdiv` / `_o_fmul` in the probe). Other
 a literal or a widened intermediate can make the two disagree for reasons that have
 nothing to do with the code under test.
 
-`rust-old/` is due to be deleted once the port is complete (roadmap 2.x). Before that,
-the outputs this oracle can produce must be captured as golden vectors in `tests/`.
+Then regenerate `golden_rust.cyr` as above, so the new group is captured.
+
+`rust-old/` is due to be deleted once the port is complete (roadmap 2.x). CI runs
+`run.sh` until then, and `tests/oracle_golden.tcyr` after.

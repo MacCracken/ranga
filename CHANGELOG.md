@@ -2,6 +2,112 @@
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-11-02
+
+Milestone 2.3.x, "verification parity". Rust 1.0.1 was checked by 8 fuzz targets, 31
+properties, Photoshop reference pixels, integration pipelines, edge-case tests and 134
+benchmarks. Up to 2.2.0 the port had a scaffold fuzz stub, no property tests and 35
+benchmarks. It now has all 8 fuzz targets (run in CI under allocator redzones), all 31
+properties, every Rust integration and edge-case test, and 108 benchmarks under Rust's
+names and workloads. The differential oracle runs in CI, and its Rust outputs are
+captured in `tests/`, so they survive the deletion of `rust-old/`. `src/` is
+unchanged: nothing here found a port bug, and one inherited Rust behaviour is
+reported below for a decision.
+
+### Added
+
+- **`fuzz/`: the 8 Rust fuzz targets.** Each harness asserts invariants taken from
+  Rust's definitions, not just "no crash", and fails with the seed that replays it
+  (`./build/h 1 <seed>`). `cyrius fuzz --poison` runs all 8 under allocator redzones
+  in about 10 s. `fz_common.cyr` holds the seeded xorshift and image helpers.
+  - `fuzz_icc`: random bytes, mutated sRGB v2 profiles, and generated mft1/mft2 LUT
+    profiles with grid sizes 1–5. A profile parses exactly when the error is NONE;
+    tone curves stay within their table's range; LUT output stays in [0, 1].
+  - `fuzz_convert`: every size from 1×1 to 62×62 through the three YUV standards,
+    NV12 and the repacks, including arbitrary planes into the inverses.
+  - `fuzz_filter`, `fuzz_blend`, `fuzz_blur`, `fuzz_composite`, `fuzz_lut`,
+    `fuzz_transform`: the per-module contracts, with special floats (NaN, ±inf, ±0,
+    extremes) for every f32 parameter. The SSE2 row paths are checked against the
+    per-pixel ones.
+  - `tests/ranga.fcyr`, the scaffold stub, is removed.
+- **`tests/properties.tcyr`: all 31 `proptest.rs` properties.** Each runs over an
+  edge grid (6³ colours) plus 4,096 seeded random inputs, and prints the first
+  failing input. This includes the three that had no coverage at all
+  (`lab_roundtrip`, `oklch_roundtrip`, the BT.2020 grey round trip).
+- **`tests/integration.tcyr`: every test in three Rust files, under Rust's names:**
+  `integration.rs` (23, including the six multi-step pipelines), `photoshop_reference.rs`
+  (12: the seven reference modes within Rust's ±2, half opacity and three identities)
+  and `visual_regression.rs` (10, including 2-D blur symmetry and Screen
+  commutativity).
+- **`tests/edge_cases.tcyr`: Rust's 30 edge cases, one for one,** under its section
+  headings. The error Display tests check the message prefix, since the port drops
+  payloads (parity doc).
+- **Golden vectors from the oracle.** `tests/oracle_golden.tcyr` runs every oracle
+  group in-process and checks each against Rust 1.0.1's line count and FNV-1a 64
+  digest, recorded in `scripts/oracle/golden_rust.cyr` by `make_golden.py` from
+  `rust.out` (never from the port's output). That covers 53 exact groups, about 2.1
+  million values, with no `cargo` or `rust-old/` needed. The group code moved to
+  `scripts/oracle/probe_core.cyr` so the probe and the test share it.
+- **Oracle groups:** `resize` (8 target sizes × 3 filters, from a 23×17 image and
+  from 1×1), `perspective` (matrices, inverses and transforms for four quads,
+  including a degenerate one) and forward conversion (the three YUV standards,
+  NV12 and five repacks at six sizes from 1×1 to 37×23). 15 new groups, all
+  identical to Rust.
+- **Tests: 2,261 assertions across 23 suites** (1,971 across 19 at 2.2.0).
+- **Unit tests for the gaps the parity review listed:** `perspective_inverse_roundtrip`;
+  XYZ, P3, CMYK (k ≠ 0) and HSL (l > 0.5) round trips away from white; resize
+  downscales on all three filters; `view_mut` write-through; pool re-zeroing; alpha
+  preservation in threshold and salt-and-pepper; and the YUV white/black checks
+  through the public API.
+- **`tests/spectral.tcyr`: the 8 `spectral.rs` tests for re-exported prakash items**
+  (CMF table, illuminants, colour temperature, sRGB gamma, Wien peak, CRI), so a
+  prakash bump that changes them fails here too.
+- **CI:** a `cyrius fuzz --poison` step, and a step that runs `scripts/oracle/run.sh`
+  against Rust 1.0.1. The lint gate also covers `fuzz/`, `tests/*.cyr` and the bench
+  suites.
+
+### Changed
+
+- **The benchmark suite has Rust's 108 CPU benchmarks, on Rust's workloads.**
+  `tests/ranga.bcyr` has the 100 outside spectral, and the new `tests/spectral.bcyr`
+  has 8 (it needs prakash, so it is separate, as Rust's is feature-gated).
+  `scripts/bench-history.sh` runs both. Up to 2.2.0, several benchmarks shared a
+  Rust name but not its workload: blend at opacity 255 rather than 200, varied
+  frames where Rust uses uniform 128 ones, a different crop window, CIE76/94 on the
+  CIEDE2000 pair, saturation 1.2 rather than 1.5. Two were renamed to Rust's names
+  and workloads: `composite_at_1080p` → `composite_at_640x480_on_1080p`, and
+  `rgba_to_yuv420p_1080p` → `rgba_to_yuv420p_bt601_1080p`. Rows in
+  `bench-history.csv` from before 2.3.0 are not comparable with later ones.
+- **`docs/benchmarks-rust-v-cyrius.md` is rewritten** from a same-session run of
+  both sides on one machine (Rust 1.0.1 rebuilt with rustc 1.99.1 from a scratch
+  copy of `rust-old/`). Across the 108, the port is a median 8.0× slower, from 0.5×
+  (`blend_row`, faster) to 367× (`color_rendering_index`, which is prakash's). The
+  largest ranga-side gaps trace to two causes, now in roadmap 2.6.x. First, the 6.7.18
+  stdlib's `memcpy`/`memset` are byte loops, which accounts for the pool at 127×,
+  crop at 53× and the flips. Second, per-byte f32 helper calls that Cyrius does not
+  inline: fade 57×, dissolve 50×, the gradients around 40×.
+- **GPU coverage is visible.** The checks decided before a context is touched (the
+  four UNSUPPORTED stubs, the format guard, null-context refusal, workgroup
+  arithmetic, the bilinear module's structure) run on every host. A host without a
+  GPU now runs 21 more GPU assertions: 19 moved out of the gate and 2 new. Each gated section prints `SKIPPED: N hardware
+  assertions` when no AMD context opens, and asserts N when one does
+  (`tests/gpu_hw.cyr`).
+- **Test hygiene:** duplicate file-scope globals renamed (`b6`/`b8` in
+  `filter_point.tcyr`, `got` in `pixel.tcyr`).
+- **`make_golden.py`** writes no `__pycache__` into the tree.
+- **Bundles** regenerated; only the `# Version:` line changed.
+
+### Found, not changed: Rust's blurs darken a uniform image
+
+Writing the fuzz invariants showed that Rust 1.0.1's `gaussian_blur` and `box_blur`
+**do not leave a uniform image unchanged**: both truncate between their two passes,
+so a flat image comes back up to 2 counts darker. Measured on rust-old: gaussian in
+979 of 2,816 cases, box in 4,278 of 13,824. The port matches Rust exactly, so
+`fuzz_blur` asserts Rust's measured bounds (gaussian and box within [-2, 0],
+bilateral within [-1, 0], unsharp within [0, 2·amount + 1], median exact) rather
+than the invariant one would expect. Fixing it means diverging from Rust under an
+ADR; that decision is open.
+
 ## [2.2.0] - 2026-11-02
 
 Milestone 2.2.x, "bit-exact again". `scripts/oracle` runs the frozen Rust 1.0.1 crate

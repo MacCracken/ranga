@@ -1,0 +1,19 @@
+# gpu_hw.cyr — shared by the GPU suites that gate assertions on a context.
+#
+# Each suite names HW_N, the assertions in its gated section, as counted on an
+# AMD host. With no context, gpu_hw_skipped prints that count, so a CI log on a
+# runner with no GPU says how much went untested instead of passing quietly.
+# With a context, gpu_hw_check asserts the section ran exactly HW_N, so the
+# number cannot drift as assertions are added.
+
+fn gpu_hw_skipped(n) {
+    print("  SKIPPED: ", 11);
+    fmt_int(n);
+    println(" hardware assertions (no AMD GPU context on this host)");
+    return 0;
+}
+
+fn gpu_hw_check(from, n) {
+    assert_eq(_assert_total - from, n, "HW_N is the number of hardware assertions that ran");
+    return 0;
+}

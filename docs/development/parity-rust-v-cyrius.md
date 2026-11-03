@@ -245,19 +245,22 @@ That is counted as PARITY.
 | Rust 1.0.1 | Port today |
 | --- | --- |
 | 214 unit tests | 127 covered, 56 partial, 27 missing, 4 N/A |
-| 123 integration tests (integration, edge_cases, proptest, photoshop_reference, visual_regression, spectral) | 34 covered, 59 partial, 30 missing |
+| 123 integration tests (integration, edge_cases, proptest, photoshop_reference, visual_regression, spectral) | **All 123 since 2.3.0.** `integration.tcyr` has integration (23), photoshop_reference (12) and visual_regression (10) under Rust's names; `edge_cases.tcyr` has the 30 edge cases; `properties.tcyr` has the 31 properties; `spectral.tcyr` covers spectral's 17 (the 8 re-export tests added in 2.3.0). |
 | 161 doctests (118 runnable, 110 with asserts, 42 `no_run`, 1 `ignore`) | ~85 covered, 16 partial, 10 missing (of the 110) |
-| Property tests (31, proptest) | **None.** 3 are covered by exhaustive 256-value sweeps; 25 are reduced to fixed examples; 3 are missing. |
-| Photoshop golden vectors (7 modes on one fixed pixel pair) | **None pinned.** |
-| 134 benchmarks (108 CPU, 26 GPU) | 35. 33 match by name, 1 is renamed, 1 runs a different workload. 101 are missing. |
-| 8 fuzz targets | **0.** `tests/ranga.fcyr` is the scaffold stub. |
+| Property tests (31, proptest) | **All 31 since 2.3.0** (`properties.tcyr`): an edge grid plus 4,096 seeded random inputs each. |
+| Photoshop golden vectors (7 modes on one fixed pixel pair) | **Pinned since 2.3.0,** within Rust's ±2. |
+| 134 benchmarks (108 CPU, 26 GPU) | **The 108 CPU benchmarks since 2.3.0,** under Rust's names and on its workloads (`ranga.bcyr`, `spectral.bcyr`). The 26 GPU ones wait on a decision (roadmap 2.3.x). |
+| 8 fuzz targets | **All 8 since 2.3.0** (`fuzz/`), with invariants, run by CI under `--poison`. |
+| Oracle outputs (no Rust counterpart) | **Captured since 2.3.0:** `oracle_golden.tcyr` checks 53 exact groups (~2.1M values) against Rust 1.0.1's digests. |
 | 11 examples | **0.** `docs/examples/` is empty, and the guides are Rust-era. |
 
 Further detail on test coverage:
-- **GPU coverage depends on the host.** 152 GPU assertion sites only run when an AMD
-  context opens, so CI (no GPU) and any non-AMD host skip almost all of
-  `gpu_pipeline` and `gpu_kernels`. The 1,921-assertion figure is an **AMD-host**
-  count, and the NVIDIA backend has no test at all.
+- **GPU coverage depends on the host.** 162 GPU assertions (22 + 49 + 83 + 8 across
+  the four gated suites) run only when an AMD context opens. Since 2.3.0 a host
+  without one prints `SKIPPED: N hardware assertions` per suite, and the checks that
+  need no context (stubs, guards, null context, workgroup arithmetic) run
+  everywhere. Assertion totals in `state.md` are **AMD-host** counts. The NVIDIA
+  backend has no test at all (roadmap 2.3.x).
 - **Some tests pin behaviour that contradicts Rust,** with no ADR:
   - the error strings;
   - bilateral's error codes;

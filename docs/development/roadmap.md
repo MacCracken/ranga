@@ -8,7 +8,7 @@
 
 ## Where things stand
 
-The port shipped as **2.0.0** and is at **2.2.0** on cyrius 6.7.18. The 2026-11-02 review
+The port shipped as **2.0.0** and is at **2.3.0** on cyrius 6.7.18. The 2026-11-02 review
 of all 303 public Rust items, updated for 2.1.2 and 2.2.0, found:
 
 - 211 at parity;
@@ -28,12 +28,11 @@ of all 303 public Rust items, updated for 2.1.2 and 2.2.0, found:
 The 2.1.2 P(-1) review ([`../audit/2026-11-02-audit.md`](../audit/2026-11-02-audit.md))
 had already shown that none of these divergences came from the toolchain bumps.
 
-The verification surface is far behind Rust:
-- no fuzzing;
-- no property tests;
-- 35 of 134 benchmarks;
-- no examples;
-- no Cyrius consumer.
+**2.3.0 closed milestone 2.3.x, "verification parity"** apart from three decisions
+(below). The port now has Rust's 8 fuzz targets in CI under allocator redzones, its 31
+properties, its integration, edge-case and Photoshop tests, golden vectors that
+capture the oracle's Rust outputs in `tests/`, and 108 of its 134 benchmarks (the 26
+left are GPU). Still missing: examples, and any Cyrius consumer.
 
 Several of the original 2.0.0 criteria were never met, and they are carried below.
 
@@ -57,66 +56,25 @@ L (more).
 
 ## 2.3.x — Verification parity
 
-Make the test, fuzz and benchmark surfaces mean what Rust's meant.
+2.3.0 closed this milestone's main work: all 8 fuzz targets under `--poison` in CI,
+all 31 properties, every Rust integration and edge-case test, golden vectors from the
+oracle, the oracle in CI, and Rust's 108 CPU benchmarks on Rust's workloads. What is
+left is three decisions:
 
-- [ ] **(M) A real fuzz harness.** `tests/ranga.fcyr` is still the scaffold stub.
-      - Port the 8 Rust targets behind one dispatcher with a seeded input generator.
-      - Start with `fuzz_icc` (the only untrusted-input parser), then `fuzz_convert`
-        and `fuzz_transform` (size arithmetic).
-      - `fuzz_lut` can cover only `apply_lut3d` unless `from_cube` is ported (2.4.x).
-      - Run `cyrius fuzz --poison` in CI.
-- [ ] **(M) A property suite (`tests/properties.tcyr`)** with a seeded generator,
-      porting the 31 `proptest.rs` properties.
-      - First the three with no coverage at all: `lab_roundtrip`, `oklch_roundtrip`
-        and the BT.2020 grey round trip.
-      - Then the 25 that were reduced to one fixed example.
-      - Sweep exhaustively where the domain is cheap, as `color.tcyr` already does.
-- [ ] **(S) Golden vectors:**
-      - the 7 Photoshop reference pixels from `photoshop_reference.rs`;
-      - the 4 missing visual-regression checks: blur monotonicity, 2-D blur symmetry,
-        Screen commutativity and hue 360 identity.
-- [ ] **(S–M) `tests/integration.tcyr`:** the 6 multi-step pipelines from
-      `integration.rs` and `crop_resize_composition`. Each step is unit-tested today,
-      but no chain is.
-- [ ] **(M) Unit, edge and doctest gaps,** highest risk first:
-      - `resize_to_1x1` (the divide-by-zero guard);
-      - any resize downscale, and the Bilinear/Bicubic sample paths;
-      - `perspective_inverse_roundtrip`;
-      - XYZ/P3 round trips on colours other than white;
-      - CMYK with k ≠ 0, and the HSL branch for l > 0.5;
-      - `get_rgba` on a pixel with four distinct channels;
-      - `view_mut` write-through, and pool re-zeroing;
-      - alpha preservation in threshold and salt-and-pepper;
-      - NV12 at odd sizes, and a 1×1 YUV image;
-      - the convert white/black checks through the public API.
-- [ ] **(S) Make GPU coverage visible.**
-      - Move the hardware-free checks (null context, shape guards, stub returns) out of
-        the `ctx != 0` gate.
-      - Report how many assertions were skipped.
-      - Say in `state.md` that the full count is an AMD-host count.
-      - Decide whether the NVIDIA backend needs coverage.
-- [ ] **(S) Spectral re-export tests:** record that prakash's own suite owns the 8
-      `spectral.rs` tests for re-exported items, or port them.
-- [ ] **(M) Benchmarks.**
-      - Add the 74 missing CPU benches, using Rust's names (`rgba_to_yuv420p_bt601_1080p`)
-        and workloads (composite_at 640×480; opacity 200 for blend).
-      - Re-measure both sides on a quiet machine.
-      - Rewrite `docs/benchmarks-rust-v-cyrius.md`, whose table and prose are stale.
-      - The 26 GPU benches wait on a decision about GPU hardware in CI.
-- [ ] **(S) Run the oracle in CI.** `scripts/oracle/run.sh` needs `cargo`, which the
-      runner has, and it exits non-zero on any unaccepted difference from Rust.
-- [ ] **(M) Golden vectors from the oracle.** Capture the oracle's Rust outputs as
-      vectors checked into `tests/`, so the evidence survives `rust-old/`'s
-      deletion (2.x). The transition-point groups are 255 values each and can be
-      captured whole.
-- [ ] **(S) CI hygiene.** The lint gate became one strict call in 2.1.2. Still to do:
-      - Add the fuzz step.
-      - Rename the duplicate `b6`/`b8` globals in `filter_point.tcyr`.
+- [ ] **(S) Decide on Rust's blur darkening.** Rust 1.0.1's `gaussian_blur` and
+      `box_blur` truncate between passes, so a uniform image comes back up to 2
+      counts darker (gaussian in 979 of 2,816 measured cases, box in 4,278 of
+      13,824). The port matches Rust, and `fuzz_blur` asserts Rust's bounds. Either
+      keep parity, or round between passes under an ADR and tighten the fuzz bounds
+      to exact.
+- [ ] **(S) GPU benchmarks.** Rust's 26 GPU benchmarks (`gpu.rs`, half of them CPU
+      baselines) need a GPU host to mean anything. Decide whether to run them on the
+      AMD dev host only, recorded like the CPU series, or to wait for a GPU runner.
+- [ ] **(S) NVIDIA coverage.** `gpu_context_new_nvidia` has no test at all; every
+      gated GPU suite opens an AMD context. Decide whether it needs a host to test on,
+      or an ADR that it is unverified.
 
-**Done when:**
-- all 8 fuzz targets run under `--poison` in CI;
-- every Rust test case is covered, or given an ADR;
-- all 108 CPU benchmarks are recorded against the frozen Rust series.
+**Done when** those three are decided.
 
 ## 2.4.x — Surface completion (CPU)
 
@@ -209,24 +167,38 @@ what mabda 4.2.0 accepts.
 
 ## 2.6.x — Performance
 
-The baseline is the frozen Rust 1.0.1 criterion series in
-[`benchmarks-rust-v-cyrius.md`](../benchmarks-rust-v-cyrius.md).
+The baseline is the same-session comparison of all 108 CPU benchmarks in
+[`benchmarks-rust-v-cyrius.md`](../benchmarks-rust-v-cyrius.md) (2.3.0: median 8.0×
+slower than Rust). Ratios below are from that run.
 
-- [ ] **(L) Vectorised or tiled separable blur.** Blurs run about 21× slower than Rust.
-      Rust auto-vectorises the passes. The int→f32 conversion is not the bottleneck:
-      removing it entirely would at best halve the blur.
-- [ ] **(S) `equalize` (19.5×) and `auto_levels` (23×):** inline the per-channel helper
-      calls. This is call overhead, not a SIMD gap.
-- [ ] **(M) f32 SIMD for `contrast` and `saturation`** (12–15× slower).
+- [ ] **(S–M) `memcpy` and `memset` are byte loops** in the 6.7.18 stdlib (the x86
+      `rep movsb` path was removed for aarch64's sake). That is most of
+      `buffer_pool_acquire_release` (127×), `crop` (53×), `flip_vertical` (32×),
+      `flip_horizontal` (18×) and `fill_solid` (18.5×). File an architecture-guarded
+      fast path upstream, and meanwhile use a word-at-a-time copy and fill in ranga's
+      hot paths.
+- [ ] **(S–M) Inline the per-byte f32 helper calls** in `fade` (57×), `dissolve`
+      (50×), the angled and radial gradients (37–42×), `vibrance` (27×),
+      `color_balance` (21×), `channel_mixer` and `contrast` (16–17×), as was done for
+      the blurs in 2.0.x. Cyrius does not inline.
+- [ ] **(S) `equalize` (31×) and `auto_levels` (41×):** inline the helper calls in the
+      f32 apply pass. This is call overhead, not a SIMD gap.
+- [ ] **(M) A vector kernel for the YUV inverses** (37×) and `nv12_to_rgba` (52×). Rust
+      has SSE2 at 8 pixels per iteration; these have had a loop hoist only.
+- [ ] **(M) f32 SIMD for `contrast` and `saturation`.**
 - [ ] **(S–M) `hue_shift`:** remove its two heap allocations per pixel.
-- [ ] **(M) A vector kernel for `yuv420p_to_rgba`.** It has had a loop hoist only.
-- [ ] `crop` and `flip_vertical` are still memcpy-bound. The real fix is upstream (the
-      `fl_calloc` zeroing), and the consumer workaround is already in place.
+- [ ] **(L) Vectorised or tiled separable blur.** About 7× against today's rustc and
+      22× against the frozen series (whose blur was 3.3× faster). Rust auto-vectorises
+      the passes.
 - [ ] **(L) 256-bit AVX2,** cyrius-port-plan §3 item 4. It comes after all of the
       above.
+- Upstream, not ranga: prakash's `color_rendering_index` takes 310 µs against Rust's
+  0.84 µs (367×).
 
-**Done when:** the blurs and the histogram ops are no longer the worst ratios, as
-measured on a quiet machine.
+**Done when:** the items above are done and re-measured, both sides, on a quiet machine.
+(The old criterion, "the blurs and the histogram ops are no longer the worst ratios",
+no longer describes the table: on Rust's workloads the worst are the byte-loop and
+helper-call items above.)
 
 ## 2.7.x — Docs, examples, audit, consumers
 

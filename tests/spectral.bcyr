@@ -1,0 +1,88 @@
+# spectral benchmarks — rust-old/benches/spectral.rs, the 8 benchmarks behind
+# Rust's `spectral` feature, under the same names and on the same workloads.
+#
+# Kept apart from tests/ranga.bcyr for the reason Rust kept them apart: they need
+# prakash, which is only vendored with `cyrius deps --features spectral`.
+#
+# prakash bump-allocates its results (src/spectral.cyr), so the batches here are
+# sized to keep the arena small: at most a few MB across the whole run.
+
+include "src/error.cyr"
+include "src/bytevec.cyr"
+include "src/pixel.cyr"
+include "src/color.cyr"
+include "src/spectral.cyr"
+
+fn main(): i64 {
+    alloc_init();
+    var i = 0;
+    var bn = 0;
+    var acc = 0;
+
+    var d65_spd = illuminant_d65();
+    bn = bench_new("spd_to_xyz");
+    bench_batch_start(bn);
+    i = 0;
+    while (i < 50000) { cie_xyz_free(spectral_spd_to_cie_xyz(d65_spd)); i = i + 1; }
+    bench_batch_stop(bn, 50000);
+    bench_report(bn);
+
+    var d65 = spectral_d65_white();
+    bn = bench_new("xyz_to_cct");
+    bench_batch_start(bn);
+    i = 0;
+    while (i < 1000000) { acc = acc + spectral_cie_xyz_to_cct(d65); i = i + 1; }
+    bench_batch_stop(bn, 1000000);
+    bench_report(bn);
+
+    bn = bench_new("wavelength_to_xyz");
+    bench_batch_start(bn);
+    i = 0;
+    while (i < 100000) { cie_xyz_free(spectral_wavelength_to_cie_xyz(555.0)); i = i + 1; }
+    bench_batch_stop(bn, 100000);
+    bench_report(bn);
+
+    bn = bench_new("blackbody_spd");
+    bench_batch_start(bn);
+    i = 0;
+    while (i < 2000) { acc = acc + spectral_blackbody_spd(5500.0); i = i + 1; }
+    bench_batch_stop(bn, 2000);
+    bench_report(bn);
+
+    bn = bench_new("color_temperature_to_rgb");
+    bench_batch_start(bn);
+    i = 0;
+    while (i < 100000) { acc = acc + color_temperature_to_rgb(6500.0); i = i + 1; }
+    bench_batch_stop(bn, 100000);
+    bench_report(bn);
+
+    bn = bench_new("cie_cmf_at");
+    bench_batch_start(bn);
+    i = 0;
+    while (i < 100000) { acc = acc + cie_cmf_at(555.0); i = i + 1; }
+    bench_batch_stop(bn, 100000);
+    bench_report(bn);
+
+    bn = bench_new("color_rendering_index");
+    bench_batch_start(bn);
+    i = 0;
+    while (i < 2000) { acc = acc + color_rendering_index(d65_spd); i = i + 1; }
+    bench_batch_stop(bn, 2000);
+    bench_report(bn);
+
+    # CieXyz -> prakash Xyz -> CieXyz, D65 white.
+    var xyz = cie_xyz_new(0.95047, 1.0, 1.08883);
+    bn = bench_new("xyz_conversion_roundtrip");
+    bench_batch_start(bn);
+    i = 0;
+    while (i < 100000) { cie_xyz_free(spectral_xyz_to_cie_xyz(spectral_cie_xyz_to_xyz(xyz))); i = i + 1; }
+    bench_batch_stop(bn, 100000);
+    bench_report(bn);
+
+    cie_xyz_free(xyz);
+    cie_xyz_free(d65);
+    return acc & 0;
+}
+
+var r = main();
+sys_exit_group(r);

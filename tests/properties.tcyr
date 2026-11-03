@@ -1,0 +1,438 @@
+# Property tests: the 31 properties of rust-old/tests/proptest.rs.
+#
+# Rust drew ~256 random cases per property from proptest. Here each property runs
+# over a FIXED, seeded set:
+#   - exhaustively where the domain is small (a byte, the 16..235 grey range);
+#   - otherwise a 6^3 grid of edge values {0, 1, 127, 128, 254, 255} plus 4,096
+#     xorshift64 samples;
+#   - floats: seeded uniform samples plus both endpoints.
+# A run is deterministic, so a failure reproduces exactly. Each property is one
+# assertion over its whole case set, and the first failing input is printed.
+
+include "src/error.cyr"
+include "src/bytevec.cyr"
+include "src/simd_u8.cyr"
+include "src/pixel.cyr"
+include "src/color.cyr"
+include "src/composite.cyr"
+include "src/transform.cyr"
+include "src/filter_point.cyr"
+include "src/blend.cyr"
+include "src/convert.cyr"
+
+alloc_init();
+var err = fl_alloc(8);
+
+# ── seeded generator and case sets ────────
+var _rs = 0x243F6A8885A308D3;
+fn rnd() {
+    _rs = _rs ^ (_rs << 13);
+    _rs = _rs ^ (_rs >> 7);
+    _rs = _rs ^ (_rs << 17);
+    return _rs;
+}
+fn rbyte() { return rnd() >> 56; }
+fn ru(m) { return (rnd() >> 1) % m; }
+# Uniform f64 in [lo, hi].
+fn rf64(lo, hi) {
+    var u = f64_div(f64_from(rnd() >> 11), 9007199254740992.0);
+    return f64_add(lo, f64_mul(f64_sub(hi, lo), u));
+}
+
+var EDGE = fl_alloc(48);
+store64(EDGE, 0); store64(EDGE + 8, 1); store64(EDGE + 16, 127);
+store64(EDGE + 24, 128); store64(EDGE + 32, 254); store64(EDGE + 40, 255);
+var N_COLOURS = 216 + 4096;
+var CR = fl_alloc(N_COLOURS * 8);
+var CG = fl_alloc(N_COLOURS * 8);
+var CB = fl_alloc(N_COLOURS * 8);
+var ci = 0;
+while (ci < N_COLOURS) {
+    if (ci < 216) {
+        store64(CR + ci * 8, load64(EDGE + (ci / 36) * 8));
+        store64(CG + ci * 8, load64(EDGE + ((ci / 6) % 6) * 8));
+        store64(CB + ci * 8, load64(EDGE + (ci % 6) * 8));
+    } else {
+        store64(CR + ci * 8, rbyte()); store64(CG + ci * 8, rbyte()); store64(CB + ci * 8, rbyte());
+    }
+    ci = ci + 1;
+}
+fn cr(i) { return load64(CR + i * 8); }
+fn cg(i) { return load64(CG + i * 8); }
+fn cb(i) { return load64(CB + i * 8); }
+
+fn absd(a, b) { if (a > b) { return a - b; } return b - a; }
+
+var FIRST = 0;
+fn note(name, r, g, b) {
+    if (FIRST == 0) {
+        print("  first failure in ", 19); print(name, strlen(name)); print(": ", 2);
+        print_num(r); print(",", 1); print_num(g); print(",", 1); print_num(b); println("");
+    }
+    FIRST = 1;
+    return 1;
+}
+
+fn img1(r, g, b, a) {
+    var x = pixel_buffer_zeroed(1, 1, PF_RGBA8, err);
+    var d = pixel_buffer_data(x);
+    store8(d, r); store8(d + 1, g); store8(d + 2, b); store8(d + 3, a);
+    return x;
+}
+
+# ================================================================
+test_group("colour round trips");
+
+var fails = 0;
+var i = 0;
+FIRST = 0;
+while (i < N_COLOURS) {
+    var s = srgba_new(cr(i), cg(i), cb(i), 255);
+    var lin = srgba_to_lin_rgba(s);
+    var back = lin_rgba_to_srgba(lin);
+    if (absd(srgba_r(back), cr(i)) > 1 || absd(srgba_g(back), cg(i)) > 1 || absd(srgba_b(back), cb(i)) > 1) {
+        fails = fails + note("srgb_linear_roundtrip", cr(i), cg(i), cb(i));
+    }
+    srgba_free(back); lin_rgba_free(lin); srgba_free(s);
+    i = i + 1;
+}
+assert_eq(fails, 0, "srgb_linear_roundtrip: sRGB -> linear -> sRGB within 1");
+
+fails = 0; i = 0; FIRST = 0;
+while (i < N_COLOURS) {
+    var s2 = srgba_new(cr(i), cg(i), cb(i), 255);
+    var hs = srgba_to_hsl(s2);
+    var b2 = hsl_to_srgba(hs);
+    if (absd(srgba_r(b2), cr(i)) > 1 || absd(srgba_g(b2), cg(i)) > 1 || absd(srgba_b(b2), cb(i)) > 1) {
+        fails = fails + note("hsl_roundtrip", cr(i), cg(i), cb(i));
+    }
+    srgba_free(b2); hsl_free(hs); srgba_free(s2);
+    i = i + 1;
+}
+assert_eq(fails, 0, "hsl_roundtrip: sRGB -> HSL -> sRGB within 1");
+
+fails = 0; i = 0; FIRST = 0;
+while (i < N_COLOURS) {
+    var s3 = srgba_new(cr(i), cg(i), cb(i), 255);
+    var lab = srgba_to_cie_lab(s3);
+    var xyz = cie_lab_to_cie_xyz(lab);
+    var l3 = cie_xyz_to_lin_rgba(xyz);
+    var b3 = lin_rgba_to_srgba(l3);
+    if (absd(srgba_r(b3), cr(i)) > 1 || absd(srgba_g(b3), cg(i)) > 1 || absd(srgba_b(b3), cb(i)) > 1) {
+        fails = fails + note("lab_roundtrip", cr(i), cg(i), cb(i));
+    }
+    srgba_free(b3); lin_rgba_free(l3); cie_xyz_free(xyz); cie_lab_free(lab); srgba_free(s3);
+    i = i + 1;
+}
+assert_eq(fails, 0, "lab_roundtrip: sRGB -> Lab -> XYZ -> linear -> sRGB within 1");
+
+fails = 0; i = 0; FIRST = 0;
+while (i < N_COLOURS) {
+    # Rust samples 1..=255: a zero channel is outside this property's domain.
+    if (cr(i) > 0 && cg(i) > 0 && cb(i) > 0) {
+        var s4 = srgba_new(cr(i), cg(i), cb(i), 255);
+        var ck = srgba_to_cmyk(s4);
+        var b4 = cmyk_to_srgba(ck);
+        if (absd(srgba_r(b4), cr(i)) > 1 || absd(srgba_g(b4), cg(i)) > 1 || absd(srgba_b(b4), cb(i)) > 1) {
+            fails = fails + note("cmyk_roundtrip", cr(i), cg(i), cb(i));
+        }
+        srgba_free(b4); cmyk_free(ck); srgba_free(s4);
+    }
+    i = i + 1;
+}
+assert_eq(fails, 0, "cmyk_roundtrip: sRGB -> CMYK -> sRGB within 1");
+
+fails = 0; i = 0; FIRST = 0;
+while (i < N_COLOURS) {
+    var s5 = srgba_new(cr(i), cg(i), cb(i), 255);
+    var l5 = srgba_to_lin_rgba(s5);
+    var ok5 = lin_rgba_to_oklab(l5);
+    var bl5 = oklab_to_lin_rgba(ok5);
+    var b5 = lin_rgba_to_srgba(bl5);
+    if (absd(srgba_r(b5), cr(i)) > 1 || absd(srgba_g(b5), cg(i)) > 1 || absd(srgba_b(b5), cb(i)) > 1) {
+        fails = fails + note("oklab_roundtrip", cr(i), cg(i), cb(i));
+    }
+    var lch = oklab_to_oklch(ok5);
+    var ok6 = oklch_to_oklab(lch);
+    var bl6 = oklab_to_lin_rgba(ok6);
+    var b6r = lin_rgba_to_srgba(bl6);
+    if (absd(srgba_r(b6r), cr(i)) > 2 || absd(srgba_g(b6r), cg(i)) > 2 || absd(srgba_b(b6r), cb(i)) > 2) {
+        fails = fails + note("oklch_roundtrip", cr(i), cg(i), cb(i));
+    }
+    srgba_free(b6r); lin_rgba_free(bl6); oklab_free(ok6); oklch_free(lch);
+    srgba_free(b5); lin_rgba_free(bl5); oklab_free(ok5); lin_rgba_free(l5); srgba_free(s5);
+    i = i + 1;
+}
+assert_eq(fails, 0, "oklab_roundtrip (within 1) and oklch_roundtrip (within 2)");
+
+fails = 0; i = 0;
+var p3 = fl_alloc(24);
+var p3b = fl_alloc(24);
+while (i < 4098) {
+    var r = rf64(0, F64_ONE); var g = rf64(0, F64_ONE); var b = rf64(0, F64_ONE);
+    if (i == 0) { r = 0; g = 0; b = 0; }
+    if (i == 1) { r = F64_ONE; g = F64_ONE; b = F64_ONE; }
+    linear_srgb_to_p3(r, g, b, p3);
+    p3_to_linear_srgb(load64(p3), load64(p3 + 8), load64(p3 + 16), p3b);
+    var lim = 0.0001;
+    if (f64_ge(f64_abs(f64_sub(load64(p3b), r)), lim) == 1) { fails = fails + 1; }
+    if (f64_ge(f64_abs(f64_sub(load64(p3b + 8), g)), lim) == 1) { fails = fails + 1; }
+    if (f64_ge(f64_abs(f64_sub(load64(p3b + 16), b)), lim) == 1) { fails = fails + 1; }
+    i = i + 1;
+}
+assert_eq(fails, 0, "p3_srgb_roundtrip: linear sRGB -> P3 -> linear sRGB within 1e-4");
+
+fails = 0;
+var ct = fl_alloc(16);
+i = 0;
+while (i < 4098) {
+    var k = f32_from(rf64(1000.0, 40000.0));
+    if (i == 0) { k = f32_from(1000.0); }
+    if (i == 1) { k = f32_from(40000.0); }
+    color_temperature(k, ct);
+    var c = 0;
+    while (c < 3) {
+        var v = f32_to(load32(ct + c * 4));
+        if (f64_lt(v, 0) == 1 || f64_gt(v, F64_ONE) == 1 || f64_eq(v, v) == 0) { fails = fails + 1; }
+        c = c + 1;
+    }
+    i = i + 1;
+}
+assert_eq(fails, 0, "color_temperature_in_range: every component in [0, 1]");
+
+# ================================================================
+test_group("delta E");
+
+var fn_neg = 0;
+var fn_id = 0;
+var fn_sym = 0;
+i = 0;
+while (i < 4096) {
+    var a1 = cie_lab_new(rf64(0, 100.0), rf64(f64_neg(128.0), 128.0), rf64(f64_neg(128.0), 128.0));
+    var a2 = cie_lab_new(rf64(0, 100.0), rf64(f64_neg(128.0), 128.0), rf64(f64_neg(128.0), 128.0));
+    var d76 = delta_e_cie76(a1, a2);
+    if (f64_lt(d76, 0) == 1) { fn_neg = fn_neg + 1; }
+    if (f64_ge(f64_abs(f64_sub(d76, delta_e_cie76(a2, a1))), 0.0000000001) == 1) { fn_sym = fn_sym + 1; }
+    if (f64_lt(delta_e_cie94(a1, a2), 0) == 1) { fn_neg = fn_neg + 1; }
+    if (f64_lt(delta_e_ciede2000(a1, a2), 0) == 1) { fn_neg = fn_neg + 1; }
+    if (f64_ge(delta_e_cie76(a1, a1), 0.0000000001) == 1) { fn_id = fn_id + 1; }
+    if (f64_ge(delta_e_cie94(a1, a1), 0.0000000001) == 1) { fn_id = fn_id + 1; }
+    cie_lab_free(a1); cie_lab_free(a2);
+    i = i + 1;
+}
+assert_eq(fn_neg, 0, "delta_e_76/94/2000_non_negative");
+assert_eq(fn_id, 0, "delta_e_76/94_identity: distance to itself below 1e-10");
+assert_eq(fn_sym, 0, "delta_e_76_symmetric");
+
+# ================================================================
+test_group("blend");
+
+var src = fl_alloc(8);
+var dst = fl_alloc(8);
+var out = fl_alloc(8);
+fails = 0; i = 0;
+while (i < 8192) {
+    store8(src, rbyte()); store8(src + 1, rbyte()); store8(src + 2, rbyte()); store8(src + 3, 0);
+    store8(dst, rbyte()); store8(dst + 1, rbyte()); store8(dst + 2, rbyte()); store8(dst + 3, rbyte());
+    blend_pixel(src, dst, BM_NORMAL, rbyte(), out);
+    if (load32(out) != load32(dst)) { fails = fails + 1; }
+    # blend_all_modes_no_panic: every mode on an arbitrary pair.
+    store8(src + 3, rbyte());
+    var m = 0;
+    while (m < 12) { blend_pixel(src, dst, m, rbyte(), out); m = m + 1; }
+    i = i + 1;
+}
+assert_eq(fails, 0, "blend_transparent_src_is_noop: alpha-0 source leaves dst unchanged");
+
+# ================================================================
+test_group("format round trips");
+
+fails = 0; i = 0;
+while (i < 512) {
+    var len3 = (12 + ru(289)) / 3 * 3;
+    var bv3 = bv_zeroed(len3);
+    var j = 0;
+    while (j < len3) { store8(bv_data(bv3) + j, rbyte()); j = j + 1; }
+    var rgb = pixel_buffer_new(bv3, len3 / 3, 1, PF_RGB8, err);
+    var rgba = rgb8_to_rgba8(rgb, err);
+    var rgb2 = rgba8_to_rgb8(rgba, err);
+    if (fz_eq_buf(rgb2, rgb) == 0) { fails = fails + 1; }
+    pixel_buffer_free(rgb2); pixel_buffer_free(rgba); pixel_buffer_free(rgb);
+
+    var len4 = (4 + ru(397)) / 4 * 4;
+    var bv4 = bv_zeroed(len4);
+    j = 0;
+    while (j < len4) { store8(bv_data(bv4) + j, rbyte()); j = j + 1; }
+    var argb = pixel_buffer_new(bv4, len4 / 4, 1, PF_ARGB8, err);
+    var rgba4 = argb8_to_rgba8(argb, err);
+    var argb2 = rgba8_to_argb8(rgba4, err);
+    if (fz_eq_buf(argb2, argb) == 0) { fails = fails + 1; }
+    pixel_buffer_free(argb2); pixel_buffer_free(rgba4); pixel_buffer_free(argb);
+    i = i + 1;
+}
+assert_eq(fails, 0, "rgb8_rgba8_roundtrip and argb8_rgba8_roundtrip are exact");
+
+fn fz_eq_buf(a, b) {
+    var n = pixel_buffer_len(a);
+    if (n != pixel_buffer_len(b)) { return 0; }
+    var k = 0;
+    while (k < n) {
+        if (load8(pixel_buffer_data(a) + k) != load8(pixel_buffer_data(b) + k)) { return 0; }
+        k = k + 1;
+    }
+    return 1;
+}
+
+fails = 0;
+var v = 16;
+while (v <= 235) {
+    var std = 0;
+    while (std < 2) {
+        var gb = pixel_buffer_zeroed(4, 4, PF_RGBA8, err);
+        var gd = pixel_buffer_data(gb);
+        var p = 0;
+        while (p < 16) {
+            store8(gd + p * 4, v); store8(gd + p * 4 + 1, v); store8(gd + p * 4 + 2, v); store8(gd + p * 4 + 3, 255);
+            p = p + 1;
+        }
+        var yv = 0;
+        var bk = 0;
+        if (std == 0) { yv = rgba_to_yuv420p(gb, err); bk = yuv420p_to_rgba(yv, err); }
+        if (std == 1) { yv = rgba_to_yuv420p_bt2020(gb, err); bk = yuv420p_to_rgba_bt2020(yv, err); }
+        if (absd(load8(pixel_buffer_data(bk)), v) >= 3) { fails = fails + 1; }
+        pixel_buffer_free(bk); pixel_buffer_free(yv); pixel_buffer_free(gb);
+        std = std + 1;
+    }
+    v = v + 1;
+}
+assert_eq(fails, 0, "yuv420p_bt601/bt2020_roundtrip_gray: every grey 16..235 within 2");
+
+# ================================================================
+test_group("geometry");
+
+fails = 0; i = 0;
+while (i < 2048) {
+    var w = 1 + ru(100); var h = 1 + ru(100);
+    var zb = pixel_buffer_zeroed(w, h, PF_RGBA8, err);
+    var cropped = crop(zb, ru(101), ru(101), ru(201), ru(201), err);
+    if (pixel_buffer_width(cropped) > w || pixel_buffer_height(cropped) > h) { fails = fails + 1; }
+    pixel_buffer_free(cropped);
+    pixel_buffer_free(zb);
+    i = i + 1;
+}
+assert_eq(fails, 0, "crop_never_exceeds_source");
+
+fails = 0; i = 0;
+while (i < 1024) {
+    var w2 = 1 + ru(50); var h2 = 1 + ru(50);
+    var nw = 1 + ru(100); var nh = 1 + ru(100);
+    var zb2 = pixel_buffer_zeroed(w2, h2, PF_RGBA8, err);
+    var rs = resize(zb2, nw, nh, SF_NEAREST, err);
+    if (pixel_buffer_width(rs) != nw || pixel_buffer_height(rs) != nh) { fails = fails + 1; }
+    pixel_buffer_free(rs); pixel_buffer_free(zb2);
+    i = i + 1;
+}
+assert_eq(fails, 0, "resize_produces_correct_dimensions");
+
+fails = 0;
+var fw = 1;
+while (fw <= 20) {
+    var fh = 1;
+    while (fh <= 20) {
+        var fb = pixel_buffer_zeroed(fw, fh, PF_RGBA8, err);
+        var q = 0;
+        while (q < fw * fh * 4) { store8(pixel_buffer_data(fb) + q, q & 255); q = q + 1; }
+        var f1 = flip_horizontal(fb, err);
+        var f2 = flip_horizontal(f1, err);
+        if (fz_eq_buf(f2, fb) == 0) { fails = fails + 1; }
+        pixel_buffer_free(f2); pixel_buffer_free(f1); pixel_buffer_free(fb);
+        fh = fh + 1;
+    }
+    fw = fw + 1;
+}
+assert_eq(fails, 0, "flip_h_is_involution: every size 1..20 x 1..20");
+
+fails = 0; i = 0;
+var idm = affine_identity();
+var pt = fl_alloc(16);
+while (i < 4096) {
+    var x = rf64(f64_neg(100.0), 100.0); var y = rf64(f64_neg(100.0), 100.0);
+    affine_apply(idm, x, y, pt);
+    if (f64_ge(f64_abs(f64_sub(load64(pt), x)), 0.0000000001) == 1) { fails = fails + 1; }
+    if (f64_ge(f64_abs(f64_sub(load64(pt + 8), y)), 0.0000000001) == 1) { fails = fails + 1; }
+    i = i + 1;
+}
+assert_eq(fails, 0, "affine_identity_preserves");
+
+# ================================================================
+test_group("compositing and point filters");
+
+var f_dz = 0; var f_do = 0; var f_pre = 0; var f_th = 0; var f_mix = 0; var f_fade = 0; var f_wipe = 0;
+var mix = fl_alloc(36);
+store32(mix, f32_from(F64_ONE)); store32(mix + 4, 0); store32(mix + 8, 0);
+store32(mix + 12, 0); store32(mix + 16, f32_from(F64_ONE)); store32(mix + 20, 0);
+store32(mix + 24, 0); store32(mix + 28, 0); store32(mix + 32, f32_from(F64_ONE));
+i = 0;
+while (i < N_COLOURS) {
+    var r6 = cr(i); var g6 = cg(i); var b6v = cb(i);
+    var ia = img1(r6, g6, b6v, 255);
+    var ib = img1(0, 0, 0, 255);
+    var dz = dissolve(ia, ib, 0, err);
+    if (load8(pixel_buffer_data(dz)) != r6 || load8(pixel_buffer_data(dz) + 2) != b6v) { f_dz = f_dz + 1; }
+    var d1 = dissolve(ib, ia, f32_from(F64_ONE), err);
+    if (load8(pixel_buffer_data(d1)) != r6 || load8(pixel_buffer_data(d1) + 1) != g6) { f_do = f_do + 1; }
+    pixel_buffer_free(dz); pixel_buffer_free(d1);
+
+    var pm = img1(r6, g6, b6v, 255);
+    premultiply_alpha(pm);
+    if (load8(pixel_buffer_data(pm)) != r6 || load8(pixel_buffer_data(pm) + 2) != b6v) { f_pre = f_pre + 1; }
+    pixel_buffer_free(pm);
+
+    var th = img1(r6, g6, b6v, 255);
+    threshold(th, rbyte());
+    var t0 = load8(pixel_buffer_data(th));
+    if ((t0 != 0 && t0 != 255) || t0 != load8(pixel_buffer_data(th) + 1) || t0 != load8(pixel_buffer_data(th) + 2)) {
+        f_th = f_th + 1;
+    }
+    pixel_buffer_free(th);
+
+    var mx = img1(r6, g6, b6v, 255);
+    channel_mixer(mx, mix);
+    if (load8(pixel_buffer_data(mx)) != r6 || load8(pixel_buffer_data(mx) + 1) != g6
+      || load8(pixel_buffer_data(mx) + 2) != b6v) {
+        f_mix = f_mix + 1;
+    }
+    pixel_buffer_free(mx);
+
+    var fd = img1(r6, g6, b6v, 255);
+    fade(fd, f32_from(F64_ONE));
+    if (load8(pixel_buffer_data(fd)) != r6 || load8(pixel_buffer_data(fd) + 1) != g6) { f_fade = f_fade + 1; }
+    pixel_buffer_free(fd);
+
+    var wa = pixel_buffer_zeroed(2, 2, PF_RGBA8, err);
+    var wb = pixel_buffer_zeroed(2, 2, PF_RGBA8, err);
+    var wq = 0;
+    while (wq < 4) {
+        store8(pixel_buffer_data(wa) + wq * 4, r6); store8(pixel_buffer_data(wa) + wq * 4 + 1, g6);
+        store8(pixel_buffer_data(wa) + wq * 4 + 2, b6v); store8(pixel_buffer_data(wa) + wq * 4 + 3, 255);
+        store8(pixel_buffer_data(wb) + wq * 4 + 3, 255);
+        wq = wq + 1;
+    }
+    var wr = wipe(wa, wb, 0, err);
+    if (load8(pixel_buffer_data(wr)) != r6) { f_wipe = f_wipe + 1; }
+    pixel_buffer_free(wr); pixel_buffer_free(wa); pixel_buffer_free(wb);
+    pixel_buffer_free(ia); pixel_buffer_free(ib);
+    i = i + 1;
+}
+assert_eq(f_dz, 0, "dissolve_at_zero_is_a");
+assert_eq(f_do, 0, "dissolve_at_one_is_b");
+assert_eq(f_pre, 0, "premultiply_opaque_is_identity");
+assert_eq(f_th, 0, "threshold_is_binary");
+assert_eq(f_mix, 0, "channel_mixer_identity_preserves");
+assert_eq(f_fade, 0, "fade_one_is_identity");
+assert_eq(f_wipe, 0, "wipe_at_zero_is_all_a");
+
+var exit_code = assert_summary();
+# assert_summary() returns the raw failure count, and a wait status is 8 bits.
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

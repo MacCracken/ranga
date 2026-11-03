@@ -1,0 +1,62 @@
+# Golden vectors from the Rust 1.0.1 oracle.
+#
+# scripts/oracle compares the port against the frozen Rust crate at rust-old/ on
+# identical inputs. This suite keeps that evidence once rust-old/ is gone.
+# scripts/oracle/golden_rust.cyr records, for every exact oracle group, the number
+# of output lines Rust 1.0.1 produced and an FNV-1a 64 digest of their exact text.
+# Here the same group code (scripts/oracle/probe_core.cyr) runs in golden mode,
+# hashing each group's lines in-process, and every digest must match.
+#
+# That covers about 2.1 million values, including the transition points that pin
+# every f32 → byte conversion on all of [0, 1]. One digest mismatch means at least
+# one value moved. Run ./scripts/oracle/run.sh to see which, while rust-old/ exists.
+# The three groups ADR 002 accepts within 2 ULP are not exact by design, so their
+# bound is checked only by the live oracle.
+#
+# Regenerate the digests only after a deliberate, reviewed change:
+#   ./scripts/oracle/run.sh
+#   python3 -I scripts/oracle/make_golden.py build/oracle/rust.out > scripts/oracle/golden_rust.cyr
+
+include "scripts/oracle/probe_core.cyr"
+
+alloc_init();
+
+var GOLDEN_SEEN = 0;
+
+fn golden_expect(name, count, hash) {
+    GOLDEN_SEEN = GOLDEN_SEEN + 1;
+    var gi = 0;
+    var found = (0 - 1);
+    while (gi < _GN) {
+        if (streq(load64(_GNAME + gi * 8), name) == 1) { found = gi; }
+        gi = gi + 1;
+    }
+    if (found < 0) {
+        print("  missing group: ", 17);
+        println(name);
+        assert_eq(found >= 0, 1, "every Rust 1.0.1 oracle group is produced");
+        return 0;
+    }
+    var ok_count = load64(_GCOUNT + found * 8) == count;
+    var ok_hash = load64(_GHASH + found * 8) == hash;
+    if (ok_count == 0 || ok_hash == 0) {
+        print("  differs from Rust 1.0.1: ", 27);
+        println(name);
+    }
+    assert_eq(ok_count, 1, "a group has the same number of values as Rust 1.0.1");
+    assert_eq(ok_hash, 1, "a group's values are byte-identical to Rust 1.0.1");
+    return 0;
+}
+
+include "scripts/oracle/golden_rust.cyr"
+
+test_group("oracle golden vectors");
+golden_init();
+run_groups(1);
+golden_check_all();
+assert_gt(GOLDEN_SEEN, 30, "the golden table is not empty");
+
+var exit_code = assert_summary();
+# assert_summary() returns the raw failure count, and a wait status is 8 bits.
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

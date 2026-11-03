@@ -1,17 +1,31 @@
-# ranga benchmarks — Cyrius side of docs/benchmarks-rust-v-cyrius.md
+# ranga benchmarks — the Cyrius side of docs/benchmarks-rust-v-cyrius.md
 #
-# Names match the Rust criterion benchmarks in docs/rust-v1-bench-history.csv
-# exactly, so the two series line up row for row. Only CPU benchmarks for
-# modules that are ported appear here; GPU and spectral land with M5/M6.
+# One benchmark for each of Rust 1.0.1's 100 CPU benchmarks outside spectral, under
+# the same name and on the same workload: rust-old/benches/{blend,color_convert,
+# color_science,composite,filter,histogram,icc,transform}.rs, in that order. The
+# 8 spectral benchmarks are tests/spectral.bcyr, feature-gated as in Rust. The 26
+# GPU benchmarks wait on a decision about GPU hardware in CI (roadmap).
 #
-# BATCHING. bench_batch_start/stop pay ~240 ns per pair for clock_gettime, so
-# anything faster than about a microsecond is run in a batch of 100k-1M and the
-# cost amortised. The full-frame image ops are milliseconds each and run once.
+# SAME WORKLOAD means the same inputs and parameters: uniform 128 frames where
+# Rust uses make_buf, `i % 256` where it uses make_varied_buf, opacity 200 for
+# blend, a 640x480 source at (100, 100) for composite_at, and so on. Up to 2.2.0
+# several benchmarks here shared a Rust name but not its workload.
 #
-# ⚠ These numbers are NOT comparable to the Rust series as absolutes — the Rust
-# baseline was taken on a loaded machine under a powersave governor (see the
-# caveat in benchmarks-rust-v-cyrius.md). Treat them as a Cyrius-side baseline
-# and re-run both on a quiesced machine before publishing any delta.
+# Two differences the language forces:
+#   - Rust's colour structs live on the stack, and `.into()` costs nothing to
+#     allocate. Here the conversions return heap handles, so srgb_to_lab,
+#     cmyk_roundtrip, hsl_roundtrip and pixel_view_create include an fl_alloc and
+#     an fl_free each.
+#   - criterion picks its own iteration counts. Here each benchmark has a fixed
+#     batch, sized to take roughly 50-300 ms.
+#
+# BATCHING. bench_batch_start/stop pay one clock read per pair, so anything below
+# a microsecond runs in a batch of 100k-1M and the cost is amortised. The
+# frame-sized operations go through `frame`, one function pointer call each,
+# which is noise against milliseconds.
+#
+# In-place operations run repeatedly on one buffer, as Rust's do: brightness
+# keeps brightening the same frame, and so on.
 
 include "src/error.cyr"
 include "src/bytevec.cyr"
@@ -25,342 +39,627 @@ include "src/filter_point.cyr"
 include "src/filter_kernel.cyr"
 include "src/blend.cyr"
 include "src/convert.cyr"
+include "src/icc.cyr"
 
 var W = 1920;
 var H = 1080;
+var err = 0;
 
-fn mkframe(w, h, f, err) {
-    var b = pixel_buffer_zeroed(w, h, f, err);
+# Rust's make_buf: every byte 128.
+fn mk_uniform(w, h, fmt, v) {
+    var b = pixel_buffer_zeroed(w, h, fmt, err);
     if (b == 0) { return 0; }
-    # A varied fill, not a flat one: uniform data can let a branchy kernel take
-    # one path for every pixel and is not representative.
+    bv_fill(pixel_buffer_bv(b), v);
+    return b;
+}
+
+# Rust's make_varied_buf: byte i is i % 256.
+fn mk_varied(w, h) {
+    var b = pixel_buffer_zeroed(w, h, PF_RGBA8, err);
+    if (b == 0) { return 0; }
     var p = pixel_buffer_data(b);
     var n = pixel_buffer_len(b);
     var i = 0;
-    while (i < n) {
-        store8(p + i, (i * 37 + (i >> 5)) & 255);
+    while (i < n) { store8(p + i, i & 255); i = i + 1; }
+    return b;
+}
+
+fn rgba(r, g, b, a) {
+    var p = fl_alloc(8);
+    store8(p, r); store8(p + 1, g); store8(p + 2, b); store8(p + 3, a);
+    return p;
+}
+
+# Run `fp` (no arguments) `iters` times as one batch and report the mean.
+fn frame(name, iters, fp) {
+    var bn = bench_new(name);
+    bench_batch_start(bn);
+    var i = 0;
+    while (i < iters) { fncall0(fp); i = i + 1; }
+    bench_batch_stop(bn, iters);
+    bench_report(bn);
+    return 0;
+}
+
+# ================================================================
+# blend.rs
+# ================================================================
+var BL_SRC = 0;
+var BL_DST = 0;
+var BL_OUT = 0;
+var ROW_SRC = 0;
+var ROW_DST = 0;
+
+fn bench_blend_mode(name, mode) {
+    var bn = bench_new(name);
+    bench_batch_start(bn);
+    var i = 0;
+    while (i < 1000000) { blend_pixel(BL_SRC, BL_DST, mode, 200, BL_OUT); i = i + 1; }
+    bench_batch_stop(bn, 1000000);
+    bench_report(bn);
+    return 0;
+}
+fn w_blend_row() { blend_row_normal(ROW_SRC, ROW_DST, W, 200); return 0; }
+fn w_blend_row_argb() { blend_row_normal_argb(ROW_SRC, ROW_DST, W, 200); return 0; }
+
+fn benches_blend() {
+    BL_SRC = rgba(200, 100, 50, 200);
+    BL_DST = rgba(50, 100, 200, 255);
+    BL_OUT = fl_alloc(8);
+    ROW_SRC = fl_alloc(W * 4);
+    ROW_DST = fl_alloc(W * 4);
+    memset(ROW_SRC, 128, W * 4);
+    memset(ROW_DST, 64, W * 4);
+
+    bench_blend_mode("blend_pixel_normal", BM_NORMAL);
+    frame("blend_row_1920px", 20000, &w_blend_row);
+    frame("blend_row_1080p_width", 20000, &w_blend_row);
+    bench_blend_mode("blend_pixel_modes/Normal", BM_NORMAL);
+    bench_blend_mode("blend_pixel_modes/Multiply", BM_MULTIPLY);
+    bench_blend_mode("blend_pixel_modes/Screen", BM_SCREEN);
+    bench_blend_mode("blend_pixel_modes/Overlay", BM_OVERLAY);
+    bench_blend_mode("blend_pixel_modes/Darken", BM_DARKEN);
+    bench_blend_mode("blend_pixel_modes/Lighten", BM_LIGHTEN);
+    bench_blend_mode("blend_pixel_modes/ColorDodge", BM_COLOR_DODGE);
+    bench_blend_mode("blend_pixel_modes/ColorBurn", BM_COLOR_BURN);
+    bench_blend_mode("blend_pixel_modes/SoftLight", BM_SOFT_LIGHT);
+    bench_blend_mode("blend_pixel_modes/HardLight", BM_HARD_LIGHT);
+    bench_blend_mode("blend_pixel_modes/Difference", BM_DIFFERENCE);
+    bench_blend_mode("blend_pixel_modes/Exclusion", BM_EXCLUSION);
+
+    var asrc = rgba(200, 100, 50, 200);
+    var adst = rgba(255, 50, 100, 200);
+    var bn = bench_new("blend_pixel_argb_normal");
+    bench_batch_start(bn);
+    var i = 0;
+    while (i < 1000000) { blend_pixel_argb(asrc, adst, BM_NORMAL, 200, BL_OUT); i = i + 1; }
+    bench_batch_stop(bn, 1000000);
+    bench_report(bn);
+
+    memset(ROW_SRC, 128, W * 4);
+    memset(ROW_DST, 64, W * 4);
+    frame("blend_row_argb_1920px", 20000, &w_blend_row_argb);
+    return 0;
+}
+
+# ================================================================
+# color_convert.rs
+# ================================================================
+var CV_RGBA = 0;
+var CV_YUV601 = 0;
+var CV_YUV709 = 0;
+var CV_YUV2020 = 0;
+var CV_NV12 = 0;
+var CV_ARGB_NV = 0;
+var CV_RGB = 0;
+var CV_ARGB = 0;
+var CV_F32 = 0;
+
+fn w_to_yuv601() { pixel_buffer_free(rgba_to_yuv420p(CV_RGBA, err)); return 0; }
+fn w_from_yuv601() { pixel_buffer_free(yuv420p_to_rgba(CV_YUV601, err)); return 0; }
+fn w_to_yuv709() { pixel_buffer_free(rgba_to_yuv420p_bt709(CV_RGBA, err)); return 0; }
+fn w_from_yuv709() { pixel_buffer_free(yuv420p_to_rgba_bt709(CV_YUV709, err)); return 0; }
+fn w_nv12_to_rgba() { pixel_buffer_free(nv12_to_rgba(CV_NV12, err)); return 0; }
+fn w_rgb8_to_rgba8() { pixel_buffer_free(rgb8_to_rgba8(CV_RGB, err)); return 0; }
+fn w_argb8_to_rgba8() { pixel_buffer_free(argb8_to_rgba8(CV_ARGB, err)); return 0; }
+fn w_rgbaf32_to_rgba8() { pixel_buffer_free(rgbaf32_to_rgba8(CV_F32, err)); return 0; }
+fn w_to_yuv2020() { pixel_buffer_free(rgba_to_yuv420p_bt2020(CV_RGBA, err)); return 0; }
+fn w_from_yuv2020() { pixel_buffer_free(yuv420p_to_rgba_bt2020(CV_YUV2020, err)); return 0; }
+fn w_argb_to_nv12() { pixel_buffer_free(argb_to_nv12(CV_ARGB_NV, err)); return 0; }
+fn w_rgba8_to_argb8() { pixel_buffer_free(rgba8_to_argb8(CV_RGBA, err)); return 0; }
+fn w_rgba8_to_rgb8() { pixel_buffer_free(rgba8_to_rgb8(CV_RGBA, err)); return 0; }
+fn w_rgba8_to_rgbaf32() { pixel_buffer_free(rgba8_to_rgbaf32(CV_RGBA, err)); return 0; }
+
+fn benches_convert() {
+    CV_RGBA = mk_uniform(W, H, PF_RGBA8, 128);
+    CV_YUV601 = rgba_to_yuv420p(CV_RGBA, err);
+    CV_YUV709 = rgba_to_yuv420p_bt709(CV_RGBA, err);
+    CV_YUV2020 = rgba_to_yuv420p_bt2020(CV_RGBA, err);
+    # [255, 128, 128, 128] repeated: opaque mid grey in ARGB.
+    CV_ARGB_NV = pixel_buffer_zeroed(W, H, PF_ARGB8, err);
+    var p = pixel_buffer_data(CV_ARGB_NV);
+    var i = 0;
+    while (i < W * H) { store32(p + i * 4, 0x808080FF); i = i + 1; }
+    CV_NV12 = argb_to_nv12(CV_ARGB_NV, err);
+    CV_RGB = mk_uniform(W, H, PF_RGB8, 128);
+    CV_ARGB = mk_uniform(W, H, PF_ARGB8, 128);
+    CV_F32 = rgba8_to_rgbaf32(CV_RGBA, err);
+
+    frame("rgba_to_yuv420p_bt601_1080p", 50, &w_to_yuv601);
+    frame("yuv420p_to_rgba_bt601_1080p", 50, &w_from_yuv601);
+    frame("rgba_to_yuv420p_bt709_1080p", 50, &w_to_yuv709);
+    frame("yuv420p_to_rgba_bt709_1080p", 50, &w_from_yuv709);
+    frame("nv12_to_rgba_1080p", 50, &w_nv12_to_rgba);
+    frame("rgb8_to_rgba8_1080p", 50, &w_rgb8_to_rgba8);
+    frame("argb8_to_rgba8_1080p", 50, &w_argb8_to_rgba8);
+    frame("rgbaf32_to_rgba8_1080p", 10, &w_rgbaf32_to_rgba8);
+    frame("rgba_to_yuv420p_bt2020_1080p", 50, &w_to_yuv2020);
+    frame("yuv420p_to_rgba_bt2020_1080p", 50, &w_from_yuv2020);
+    frame("argb_to_nv12_1080p", 20, &w_argb_to_nv12);
+    frame("rgba8_to_argb8_1080p", 50, &w_rgba8_to_argb8);
+    frame("rgba8_to_rgb8_1080p", 50, &w_rgba8_to_rgb8);
+    frame("rgba8_to_rgbaf32_1080p", 20, &w_rgba8_to_rgbaf32);
+    return 0;
+}
+
+# ================================================================
+# color_science.rs
+# ================================================================
+var CS_POOL = 0;
+var CS_VIEW_BUF = 0;
+fn w_buffer_pool() {
+    buffer_pool_release(CS_POOL, buffer_pool_acquire(CS_POOL, 1920 * 1080 * 4));
+    return 0;
+}
+
+fn benches_color_science() {
+    var i = 0;
+    var bn = 0;
+    var acc = 0;
+
+    var c = srgba_new(128, 64, 200, 255);
+    bn = bench_new("srgb_to_lab");
+    bench_batch_start(bn);
+    i = 0;
+    while (i < 200000) { cie_lab_free(srgba_to_cie_lab(c)); i = i + 1; }
+    bench_batch_stop(bn, 200000);
+    bench_report(bn);
+
+    var la = cie_lab_new(50.0, 25.0, f64_neg(10.0));
+    var lb = cie_lab_new(55.0, 20.0, f64_neg(15.0));
+    bn = bench_new("delta_e_cie76");
+    bench_batch_start(bn);
+    i = 0;
+    while (i < 1000000) { acc = acc + delta_e_cie76(la, lb); i = i + 1; }
+    bench_batch_stop(bn, 1000000);
+    bench_report(bn);
+
+    bn = bench_new("delta_e_cie94");
+    bench_batch_start(bn);
+    i = 0;
+    while (i < 1000000) { acc = acc + delta_e_cie94(la, lb); i = i + 1; }
+    bench_batch_stop(bn, 1000000);
+    bench_report(bn);
+
+    var da = cie_lab_new(50.0, 2.6772, f64_neg(79.7751));
+    var db = cie_lab_new(50.0, 0, f64_neg(82.7485));
+    bn = bench_new("delta_e_ciede2000");
+    bench_batch_start(bn);
+    i = 0;
+    while (i < 200000) { acc = acc + delta_e_ciede2000(da, db); i = i + 1; }
+    bench_batch_stop(bn, 200000);
+    bench_report(bn);
+
+    var trip = fl_alloc(24);
+    bn = bench_new("p3_to_linear_srgb");
+    bench_batch_start(bn);
+    i = 0;
+    while (i < 1000000) { p3_to_linear_srgb(0.8, 0.3, 0.5, trip); i = i + 1; }
+    bench_batch_stop(bn, 1000000);
+    bench_report(bn);
+
+    var cm = srgba_new(200, 100, 50, 255);
+    bn = bench_new("cmyk_roundtrip");
+    bench_batch_start(bn);
+    i = 0;
+    while (i < 1000000) {
+        var k = srgba_to_cmyk(cm);
+        srgba_free(cmyk_to_srgba(k));
+        cmyk_free(k);
         i = i + 1;
     }
-    return b;
+    bench_batch_stop(bn, 1000000);
+    bench_report(bn);
+
+    var rgb3 = fl_alloc(16);
+    bn = bench_new("color_temperature_6600K");
+    bench_batch_start(bn);
+    i = 0;
+    while (i < 1000000) { color_temperature(f32_from(6600.0), rgb3); i = i + 1; }
+    bench_batch_stop(bn, 1000000);
+    bench_report(bn);
+
+    bn = bench_new("hsl_roundtrip");
+    bench_batch_start(bn);
+    i = 0;
+    while (i < 1000000) {
+        var h = srgba_to_hsl(c);
+        srgba_free(hsl_to_srgba(h));
+        hsl_free(h);
+        i = i + 1;
+    }
+    bench_batch_stop(bn, 1000000);
+    bench_report(bn);
+
+    var tc = tone_curve_gamma(2.2);
+    bn = bench_new("icc_tone_curve_apply");
+    bench_batch_start(bn);
+    i = 0;
+    while (i < 1000000) { acc = acc + tone_curve_apply(tc, 0.5); i = i + 1; }
+    bench_batch_stop(bn, 1000000);
+    bench_report(bn);
+    tone_curve_free(tc);
+
+    CS_POOL = buffer_pool_new(4);
+    frame("buffer_pool_acquire_release", 200, &w_buffer_pool);
+    buffer_pool_free(CS_POOL);
+
+    CS_VIEW_BUF = pixel_buffer_zeroed(W, H, PF_RGBA8, err);
+    var vd = pixel_buffer_data(CS_VIEW_BUF);
+    var vl = pixel_buffer_len(CS_VIEW_BUF);
+    bn = bench_new("pixel_view_create");
+    bench_batch_start(bn);
+    i = 0;
+    while (i < 1000000) { pixel_view_free(pixel_view_new(vd, vl, W, H, PF_RGBA8, err)); i = i + 1; }
+    bench_batch_stop(bn, 1000000);
+    bench_report(bn);
+    return acc;
+}
+
+# ================================================================
+# composite.rs
+# ================================================================
+var CP_BUF = 0;
+var CP_DST = 0;
+var CP_SRC = 0;
+var CP_A = 0;
+var CP_B = 0;
+var CP_MASK = 0;
+var CP_ADST = 0;
+var CP_ASRC = 0;
+var C_RED = 0;
+var C_BLUE = 0;
+var C_LIGHT = 0;
+var C_WHITE = 0;
+
+fn w_premultiply() { premultiply_alpha(CP_BUF); return 0; }
+fn w_composite_at() { composite_at(CP_SRC, CP_DST, 100, 100, f32_from(0.8)); return 0; }
+fn w_dissolve() { pixel_buffer_free(dissolve(CP_A, CP_B, f32_from(0.5), err)); return 0; }
+fn w_fade() { fade(CP_BUF, f32_from(0.5)); return 0; }
+fn w_wipe() { pixel_buffer_free(wipe(CP_A, CP_B, f32_from(0.5), err)); return 0; }
+fn w_gradient() { gradient_linear(CP_BUF, C_RED, C_BLUE); return 0; }
+fn w_checkerboard() { fill_checkerboard(CP_BUF, 16, C_LIGHT, C_WHITE); return 0; }
+fn w_unpremultiply() { unpremultiply_alpha(CP_BUF); return 0; }
+fn w_apply_mask() { apply_mask(CP_BUF, CP_MASK); return 0; }
+fn w_gradient_radial() {
+    gradient_radial(CP_BUF, f32_from(960.0), f32_from(540.0), f32_from(540.0), C_RED, C_BLUE);
+    return 0;
+}
+fn w_gradient_angled() { gradient_linear_angled(CP_BUF, C_RED, C_BLUE, f32_from(45.0)); return 0; }
+fn w_fill_solid() { fill_solid(CP_BUF, C_RED); return 0; }
+fn w_composite_at_argb() { composite_at_argb(CP_ASRC, CP_ADST, 100, 100, f32_from(0.8)); return 0; }
+
+fn benches_composite() {
+    C_RED = rgba(255, 0, 0, 255);
+    C_BLUE = rgba(0, 0, 255, 255);
+    C_LIGHT = rgba(200, 200, 200, 255);
+    C_WHITE = rgba(255, 255, 255, 255);
+
+    CP_BUF = mk_uniform(W, H, PF_RGBA8, 128);
+    frame("premultiply_alpha_1080p", 50, &w_premultiply);
+    CP_DST = mk_uniform(W, H, PF_RGBA8, 128);
+    CP_SRC = mk_uniform(640, 480, PF_RGBA8, 200);
+    frame("composite_at_640x480_on_1080p", 50, &w_composite_at);
+    CP_A = mk_uniform(W, H, PF_RGBA8, 128);
+    CP_B = mk_uniform(W, H, PF_RGBA8, 64);
+    frame("dissolve_1080p", 10, &w_dissolve);
+    bv_fill(pixel_buffer_bv(CP_BUF), 128);
+    frame("fade_1080p", 20, &w_fade);
+    frame("wipe_1080p", 50, &w_wipe);
+    frame("gradient_linear_1080p", 10, &w_gradient);
+    frame("checkerboard_1080p", 20, &w_checkerboard);
+    bv_fill(pixel_buffer_bv(CP_BUF), 128);
+    frame("unpremultiply_alpha_1080p", 20, &w_unpremultiply);
+    bv_fill(pixel_buffer_bv(CP_BUF), 128);
+    CP_MASK = mk_uniform(W, H, PF_RGBA8, 128);
+    frame("apply_mask_1080p", 50, &w_apply_mask);
+    frame("gradient_radial_1080p", 10, &w_gradient_radial);
+    frame("gradient_linear_angled_1080p", 10, &w_gradient_angled);
+    frame("fill_solid_1080p", 200, &w_fill_solid);
+    CP_ADST = mk_uniform(W, H, PF_ARGB8, 128);
+    CP_ASRC = mk_uniform(640, 480, PF_ARGB8, 200);
+    frame("composite_at_argb_640x480_on_1080p", 50, &w_composite_at_argb);
+    return 0;
+}
+
+# ================================================================
+# filter.rs
+# ================================================================
+var FB = 0;       # make_buf, mutated in place
+var FV = 0;       # make_varied_buf, mutated in place
+var FV_RO = 0;    # make_varied_buf, read only
+var F512 = 0;
+var F256 = 0;
+var F_LUT = 0;
+var F_SH = 0;
+var F_MID = 0;
+var F_HI = 0;
+var F_MIX = 0;
+var F_L3D = 0;
+var F_FILL = 0;
+
+fn w_brightness() { brightness(FB, f32_from(0.1)); return 0; }
+fn w_contrast() { contrast(FB, f32_from(1.2)); return 0; }
+fn w_saturation() { saturation(FB, f32_from(1.5)); return 0; }
+fn w_grayscale() { grayscale(FB); return 0; }
+fn w_invert() { invert(FB); return 0; }
+fn w_levels() { levels(FB, f32_from(0.1), f32_from(0.9), f32_from(1.2)); return 0; }
+fn w_curves() { curves(FB, F_LUT); return 0; }
+fn w_gaussian() { pixel_buffer_free(gaussian_blur(FV_RO, 3, err)); return 0; }
+fn w_box() { pixel_buffer_free(box_blur(FV_RO, 3, err)); return 0; }
+fn w_unsharp() { pixel_buffer_free(unsharp_mask(FV_RO, 2, f32_from(1.0), err)); return 0; }
+fn w_hue_shift() { hue_shift(FV, f32_from(30.0)); return 0; }
+fn w_color_balance() { color_balance(FV, F_SH, F_MID, F_HI); return 0; }
+fn w_vignette() { vignette(FB, f32_from(0.5)); return 0; }
+fn w_lut3d() { apply_lut3d(FV, F_L3D); return 0; }
+fn w_noise_gaussian() { noise_gaussian(FB, f32_from(0.1), 42); return 0; }
+fn w_salt_pepper() { noise_salt_pepper(FB, f32_from(0.05), 42); return 0; }
+fn w_median1() { pixel_buffer_free(median(F512, 1, err)); return 0; }
+fn w_median5() { pixel_buffer_free(median(F512, 5, err)); return 0; }
+fn w_bilateral() { pixel_buffer_free(bilateral(F256, 2, f32_from(10.0), f32_from(30.0), err)); return 0; }
+fn w_vibrance() { vibrance(FV, f32_from(0.5)); return 0; }
+fn w_channel_mixer() { channel_mixer(FV, F_MIX); return 0; }
+fn w_threshold() { threshold(FV, 128); return 0; }
+fn w_flood_fill() {
+    # Rust resets the frame inside the timed closure, so the reset is timed here too.
+    bv_fill(pixel_buffer_bv(FB), 128);
+    flood_fill(FB, 0, 0, F_FILL, 10);
+    return 0;
+}
+fn w_awb() { auto_white_balance(FV); return 0; }
+
+fn f32s(p, i, v) { store32(p + i * 4, f32_from(v)); return 0; }
+
+fn benches_filter() {
+    FB = mk_uniform(W, H, PF_RGBA8, 128);
+    FV = mk_varied(W, H);
+    FV_RO = mk_varied(W, H);
+    F512 = mk_uniform(512, 512, PF_RGBA8, 128);
+    F256 = mk_uniform(256, 256, PF_RGBA8, 128);
+
+    # lut[i] = (255 * (i / 255)^0.8) as u8. Rust computes it in f32; the table only
+    # has to be a plausible curve here, since curves() is a lookup either way.
+    F_LUT = fl_alloc(256);
+    var i = 0;
+    while (i < 256) {
+        store8(F_LUT + i, f64_to(f64_mul(255.0, f64_pow(f64_div(f64_from(i), 255.0), 0.8))));
+        i = i + 1;
+    }
+    F_SH = fl_alloc(12); f32s(F_SH, 0, 0.0); f32s(F_SH, 1, 0.0); f32s(F_SH, 2, 0.05);
+    F_MID = fl_alloc(12); f32s(F_MID, 0, 0.05); f32s(F_MID, 1, 0.0); f32s(F_MID, 2, f64_neg(0.05));
+    F_HI = fl_alloc(12); f32s(F_HI, 0, 0.0); f32s(F_HI, 1, 0.0); f32s(F_HI, 2, 0.0);
+    F_MIX = fl_alloc(36);
+    f32s(F_MIX, 0, 0.8); f32s(F_MIX, 1, 0.1); f32s(F_MIX, 2, 0.1);
+    f32s(F_MIX, 3, 0.1); f32s(F_MIX, 4, 0.8); f32s(F_MIX, 5, 0.1);
+    f32s(F_MIX, 6, 0.1); f32s(F_MIX, 7, 0.1); f32s(F_MIX, 8, 0.8);
+    F_FILL = rgba(255, 0, 0, 255);
+
+    # The 17-point identity cube Rust parses from text: entry (r, g, b) is
+    # (r / 16, g / 16, b / 16) in f32.
+    F_L3D = lut3d_new(17);
+    var lb = 0;
+    while (lb < 17) {
+        var lg = 0;
+        while (lg < 17) {
+            var lr = 0;
+            while (lr < 17) {
+                var rf: f32 = f32_from(lr) / f32_from(16.0);
+                var gf: f32 = f32_from(lg) / f32_from(16.0);
+                var bf: f32 = f32_from(lb) / f32_from(16.0);
+                lut3d_set(F_L3D, lr, lg, lb, 0, rf);
+                lut3d_set(F_L3D, lr, lg, lb, 1, gf);
+                lut3d_set(F_L3D, lr, lg, lb, 2, bf);
+                lr = lr + 1;
+            }
+            lg = lg + 1;
+        }
+        lb = lb + 1;
+    }
+
+    frame("brightness_1080p", 200, &w_brightness);
+    frame("contrast_1080p", 20, &w_contrast);
+    frame("saturation_1080p", 20, &w_saturation);
+    frame("grayscale_1080p", 50, &w_grayscale);
+    frame("invert_1080p", 100, &w_invert);
+    frame("levels_1080p", 50, &w_levels);
+    frame("curves_1080p", 50, &w_curves);
+    frame("gaussian_blur_r3_1080p", 5, &w_gaussian);
+    frame("box_blur_r3_1080p", 5, &w_box);
+    frame("unsharp_mask_r2_1080p", 3, &w_unsharp);
+    frame("hue_shift_1080p", 3, &w_hue_shift);
+    frame("color_balance_1080p", 10, &w_color_balance);
+    frame("vignette_1080p", 10, &w_vignette);
+    frame("lut3d_17cube_1080p", 3, &w_lut3d);
+    frame("noise_gaussian_1080p", 3, &w_noise_gaussian);
+    frame("noise_salt_pepper_1080p", 20, &w_salt_pepper);
+    frame("median_r1_512x512", 5, &w_median1);
+    frame("median_r5_512x512", 5, &w_median5);
+    frame("bilateral_r2_256x256", 10, &w_bilateral);
+    frame("vibrance_1080p", 10, &w_vibrance);
+    frame("channel_mixer_1080p", 20, &w_channel_mixer);
+    frame("threshold_1080p", 50, &w_threshold);
+    frame("flood_fill_1080p_uniform", 5, &w_flood_fill);
+    frame("auto_white_balance_1080p", 20, &w_awb);
+    return 0;
+}
+
+# ================================================================
+# histogram.rs
+# ================================================================
+var HG_BUF = 0;
+var HG_OUT = 0;
+
+fn w_luminance_histogram() { hist_free(luminance_histogram(HG_BUF, 256, err)); return 0; }
+fn w_rgb_histograms() {
+    var rc = rgb_histograms(HG_BUF, HG_OUT);
+    hist_free(load64(HG_OUT)); hist_free(load64(HG_OUT + 8)); hist_free(load64(HG_OUT + 16));
+    return rc;
+}
+fn w_equalize() { equalize(HG_BUF); return 0; }
+fn w_auto_levels() { auto_levels(HG_BUF); return 0; }
+
+fn benches_histogram() {
+    HG_BUF = mk_varied(W, H);
+    HG_OUT = fl_alloc(24);
+    frame("luminance_histogram_1080p", 50, &w_luminance_histogram);
+    frame("rgb_histograms_1080p", 50, &w_rgb_histograms);
+    frame("equalize_1080p", 10, &w_equalize);
+    frame("auto_levels_1080p", 10, &w_auto_levels);
+
+    # a[i] = (i / 255)^2, b[i] = (1 - i / 255)^2.
+    var ha = hist_new(256);
+    var hb = hist_new(256);
+    var i = 0;
+    while (i < 256) {
+        var t = f64_div(f64_from(i), 255.0);
+        var u = f64_sub(1.0, t);
+        hist_set(ha, i, f64_mul(t, t));
+        hist_set(hb, i, f64_mul(u, u));
+        i = i + 1;
+    }
+    var acc = 0;
+    var bn = bench_new("chi_squared_256bins");
+    bench_batch_start(bn);
+    i = 0;
+    while (i < 100000) { acc = acc + chi_squared(ha, hb, err); i = i + 1; }
+    bench_batch_stop(bn, 100000);
+    bench_report(bn);
+    hist_free(ha); hist_free(hb);
+    return acc;
+}
+
+# ================================================================
+# icc.rs
+# ================================================================
+fn bench_icc_apply(name, prof, r, g, b, out) {
+    var bn = bench_new(name);
+    bench_batch_start(bn);
+    var i = 0;
+    while (i < 1000000) { icc_profile_apply(prof, r, g, b, out); i = i + 1; }
+    bench_batch_stop(bn, 1000000);
+    bench_report(bn);
+    return 0;
+}
+
+fn benches_icc() {
+    var lenp = fl_alloc(8);
+    var bn = bench_new("srgb_v2_profile_generation");
+    bench_batch_start(bn);
+    var i = 0;
+    while (i < 200000) { bv_free(srgb_v2_profile(lenp)); i = i + 1; }
+    bench_batch_stop(bn, 200000);
+    bench_report(bn);
+
+    var bytes = srgb_v2_profile(lenp);
+    var plen = load64(lenp);
+    bn = bench_new("icc_from_bytes_srgb_v2");
+    bench_batch_start(bn);
+    i = 0;
+    while (i < 200000) { icc_profile_free(icc_profile_from_bytes(bv_data(bytes), plen, err)); i = i + 1; }
+    bench_batch_stop(bn, 200000);
+    bench_report(bn);
+
+    var prof = icc_profile_from_bytes(bv_data(bytes), plen, err);
+    var xyz = fl_alloc(24);
+    bench_icc_apply("icc_apply_mid_gray", prof, 0.5, 0.5, 0.5, xyz);
+    bench_icc_apply("icc_apply_white", prof, 1.0, 1.0, 1.0, xyz);
+    bench_icc_apply("icc_apply_black", prof, 0.0, 0.0, 0.0, xyz);
+    bench_icc_apply("icc_apply_saturated_red", prof, 1.0, 0.0, 0.0, xyz);
+    icc_profile_free(prof);
+    bv_free(bytes);
+
+    var acc = 0;
+    var tg = tone_curve_gamma(2.2);
+    bn = bench_new("tone_curve_gamma_2_2");
+    bench_batch_start(bn);
+    i = 0;
+    while (i < 1000000) { acc = acc + tone_curve_apply(tg, 0.5); i = i + 1; }
+    bench_batch_stop(bn, 1000000);
+    bench_report(bn);
+    tone_curve_free(tg);
+
+    # (i / 255)^2.2 for i in 0..256; tone_curve_table takes ownership.
+    var tab = fl_alloc(256 * 8);
+    i = 0;
+    while (i < 256) { store64(tab + i * 8, f64_pow(f64_div(f64_from(i), 255.0), 2.2)); i = i + 1; }
+    var tt = tone_curve_table(tab, 256);
+    bn = bench_new("tone_curve_table_256");
+    bench_batch_start(bn);
+    i = 0;
+    while (i < 1000000) { acc = acc + tone_curve_apply(tt, 0.5); i = i + 1; }
+    bench_batch_stop(bn, 1000000);
+    bench_report(bn);
+    tone_curve_free(tt);
+    return acc;
+}
+
+# ================================================================
+# transform.rs
+# ================================================================
+var TR_BUF = 0;
+var TR_512 = 0;
+var TR_ROT = 0;
+var TR_PID = 0;
+
+fn w_crop() { pixel_buffer_free(crop(TR_BUF, 240, 180, 1520, 900, err)); return 0; }
+fn w_resize_nearest() { pixel_buffer_free(resize(TR_BUF, 1280, 720, SF_NEAREST, err)); return 0; }
+fn w_resize_bilinear() { pixel_buffer_free(resize(TR_BUF, 1280, 720, SF_BILINEAR, err)); return 0; }
+fn w_flip_h() { pixel_buffer_free(flip_horizontal(TR_BUF, err)); return 0; }
+fn w_flip_v() { pixel_buffer_free(flip_vertical(TR_BUF, err)); return 0; }
+fn w_affine_rotate() { pixel_buffer_free(affine_transform(TR_512, TR_ROT, 512, 512, SF_BILINEAR, err)); return 0; }
+fn w_resize_bicubic() { pixel_buffer_free(resize(TR_BUF, 1280, 720, SF_BICUBIC, err)); return 0; }
+fn w_perspective() {
+    pixel_buffer_free(perspective_transform(TR_512, TR_PID, 512, 512, SF_BILINEAR, err));
+    return 0;
+}
+
+fn benches_transform() {
+    TR_BUF = mk_uniform(W, H, PF_RGBA8, 128);
+    TR_512 = mk_uniform(512, 512, PF_RGBA8, 128);
+    TR_ROT = affine_rotate(0.1);
+    TR_PID = perspective_identity();
+    frame("crop_1080p_to_720p", 200, &w_crop);
+    frame("resize_nearest_1080p_to_720p", 50, &w_resize_nearest);
+    frame("resize_bilinear_1080p_to_720p", 5, &w_resize_bilinear);
+    frame("flip_horizontal_1080p", 50, &w_flip_h);
+    frame("flip_vertical_1080p", 100, &w_flip_v);
+    frame("affine_rotate_512x512", 10, &w_affine_rotate);
+    frame("resize_bicubic_1080p_to_720p", 2, &w_resize_bicubic);
+    frame("perspective_identity_512x512", 10, &w_perspective);
+    return 0;
 }
 
 fn main(): i64 {
     alloc_init();
-    var err = fl_alloc(8);
-
-    # ── per-pixel primitives (batched) ──
-    var sp = fl_alloc(4);
-    var dp = fl_alloc(4);
-    var op = fl_alloc(4);
-    store8(sp, 200); store8(sp + 1, 100); store8(sp + 2, 50); store8(sp + 3, 255);
-    store8(dp, 10); store8(dp + 1, 20); store8(dp + 2, 30); store8(dp + 3, 255);
-
-    var b1 = bench_new("blend_pixel_normal");
-    bench_batch_start(b1);
-    var i = 0;
-    while (i < 1000000) { blend_pixel(sp, dp, BM_NORMAL, 255, op); i = i + 1; }
-    bench_batch_stop(b1, 1000000);
-    bench_report(b1);
-
-    var b2 = bench_new("blend_pixel_modes/Multiply");
-    bench_batch_start(b2);
-    i = 0;
-    while (i < 1000000) { blend_pixel(sp, dp, BM_MULTIPLY, 255, op); i = i + 1; }
-    bench_batch_stop(b2, 1000000);
-    bench_report(b2);
-
-    var b3 = bench_new("blend_pixel_modes/SoftLight");
-    bench_batch_start(b3);
-    i = 0;
-    while (i < 500000) { blend_pixel(sp, dp, BM_SOFT_LIGHT, 255, op); i = i + 1; }
-    bench_batch_stop(b3, 500000);
-    bench_report(b3);
-
-    var b4 = bench_new("blend_pixel_argb_normal");
-    bench_batch_start(b4);
-    i = 0;
-    while (i < 500000) { blend_pixel_argb(sp, dp, BM_NORMAL, 255, op); i = i + 1; }
-    bench_batch_stop(b4, 500000);
-    bench_report(b4);
-
-    # ── colour science (batched) ──
-    var la = cie_lab_new(50.0, 2.6772, f64_neg(79.7751));
-    var lb = cie_lab_new(50.0, 0, f64_neg(82.7485));
-
-    var b5 = bench_new("delta_e_cie76");
-    bench_batch_start(b5);
-    i = 0;
-    var acc = 0;
-    while (i < 1000000) { acc = acc + delta_e_cie76(la, lb); i = i + 1; }
-    bench_batch_stop(b5, 1000000);
-    bench_report(b5);
-
-    var b6 = bench_new("delta_e_cie94");
-    bench_batch_start(b6);
-    i = 0;
-    while (i < 500000) { acc = acc + delta_e_cie94(la, lb); i = i + 1; }
-    bench_batch_stop(b6, 500000);
-    bench_report(b6);
-
-    var b7 = bench_new("delta_e_ciede2000");
-    bench_batch_start(b7);
-    i = 0;
-    while (i < 200000) { acc = acc + delta_e_ciede2000(la, lb); i = i + 1; }
-    bench_batch_stop(b7, 200000);
-    bench_report(b7);
-
-    # ── row-level blend ──
-    var rowsrc = fl_alloc(W * 4);
-    var rowdst = fl_alloc(W * 4);
-    i = 0;
-    while (i < W * 4) { store8(rowsrc + i, i & 255); store8(rowdst + i, 255 - (i & 255)); i = i + 1; }
-
-    var b8 = bench_new("blend_row_1920px");
-    bench_batch_start(b8);
-    i = 0;
-    while (i < 2000) { blend_row_normal(rowsrc, rowdst, W, 255); i = i + 1; }
-    bench_batch_stop(b8, 2000);
-    bench_report(b8);
-
-    var b9 = bench_new("blend_row_argb_1920px");
-    bench_batch_start(b9);
-    i = 0;
-    while (i < 2000) { blend_row_normal_argb(rowsrc, rowdst, W, 255); i = i + 1; }
-    bench_batch_stop(b9, 2000);
-    bench_report(b9);
-
-    # ── full-frame point filters ──
-    var frame = mkframe(W, H, PF_RGBA8, err);
-
-    var c1 = bench_new("brightness_1080p");
-    bench_batch_start(c1);
-    i = 0;
-    while (i < 20) { brightness(frame, f32_from(0.1)); i = i + 1; }
-    bench_batch_stop(c1, 20);
-    bench_report(c1);
-
-    var c2 = bench_new("grayscale_1080p");
-    bench_batch_start(c2);
-    i = 0;
-    while (i < 20) { grayscale(frame); i = i + 1; }
-    bench_batch_stop(c2, 20);
-    bench_report(c2);
-
-    var c3 = bench_new("invert_1080p");
-    bench_batch_start(c3);
-    i = 0;
-    while (i < 20) { invert(frame); i = i + 1; }
-    bench_batch_stop(c3, 20);
-    bench_report(c3);
-
-    var c4 = bench_new("contrast_1080p");
-    bench_batch_start(c4);
-    i = 0;
-    while (i < 5) { contrast(frame, f32_from(1.2)); i = i + 1; }
-    bench_batch_stop(c4, 5);
-    bench_report(c4);
-
-    var c5 = bench_new("saturation_1080p");
-    bench_batch_start(c5);
-    i = 0;
-    while (i < 5) { saturation(frame, f32_from(1.2)); i = i + 1; }
-    bench_batch_stop(c5, 5);
-    bench_report(c5);
-
-    var c6 = bench_new("threshold_1080p");
-    bench_batch_start(c6);
-    i = 0;
-    while (i < 20) { threshold(frame, 128); i = i + 1; }
-    bench_batch_stop(c6, 20);
-    bench_report(c6);
-
-    # ── transforms ──
-    var t1 = bench_new("flip_horizontal_1080p");
-    bench_batch_start(t1);
-    i = 0;
-    while (i < 10) {
-        var f1 = flip_horizontal(frame, err);
-        pixel_buffer_free(f1);
-        i = i + 1;
-    }
-    bench_batch_stop(t1, 10);
-    bench_report(t1);
-
-    var t2 = bench_new("flip_vertical_1080p");
-    bench_batch_start(t2);
-    i = 0;
-    while (i < 10) {
-        var f2 = flip_vertical(frame, err);
-        pixel_buffer_free(f2);
-        i = i + 1;
-    }
-    bench_batch_stop(t2, 10);
-    bench_report(t2);
-
-    var t3 = bench_new("crop_1080p_to_720p");
-    bench_batch_start(t3);
-    i = 0;
-    while (i < 20) {
-        var f3 = crop(frame, 0, 0, 1280, 720, err);
-        pixel_buffer_free(f3);
-        i = i + 1;
-    }
-    bench_batch_stop(t3, 20);
-    bench_report(t3);
-
-    var t4 = bench_new("resize_bilinear_1080p_to_720p");
-    bench_batch_start(t4);
-    i = 0;
-    while (i < 3) {
-        var f4 = resize(frame, 1280, 720, SF_BILINEAR, err);
-        pixel_buffer_free(f4);
-        i = i + 1;
-    }
-    bench_batch_stop(t4, 3);
-    bench_report(t4);
-
-    var t5 = bench_new("resize_nearest_1080p_to_720p");
-    bench_batch_start(t5);
-    i = 0;
-    while (i < 10) {
-        var f5 = resize(frame, 1280, 720, SF_NEAREST, err);
-        pixel_buffer_free(f5);
-        i = i + 1;
-    }
-    bench_batch_stop(t5, 10);
-    bench_report(t5);
-
-    # ── convert ──
-    var v1 = bench_new("rgba_to_yuv420p_1080p");
-    bench_batch_start(v1);
-    i = 0;
-    while (i < 5) {
-        var y1 = rgba_to_yuv420p(frame, err);
-        pixel_buffer_free(y1);
-        i = i + 1;
-    }
-    bench_batch_stop(v1, 5);
-    bench_report(v1);
-
-    var yuvframe = rgba_to_yuv420p(frame, err);
-    var v2 = bench_new("yuv420p_to_rgba_bt601_1080p");
-    bench_batch_start(v2);
-    i = 0;
-    while (i < 5) {
-        var r2 = yuv420p_to_rgba(yuvframe, err);
-        pixel_buffer_free(r2);
-        i = i + 1;
-    }
-    bench_batch_stop(v2, 5);
-    bench_report(v2);
-
-    var v3 = bench_new("rgba8_to_argb8_1080p");
-    bench_batch_start(v3);
-    i = 0;
-    while (i < 20) {
-        var a3 = rgba8_to_argb8(frame, err);
-        pixel_buffer_free(a3);
-        i = i + 1;
-    }
-    bench_batch_stop(v3, 20);
-    bench_report(v3);
-
-    # ── composite ──
-    var dstframe = mkframe(W, H, PF_RGBA8, err);
-    var p1 = bench_new("premultiply_alpha_1080p");
-    bench_batch_start(p1);
-    i = 0;
-    while (i < 20) { premultiply_alpha(dstframe); i = i + 1; }
-    bench_batch_stop(p1, 20);
-    bench_report(p1);
-
-    var p2 = bench_new("fill_solid_1080p");
-    var solid = fl_alloc(4);
-    store8(solid, 10); store8(solid + 1, 20); store8(solid + 2, 30); store8(solid + 3, 255);
-    bench_batch_start(p2);
-    i = 0;
-    while (i < 50) { fill_solid(dstframe, solid); i = i + 1; }
-    bench_batch_stop(p2, 50);
-    bench_report(p2);
-
-    var p3 = bench_new("composite_at_1080p");
-    bench_batch_start(p3);
-    i = 0;
-    while (i < 10) { composite_at(frame, dstframe, 0, 0, f32_from(0.5)); i = i + 1; }
-    bench_batch_stop(p3, 10);
-    bench_report(p3);
-
-    # ── histogram ──
-    var h1 = bench_new("luminance_histogram_1080p");
-    bench_batch_start(h1);
-    i = 0;
-    while (i < 10) {
-        var hh = luminance_histogram(frame, 256, err);
-        hist_free(hh);
-        i = i + 1;
-    }
-    bench_batch_stop(h1, 10);
-    bench_report(h1);
-
-    var h2 = bench_new("equalize_1080p");
-    bench_batch_start(h2);
-    i = 0;
-    while (i < 3) { equalize(dstframe); i = i + 1; }
-    bench_batch_stop(h2, 3);
-    bench_report(h2);
-
-    var h3 = bench_new("auto_levels_1080p");
-    bench_batch_start(h3);
-    i = 0;
-    while (i < 3) { auto_levels(dstframe); i = i + 1; }
-    bench_batch_stop(h3, 3);
-    bench_report(h3);
-
-    # ── kernel filters (slowest — small iteration counts) ──
-    var small = mkframe(512, 512, PF_RGBA8, err);
-
-    var k1 = bench_new("box_blur_r3_1080p");
-    bench_batch_start(k1);
-    var kb = box_blur(frame, 3, err);
-    pixel_buffer_free(kb);
-    bench_batch_stop(k1, 1);
-    bench_report(k1);
-
-    var k2 = bench_new("gaussian_blur_r3_1080p");
-    bench_batch_start(k2);
-    var kg = gaussian_blur(frame, 3, err);
-    pixel_buffer_free(kg);
-    bench_batch_stop(k2, 1);
-    bench_report(k2);
-
-    var k3 = bench_new("median_r1_512x512");
-    bench_batch_start(k3);
-    var km = median(small, 1, err);
-    pixel_buffer_free(km);
-    bench_batch_stop(k3, 1);
-    bench_report(k3);
-
-    var k4 = bench_new("bilateral_r2_256x256");
-    var tiny = mkframe(256, 256, PF_RGBA8, err);
-    bench_batch_start(k4);
-    var kbl = bilateral(tiny, 2, f32_from(10.0), f32_from(30.0), err);
-    pixel_buffer_free(kbl);
-    bench_batch_stop(k4, 1);
-    bench_report(k4);
-
-    var k5 = bench_new("vignette_1080p");
-    bench_batch_start(k5);
-    i = 0;
-    while (i < 3) { vignette(dstframe, f32_from(0.5)); i = i + 1; }
-    bench_batch_stop(k5, 3);
-    bench_report(k5);
-
-    var k6 = bench_new("noise_gaussian_1080p");
-    bench_batch_start(k6);
-    noise_gaussian(dstframe, f32_from(0.1), 42);
-    bench_batch_stop(k6, 1);
-    bench_report(k6);
-
+    err = fl_alloc(8);
+    benches_blend();
+    benches_convert();
+    benches_color_science();
+    benches_composite();
+    benches_filter();
+    benches_histogram();
+    benches_icc();
+    benches_transform();
     return 0;
 }
 

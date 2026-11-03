@@ -11,7 +11,7 @@ use ranga::color::*;
 use ranga::convert;
 use ranga::filter;
 use ranga::pixel::{PixelBuffer, PixelFormat};
-use ranga::transform::{self, Affine, ScaleFilter};
+use ranga::transform::{self, Affine, Perspective, ScaleFilter};
 use ranga::RangaError;
 use std::io::{BufWriter, Write};
 
@@ -327,6 +327,71 @@ fn main() {
         ];
         for (k, a) in cases {
             o.line("affine_is_identity", k, "u8", &format!("{:02x}", a.is_identity() as u8));
+        }
+    }
+    if want("resize") {
+        let img = rand_img(0x5151_7373_0000_0001, 23, 17);
+        let tiny = rgba(1, 1, vec![10, 20, 30, 40]);
+        let sizes = [(1u32, 1u32), (2, 2), (5, 3), (11, 8), (23, 17), (46, 34), (60, 9), (7, 40)];
+        for (si, (nw, nh)) in sizes.iter().enumerate() {
+            for (fi, fl) in [ScaleFilter::Nearest, ScaleFilter::Bilinear, ScaleFilter::Bicubic].iter().enumerate() {
+                for (iname, im) in [("img", &img), ("1x1", &tiny)] {
+                    let key = format!("{iname}.{si}.{fi}");
+                    let r = transform::resize(im, *nw, *nh, *fl);
+                    o.code("resize.code", &key, &r);
+                    if let Ok(out) = r { o.u8s("resize", &key, out.data()); }
+                }
+            }
+        }
+    }
+    if want("perspective") {
+        let sq = [(0.0, 0.0), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0)];
+        let quads = [
+            sq,
+            [(2.0, 1.0), (18.0, 3.0), (19.0, 19.0), (1.0, 17.0)],
+            [(0.0, 0.0), (20.0, 5.0), (15.0, 25.0), (-5.0, 20.0)],
+            [(0.0, 0.0), (10.0, 10.0), (20.0, 20.0), (30.0, 30.0)],
+        ];
+        let img = grad_img();
+        for (qi, q) in quads.iter().enumerate() {
+            match Perspective::from_quad(sq, *q) {
+                None => o.line("perspective.m", &qi.to_string(), "x", "none"),
+                Some(p) => {
+                    for r in 0..3 { for c in 0..3 { o.f64("perspective.m", &format!("{qi}.{r}{c}"), p.m[r][c]); } }
+                    match p.inverse() {
+                        None => o.line("perspective.inv", &qi.to_string(), "x", "none"),
+                        Some(iv) => {
+                            for r in 0..3 { for c in 0..3 { o.f64("perspective.inv", &format!("{qi}.{r}{c}"), iv.m[r][c]); } }
+                        }
+                    }
+                    for (fi, fl) in [ScaleFilter::Nearest, ScaleFilter::Bilinear, ScaleFilter::Bicubic].iter().enumerate() {
+                        let key = format!("{qi}.{fi}");
+                        let res = transform::perspective_transform(&img, &p, 24, 24, *fl);
+                        o.code("perspective.code", &key, &res);
+                        if let Ok(out) = res { o.u8s("perspective", &key, out.data()); }
+                    }
+                }
+            }
+        }
+    }
+    if want("yuv_fwd") {
+        for (si, (w, h)) in [(1u32, 1u32), (2, 2), (3, 3), (5, 7), (16, 9), (37, 23)].iter().enumerate() {
+            let img = rand_img(0x7777_0000 + si as u64, *w, *h);
+            let k = si.to_string();
+            o.u8s("yuv_fwd.601", &k, convert::rgba_to_yuv420p(&img).unwrap().data());
+            o.u8s("yuv_fwd.709", &k, convert::rgba_to_yuv420p_bt709(&img).unwrap().data());
+            o.u8s("yuv_fwd.2020", &k, convert::rgba_to_yuv420p_bt2020(&img).unwrap().data());
+            let mut rn = Rng(0x8888_0000 + si as u64);
+            let argb_d: Vec<u8> = (0..w * h * 4).map(|_| rn.byte()).collect();
+            let argb = PixelBuffer::new(argb_d, *w, *h, PixelFormat::Argb8).unwrap();
+            o.u8s("yuv_fwd.nv12", &k, convert::argb_to_nv12(&argb).unwrap().data());
+            o.u8s("repack.argb_to_rgba", &k, convert::argb8_to_rgba8(&argb).unwrap().data());
+            o.u8s("repack.rgba_to_argb", &k, convert::rgba8_to_argb8(&img).unwrap().data());
+            o.u8s("repack.rgba_to_rgb", &k, convert::rgba8_to_rgb8(&img).unwrap().data());
+            o.u8s("repack.rgba_to_f32", &k, convert::rgba8_to_rgbaf32(&img).unwrap().data());
+            let rgb_d: Vec<u8> = (0..w * h * 3).map(|_| rn.byte()).collect();
+            let rgb = PixelBuffer::new(rgb_d, *w, *h, PixelFormat::Rgb8).unwrap();
+            o.u8s("repack.rgb_to_rgba", &k, convert::rgb8_to_rgba8(&rgb).unwrap().data());
         }
     }
     if want("blend") {

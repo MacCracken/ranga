@@ -15,6 +15,7 @@ include "src/bytevec.cyr"
 include "src/pixel.cyr"
 include "src/gpu_context.cyr"
 include "src/gpu_buffer.cyr"
+include "tests/gpu_hw.cyr"
 
 alloc_init();
 
@@ -200,12 +201,16 @@ spv_free(s2);
 # ================================================================
 test_group("spirv on hardware");
 
+# HW_N: the assertions below that need a GPU context (tests/gpu_hw.cyr).
+var HW_N = 8;
 var ctx = gpu_context_new_amd(err);
 if (ctx == 0) {
     assert_eq(load64(err) < 0, 1, "with no GPU, context creation reports an error");
+    gpu_hw_skipped(HW_N);
 }
 
 if (ctx != 0) {
+    var hw_from = _assert_total;
     var m = gpu_context_mabda(ctx);
     var s3 = spv_new();
     build_invert(s3);
@@ -258,6 +263,7 @@ if (ctx != 0) {
     }
     spv_free(s3);
     gpu_context_free(ctx);
+    gpu_hw_check(hw_from, HW_N);
 }
 
 var exit_code = assert_summary();

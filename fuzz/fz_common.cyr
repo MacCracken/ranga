@@ -1,0 +1,174 @@
+# fz_common.cyr -- shared helpers for ranga's fuzz harnesses (fuzz/*.fcyr).
+#
+# Each harness runs N iterations (argument 1, default per harness) from a base seed
+# (argument 2, default fixed). Every iteration is seeded on its own, and a failure
+# prints the iteration's seed, so `./harness 1 <seed>` replays exactly that case.
+# `cyrius fuzz` runs every fuzz/*.fcyr with no arguments. `--poison` adds allocator
+# redzones, which turn an out-of-bounds write into a reported failure instead of
+# silent corruption.
+#
+# The Rust 1.0.1 targets (rust-old/fuzz/fuzz_targets) only checked "does not
+# crash". These harnesses also check invariants that Rust's own definitions
+# imply, and say which in each file's header.
+
+var _fz_state = 1;
+var _fz_seed = 1;
+var _fz_name = "fuzz";
+var _fz_iter = 0;
+
+fn fz_rand() {
+    _fz_state = _fz_state ^ (_fz_state << 13);
+    _fz_state = _fz_state ^ (_fz_state >> 7);
+    _fz_state = _fz_state ^ (_fz_state << 17);
+    return _fz_state;
+}
+# Uniform in [0, m), m > 0.
+fn fz_u(m) { return (fz_rand() >> 1) % m; }
+fn fz_byte() { return fz_rand() >> 56; }
+# An f32 in [0, 1): 24 random bits over 2^24, exact.
+fn fz_unit() { return f32_from(f64_div(f64_from(fz_rand() >> 40), 16777216.0)); }
+
+# An f32 drawn to hit the cases that break float code: NaN, both infinities, both
+# zeros, huge and tiny magnitudes, values near the ends of [0, 1], and raw bit
+# patterns.
+fn fz_f32_any() {
+    var k = fz_u(12);
+    if (k == 0) { return 0x7FC00000; }
+    if (k == 1) { return 0x7F800000; }
+    if (k == 2) { return 0xFF800000; }
+    if (k == 3) { return 0x80000000; }
+    if (k == 4) { return 0; }
+    if (k == 5) { return 0x7F7FFFFF; }
+    if (k == 6) { return 0x00000001; }
+    if (k == 7) { return 0x3F7FFFFF; }
+    if (k == 8) { return fz_rand() & 0xFFFFFFFF; }
+    if (k == 9) { return f32_from(f64_sub(f64_mul(f64_from(fz_u(2001)), 0.01), 10.0)); }
+    return fz_unit();
+}
+
+fn _fz_puts(s) { print(s, strlen(s)); return 0; }
+
+fn fz_fail(msg) {
+    _fz_puts("FAIL ");
+    _fz_puts(_fz_name);
+    _fz_puts(": ");
+    _fz_puts(msg);
+    _fz_puts("  (iteration ");
+    print_num(_fz_iter);
+    _fz_puts(", replay: ");
+    _fz_puts(_fz_name);
+    _fz_puts(" 1 ");
+    print_num(_fz_seed);
+    println(")");
+    sys_exit(1);
+    return 0;
+}
+
+fn fz_check(cond, msg) {
+    if (cond == 0) { fz_fail(msg); }
+    return 0;
+}
+
+# A non-negative decimal argument. A malformed one exits 2 rather than running
+# zero iterations and reporting a pass.
+fn _fz_arg(i, dflt) {
+    if (argc() <= i) { return dflt; }
+    var a = argv(i);
+    var v = 0;
+    var j = 0;
+    while (load8(a + j) != 0) {
+        var d = load8(a + j);
+        if (d < 48 || d > 57 || j >= 18) {
+            println("usage: <harness> [iterations] [seed]");
+            sys_exit(2);
+        }
+        v = v * 10 + d - 48;
+        j = j + 1;
+    }
+    if (j == 0) { println("usage: <harness> [iterations] [seed]"); sys_exit(2); }
+    return v;
+}
+
+# Runs `body(iteration)` for each iteration, seeding each one. Returns 0.
+fn fz_run(name, default_iters, body) {
+    alloc_init();
+    args_init();
+    _fz_name = name;
+    var iters = _fz_arg(1, default_iters);
+    if (iters <= 0) { println("usage: <harness> [iterations >= 1] [seed]"); sys_exit(2); }
+    var base = _fz_arg(2, 0x5EEDF00D);
+    var i = 0;
+    while (i < iters) {
+        _fz_iter = i;
+        _fz_seed = base + i * 7919;
+        _fz_state = _fz_seed | 1;
+        fncall1(body, i);
+        i = i + 1;
+    }
+    print_num(iters);
+    _fz_puts(" ");
+    _fz_puts(name);
+    println(" iterations passed");
+    return 0;
+}
+
+# ── images ────────
+fn fz_rgba(w, h) {
+    var err = fl_alloc(8);
+    var b = pixel_buffer_zeroed(w, h, PF_RGBA8, err);
+    fl_free(err);
+    if (b == 0) { fz_fail("could not allocate a test image"); }
+    var d = pixel_buffer_data(b);
+    var n = w * h * 4;
+    var i = 0;
+    while (i < n) { store8(d + i, fz_byte()); i = i + 1; }
+    return b;
+}
+
+fn fz_rgba_fill(w, h, r, g, bl, a) {
+    var b = fz_rgba(w, h);
+    var d = pixel_buffer_data(b);
+    var i = 0;
+    while (i < w * h) {
+        store8(d + i * 4, r); store8(d + i * 4 + 1, g);
+        store8(d + i * 4 + 2, bl); store8(d + i * 4 + 3, a);
+        i = i + 1;
+    }
+    return b;
+}
+
+# 1 if both buffers have the same dimensions, format and bytes.
+fn fz_same(a, b) {
+    if (pixel_buffer_width(a) != pixel_buffer_width(b)) { return 0; }
+    if (pixel_buffer_height(a) != pixel_buffer_height(b)) { return 0; }
+    if (pixel_buffer_format(a) != pixel_buffer_format(b)) { return 0; }
+    var n = pixel_buffer_len(a);
+    if (n != pixel_buffer_len(b)) { return 0; }
+    var pa = pixel_buffer_data(a);
+    var pb = pixel_buffer_data(b);
+    var i = 0;
+    while (i < n) {
+        if (load8(pa + i) != load8(pb + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# 1 if every pixel's alpha matches between two same-sized RGBA8 buffers.
+fn fz_same_alpha(a, b) {
+    var n = pixel_buffer_width(a) * pixel_buffer_height(a);
+    var pa = pixel_buffer_data(a);
+    var pb = pixel_buffer_data(b);
+    var i = 0;
+    while (i < n) {
+        if (load8(pa + i * 4 + 3) != load8(pb + i * 4 + 3)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn fz_dims(b, w, h) {
+    if (pixel_buffer_width(b) != w) { return 0; }
+    if (pixel_buffer_height(b) != h) { return 0; }
+    return 1;
+}

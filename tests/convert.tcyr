@@ -401,6 +401,23 @@ pixel_buffer_free(f32b); pixel_buffer_free(r8); pixel_buffer_free(argb3);
 pixel_buffer_free(rgb); pixel_buffer_free(toRgba); pixel_buffer_free(argb2);
 pixel_buffer_free(greyb); pixel_buffer_free(redb); pixel_buffer_free(rgba);
 pixel_buffer_free(argbb);
+# rgba_to_yuv_white / _black, bt709_white, bt2020_white: Rust's checks through
+# the public API, on a 4 x 4 image. The row-kernel checks above pin the same
+# values one level down; these make sure each public entry point uses its kernel.
+var w44 = mk(4, 4, PF_RGBA8);
+var k44 = mk(4, 4, PF_RGBA8);
+bv_fill(pixel_buffer_bv(w44), 255);
+var yw = rgba_to_yuv420p(w44, err);
+assert_gt(at(yw, 0), 250, "rgba_to_yuv_white: Y > 250");
+var yk = rgba_to_yuv420p(k44, err);
+assert_eq(at(yk, 0), 0, "rgba_to_yuv_black: Y == 0");
+var yw709 = rgba_to_yuv420p_bt709(w44, err);
+assert_gt(at(yw709, 0), 250, "bt709_white: Y > 250");
+var yw2020 = rgba_to_yuv420p_bt2020(w44, err);
+assert_gt(at(yw2020, 0), 250, "bt2020_white: Y > 250");
+pixel_buffer_free(yw2020); pixel_buffer_free(yw709); pixel_buffer_free(yk); pixel_buffer_free(yw);
+pixel_buffer_free(k44); pixel_buffer_free(w44);
+
 fl_free(yrow); fl_free(src4); fl_free(err);
 
 var exit_code = assert_summary();

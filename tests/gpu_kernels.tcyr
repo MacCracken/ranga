@@ -14,6 +14,7 @@ include "src/bytevec.cyr"
 include "src/pixel.cyr"
 include "src/gpu_context.cyr"
 include "src/gpu_buffer.cyr"
+include "tests/gpu_hw.cyr"
 
 alloc_init();
 
@@ -91,14 +92,33 @@ fn check(got, want, name) {
 }
 
 # ================================================================
+test_group("kernels without hardware");
+
+# resize_bilinear's module is well formed and under the id cap; only lowering it
+# needs mabda and a GPU (pinned in the hardware section below).
+var bl = spv_new();
+gk_resize_bilinear(bl);
+var bll = spv_finish(bl, outp);
+var bl_words = load64(outp);
+assert_eq(spirv_validate_stream(bl_words, bll), 0,
+  "resize_bilinear emits a structurally valid SPIR-V module");
+assert_eq(spirv_find_entry_point(bl_words, bll) > 0, 1, "with a findable entry point");
+assert_eq(spirv_hdr_id_bound(bl_words) < 256, 1,
+  "and it is UNDER the 256-id cap, so size is not what stops it");
+
+# ================================================================
 test_group("per-pixel kernels");
 
+# HW_N: the assertions below that need a GPU context (tests/gpu_hw.cyr).
+var HW_N = 49;
 var ctx = gpu_context_new_amd(err);
 if (ctx == 0) {
     assert_eq(load64(err) < 0, 1, "with no GPU, context creation reports an error");
+    gpu_hw_skipped(HW_N);
 }
 
 if (ctx != 0) {
+    var hw_from = _assert_total;
     var m = gpu_context_mabda(ctx);
     var want = fl_alloc(NPX * 4);
 
@@ -465,18 +485,12 @@ if (ctx != 0) {
     #
     # This assertion PINS THE CURRENT STATE so the suite tells us the day mabda
     # can take it, rather than leaving a silently-dead kernel in the tree.
-    var bl = spv_new();
-    gk_resize_bilinear(bl);
-    var bll = spv_finish(bl, outp);
-    assert_eq(spirv_validate_stream(load64(outp), bll), 0,
-      "resize_bilinear emits a structurally valid SPIR-V module");
-    assert_eq(spirv_find_entry_point(load64(outp), bll) > 0, 1, "with a findable entry point");
-    assert_eq(spirv_hdr_id_bound(load64(outp)) < 256, 1,
-      "and it is UNDER the 256-id cap, so size is not what stops it");
-    assert_eq(gpu_shader_module_create_spirv(m, load64(outp), bll), 0,
+    # The module itself is checked without hardware, above the gate.
+    assert_eq(gpu_shader_module_create_spirv(m, bl_words, bll), 0,
       "but mabda cannot yet lower it to GFX9 — flip this when it can; see CHANGELOG 2.0.0");
 
     gpu_context_free(ctx);
+    gpu_hw_check(hw_from, HW_N);
 }
 
 var exit_code = assert_summary();

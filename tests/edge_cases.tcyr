@@ -1,0 +1,324 @@
+# Edge cases, ported one for one from rust-old/tests/edge_cases.rs (30 tests),
+# in its order and under its section headings.
+#
+# The five error Display tests check ranga_error_message's prefix. The port drops
+# error payloads (parity doc, "No payloads"), so the numbers and names Rust
+# formats into the message have nothing to be checked against, and
+# `Other(String)` has no fixed text at all: its test checks the code instead.
+
+include "src/error.cyr"
+include "src/bytevec.cyr"
+include "src/simd_u8.cyr"
+include "src/pixel.cyr"
+include "src/color.cyr"
+include "src/blend.cyr"
+include "src/composite.cyr"
+include "src/convert.cyr"
+include "src/filter_point.cyr"
+include "src/filter_kernel.cyr"
+include "src/histogram.cyr"
+include "src/transform.cyr"
+
+alloc_init();
+var err = fl_alloc(8);
+
+fn absd(a, b) { if (a > b) { return a - b; } return b - a; }
+fn starts_with(s, prefix) {
+    var i = 0;
+    while (load8(prefix + i) != 0) {
+        if (load8(s + i) != load8(prefix + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+# A w x h buffer of `fmt` whose every pixel is the 4 bytes a, b, c, d.
+fn repeat4(w, h, fmt, a, b, c, d) {
+    var buf = pixel_buffer_zeroed(w, h, fmt, err);
+    var p = pixel_buffer_data(buf);
+    var i = 0;
+    while (i < w * h) {
+        store8(p + i * 4, a); store8(p + i * 4 + 1, b);
+        store8(p + i * 4 + 2, c); store8(p + i * 4 + 3, d);
+        i = i + 1;
+    }
+    return buf;
+}
+fn bytes_eq(p, q, n) {
+    var i = 0;
+    while (i < n) {
+        if (load8(p + i) != load8(q + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+fn four(p, a, b, c, d) { store8(p, a); store8(p + 1, b); store8(p + 2, c); store8(p + 3, d); return p; }
+
+# ================================================================
+# 1. Error variant formatting
+# ================================================================
+test_group("1. error variant formatting");
+
+assert_eq(starts_with(ranga_error_message(RG_ERR_INVALID_FORMAT), "invalid pixel format"), 1,
+  "error_invalid_format_display");
+assert_eq(starts_with(ranga_error_message(RG_ERR_DIMENSION_MISMATCH), "dimension mismatch"), 1,
+  "error_dimension_mismatch_display");
+assert_eq(starts_with(ranga_error_message(RG_ERR_BUFFER_TOO_SMALL), "buffer too small"), 1,
+  "error_buffer_too_small_display");
+assert_eq(starts_with(ranga_error_message(RG_ERR_UNSUPPORTED_CONVERSION), "unsupported conversion"), 1,
+  "error_unsupported_conversion_display");
+assert_eq(ranga_is_err(RG_ERR_OTHER), 1, "error_other_display: Other is an error code");
+
+# ================================================================
+# 2. ARGB blend tests
+# ================================================================
+test_group("2. ARGB blend");
+
+var out_a = fl_alloc(8);
+var out_r = fl_alloc(8);
+blend_pixel_argb(four(fl_alloc(8), 255, 255, 0, 0), four(fl_alloc(8), 255, 0, 0, 255), BM_NORMAL, 255, out_a);
+blend_pixel(four(fl_alloc(8), 255, 0, 0, 255), four(fl_alloc(8), 0, 0, 255, 255), BM_NORMAL, 255, out_r);
+assert_eq(load8(out_a) == load8(out_r + 3) && load8(out_a + 1) == load8(out_r)
+  && load8(out_a + 2) == load8(out_r + 1) && load8(out_a + 3) == load8(out_r + 2), 1,
+  "blend_pixel_argb_opaque_matches_rgba");
+
+# Rust checks dst.len() is still 8; a fixed-length row cannot change length, so
+# what is left to check is that nothing past the two pixels is written.
+var rsrc = fl_alloc(16);
+var rdst = fl_alloc(16);
+four(rsrc, 200, 128, 64, 32); four(rsrc + 4, 200, 64, 128, 96);
+four(rdst, 255, 0, 0, 255); four(rdst + 4, 255, 0, 0, 255); four(rdst + 8, 7, 7, 7, 7);
+blend_row_normal_argb(rsrc, rdst, 2, 255);
+assert_eq(load8(rdst + 8) == 7 && load8(rdst + 11) == 7, 1,
+  "blend_row_normal_argb_preserves_length: nothing past the row is written");
+
+four(rsrc, 255, 255, 0, 0); four(rsrc + 4, 255, 0, 255, 0);
+four(rdst, 255, 0, 0, 255); four(rdst + 4, 255, 100, 100, 100);
+var rorig = fl_alloc(8);
+memcpy(rorig, rdst, 8);
+blend_row_normal_argb(rsrc, rdst, 2, 0);
+assert_eq(bytes_eq(rdst, rorig, 8), 1, "blend_row_normal_argb_zero_opacity_noop");
+
+var tdst = four(fl_alloc(8), 255, 0, 0, 255);
+blend_pixel_argb(four(fl_alloc(8), 0, 255, 0, 0), tdst, BM_NORMAL, 255, out_a);
+assert_eq(bytes_eq(out_a, tdst, 4), 1, "blend_pixel_argb_transparent_source_noop");
+
+# ================================================================
+# 3. composite_at_argb tests
+# ================================================================
+test_group("3. composite_at_argb");
+
+var cdst = pixel_buffer_zeroed(10, 10, PF_ARGB8, err);
+var csrc = repeat4(2, 2, PF_ARGB8, 255, 255, 0, 0);
+assert_eq(composite_at_argb(csrc, cdst, 3, 3, f32_from(1.0)), RG_ERR_NONE, "composite_at_argb_basic succeeds");
+var ci = pixel_buffer_data(cdst) + (3 * 10 + 3) * 4;
+assert_eq(load8(ci) == 255 && load8(ci + 1) == 255 && load8(ci + 2) == 0 && load8(ci + 3) == 0, 1,
+  "composite_at_argb_basic: (3, 3) is opaque red");
+pixel_buffer_free(csrc); pixel_buffer_free(cdst);
+
+var kdst = pixel_buffer_zeroed(4, 4, PF_ARGB8, err);
+var ksrc = repeat4(3, 3, PF_ARGB8, 255, 128, 64, 32);
+assert_eq(composite_at_argb(ksrc, kdst, 2, 2, f32_from(1.0)), RG_ERR_NONE, "composite_at_argb_clipping succeeds");
+assert_gt(load8(pixel_buffer_data(kdst) + (2 * 4 + 2) * 4), 0, "composite_at_argb_clipping: the overlap is written");
+assert_eq(load8(pixel_buffer_data(kdst)), 0, "composite_at_argb_clipping: (0, 0) is untouched");
+pixel_buffer_free(ksrc); pixel_buffer_free(kdst);
+
+var wdst = pixel_buffer_zeroed(4, 4, PF_ARGB8, err);
+var wsrc = pixel_buffer_zeroed(2, 2, PF_RGBA8, err);
+assert_eq(ranga_is_err(composite_at_argb(wsrc, wdst, 0, 0, f32_from(1.0))), 1,
+  "composite_at_argb_wrong_format_rejected");
+pixel_buffer_free(wsrc); pixel_buffer_free(wdst);
+
+# ================================================================
+# 4. Histogram edge cases
+# ================================================================
+test_group("4. histogram");
+
+fn chan_min(b, n) {
+    var m = 255;
+    var i = 0;
+    while (i < n) { var v = load8(pixel_buffer_data(b) + i * 4); if (v < m) { m = v; } i = i + 1; }
+    return m;
+}
+fn chan_max(b, n) {
+    var m = 0;
+    var i = 0;
+    while (i < n) { var v = load8(pixel_buffer_data(b) + i * 4); if (v > m) { m = v; } i = i + 1; }
+    return m;
+}
+# (50.0 + (i as f32 / 255.0) * 150.0) as u8, in f32 as Rust computes it.
+var eq = pixel_buffer_zeroed(256, 1, PF_RGBA8, err);
+var ei = 0;
+while (ei < 256) {
+    var ef: f32 = f32_from(50.0) + (f32_from(ei) / f32_from(255.0)) * f32_from(150.0);
+    var ev = _rg_f32_sat_u8(ef);
+    four(pixel_buffer_data(eq) + ei * 4, ev, ev, ev, 255);
+    ei = ei + 1;
+}
+var range_before = chan_max(eq, 256) - chan_min(eq, 256);
+assert_eq(equalize(eq), RG_ERR_NONE, "equalize succeeds");
+var range_after = chan_max(eq, 256) - chan_min(eq, 256);
+assert_eq(range_after >= range_before, 1, "equalize_gradient_expands_range");
+pixel_buffer_free(eq);
+
+var al = repeat4(4, 4, PF_RGBA8, 100, 100, 100, 255);
+var al0 = pixel_buffer_clone(al);
+assert_eq(auto_levels(al), RG_ERR_NONE, "auto_levels succeeds");
+assert_eq(bytes_eq(pixel_buffer_data(al), pixel_buffer_data(al0), 64), 1, "auto_levels_single_value_unchanged");
+pixel_buffer_free(al0); pixel_buffer_free(al);
+
+var lh = repeat4(4, 4, PF_RGBA8, 128, 128, 128, 128);
+var h1 = luminance_histogram(lh, 1, err);
+assert_eq(hist_len(h1), 1, "luminance_histogram_various_bin_counts: 1 bin");
+assert_eq(f64_lt(f64_abs(f64_sub(hist_get(h1, 0), 1.0)), 0.000001), 1, "and that bin is 1.0");
+var h10 = luminance_histogram(lh, 10, err);
+assert_eq(hist_len(h10), 10, "10 bins");
+assert_eq(f64_lt(f64_abs(f64_sub(hist_sum(h10), 1.0)), 0.000001), 1, "summing to 1.0");
+var h256 = luminance_histogram(lh, 256, err);
+assert_eq(hist_len(h256), 256, "256 bins");
+assert_eq(f64_lt(f64_abs(f64_sub(hist_sum(h256), 1.0)), 0.000001), 1, "summing to 1.0");
+hist_free(h1); hist_free(h10); hist_free(h256); pixel_buffer_free(lh);
+
+# ================================================================
+# 5. Filter edge cases
+# ================================================================
+test_group("5. filter");
+
+var g2 = repeat4(2, 2, PF_RGBA8, 128, 128, 128, 128);
+var g2b = gaussian_blur(g2, 50, err);
+assert_eq(g2b != 0 && pixel_buffer_width(g2b) == 2 && pixel_buffer_height(g2b) == 2, 1,
+  "gaussian_blur_large_radius_small_image_no_panic");
+pixel_buffer_free(g2b); pixel_buffer_free(g2);
+
+var bb = repeat4(4, 4, PF_RGBA8, 100, 150, 200, 255);
+var bb0 = box_blur(bb, 0, err);
+assert_eq(bytes_eq(pixel_buffer_data(bb0), pixel_buffer_data(bb), 64), 1, "box_blur_radius_zero_identity");
+pixel_buffer_free(bb0); pixel_buffer_free(bb);
+
+var wb = repeat4(8, 8, PF_RGBA8, 128, 128, 128, 255);
+assert_eq(auto_white_balance(wb), RG_ERR_NONE, "auto_white_balance succeeds");
+var wb_ok = 1;
+var wi = 0;
+while (wi < 256) {
+    if (wi % 4 != 3 && absd(load8(pixel_buffer_data(wb) + wi), 128) > 1) { wb_ok = 0; }
+    wi = wi + 1;
+}
+assert_eq(wb_ok, 1, "auto_white_balance_balanced_is_near_identity");
+pixel_buffer_free(wb);
+
+var bl = repeat4(4, 4, PF_RGBA8, 100, 100, 100, 255);
+var blo = bilateral(bl, 2, f32_from(10.0), f32_from(30.0), err);
+assert_eq(bytes_eq(pixel_buffer_data(blo), pixel_buffer_data(bl), 64), 1, "bilateral_single_color_identity");
+pixel_buffer_free(blo); pixel_buffer_free(bl);
+
+fn spread(p) { return absd(load8(p), load8(p + 1)) + absd(load8(p), load8(p + 2)) + absd(load8(p + 1), load8(p + 2)); }
+var vb = repeat4(1, 1, PF_RGBA8, 200, 100, 150, 255);
+var orig_spread = spread(pixel_buffer_data(vb));
+assert_eq(vibrance(vb, f32_from(0.0 - 0.8)), RG_ERR_NONE, "vibrance succeeds");
+assert_lt(spread(pixel_buffer_data(vb)), orig_spread, "vibrance_negative_reduces_saturation");
+pixel_buffer_free(vb);
+
+# ================================================================
+# 6. Pixel edge cases
+# ================================================================
+test_group("6. pixel");
+
+var gs = pixel_buffer_zeroed(4, 4, PF_RGBA8, err);
+var gpx = four(fl_alloc(8), 42, 137, 200, 180);
+var ggot = fl_alloc(8);
+assert_eq(pixel_buffer_set_rgba(gs, 2, 3, gpx), 1, "set_rgba succeeds");
+assert_eq(pixel_buffer_get_rgba(gs, 2, 3, ggot), 1, "get_rgba succeeds");
+assert_eq(bytes_eq(ggot, gpx, 4), 1, "get_set_rgba_roundtrip: four distinct channels come back in order");
+pixel_buffer_free(gs);
+
+var small = fl_alloc(16);
+assert_eq(pixel_view_new(small, 10, 4, 4, PF_RGBA8, err), 0, "pixel_view_too_small_slice_returns_error");
+assert_eq(ranga_is_err(load64(err)), 1, "with an error code");
+
+var cp = buffer_pool_new(8);
+buffer_pool_release(cp, bv_zeroed(1024));
+buffer_pool_release(cp, bv_zeroed(2048));
+assert_eq(buffer_pool_len(cp), 2, "buffer_pool_clear_empties: two pooled");
+buffer_pool_clear(cp);
+assert_eq(buffer_pool_len(cp), 0, "clear leaves none");
+assert_eq(buffer_pool_is_empty(cp), 1, "and the pool is empty");
+buffer_pool_free(cp);
+
+var ep = buffer_pool_new(4);
+assert_eq(buffer_pool_is_empty(ep) == 1 && buffer_pool_len(ep) == 0, 1, "buffer_pool_is_empty_initially");
+buffer_pool_free(ep);
+
+# ================================================================
+# 7. Transform edge cases
+# ================================================================
+test_group("7. transform");
+
+var cz = pixel_buffer_zeroed(10, 10, PF_RGBA8, err);
+var czc = crop(cz, 5, 5, 5, 5, err);
+assert_eq(czc != 0 && pixel_buffer_width(czc) == 0 && pixel_buffer_height(czc) == 0
+  && pixel_buffer_len(czc) == 0, 1, "crop_zero_size_region");
+pixel_buffer_free(czc); pixel_buffer_free(cz);
+
+var r8 = repeat4(8, 8, PF_RGBA8, 100, 150, 200, 255);
+var r1 = resize(r8, 1, 1, SF_BILINEAR, err);
+assert_eq(pixel_buffer_width(r1) == 1 && pixel_buffer_height(r1) == 1 && pixel_buffer_len(r1) == 4, 1,
+  "resize_to_1x1: 1 x 1, 4 bytes");
+assert_lt(absd(load8(pixel_buffer_data(r1)), 100), 20, "and red is near the original");
+pixel_buffer_free(r1);
+
+var pid = perspective_identity();
+var pt = perspective_transform(r8, pid, 8, 8, SF_BILINEAR, err);
+assert_eq(pixel_buffer_width(pt) == 8 && pixel_buffer_height(pt) == 8, 1,
+  "perspective_identity_preserves_image: 8 x 8");
+var pt_ok = 1;
+var pi = 0;
+while (pi < 256) {
+    if (absd(load8(pixel_buffer_data(pt) + pi), load8(pixel_buffer_data(r8) + pi)) > 1) { pt_ok = 0; }
+    pi = pi + 1;
+}
+assert_eq(pt_ok, 1, "and every byte is within 1");
+pixel_buffer_free(pt); perspective_free(pid); pixel_buffer_free(r8);
+
+# ================================================================
+# 8. Convert edge cases
+# ================================================================
+test_group("8. convert");
+
+var yg = repeat4(4, 4, PF_RGBA8, 128, 128, 128, 255);
+var yy = rgba_to_yuv420p_bt2020(yg, err);
+assert_eq(pixel_buffer_format(yy), PF_YUV420P, "rgba_to_yuv420p_bt2020_roundtrip: Yuv420p");
+var yb = yuv420p_to_rgba_bt2020(yy, err);
+assert_eq(pixel_buffer_format(yb), PF_RGBA8, "back to Rgba8");
+var yb_ok = 1;
+var yi = 0;
+while (yi < 16) {
+    var yp = pixel_buffer_data(yb) + yi * 4;
+    if (absd(load8(yp), 128) >= 10 || absd(load8(yp + 1), 128) >= 10 || absd(load8(yp + 2), 128) >= 10) { yb_ok = 0; }
+    if (load8(yp + 3) != 255) { yb_ok = 0; }
+    yi = yi + 1;
+}
+assert_eq(yb_ok, 1, "grey within 10, alpha 255");
+pixel_buffer_free(yb); pixel_buffer_free(yy); pixel_buffer_free(yg);
+
+var ra = pixel_buffer_zeroed(2, 1, PF_RGBA8, err);
+four(pixel_buffer_data(ra), 200, 100, 50, 220); four(pixel_buffer_data(ra) + 4, 10, 20, 30, 128);
+var ar = rgba8_to_argb8(ra, err);
+assert_eq(pixel_buffer_format(ar), PF_ARGB8, "rgba8_to_argb8_roundtrip: Argb8");
+var ra2 = argb8_to_rgba8(ar, err);
+assert_eq(pixel_buffer_format(ra2), PF_RGBA8, "back to Rgba8");
+assert_eq(bytes_eq(pixel_buffer_data(ra2), pixel_buffer_data(ra), 8), 1, "RGBA -> ARGB -> RGBA is the identity");
+pixel_buffer_free(ra2); pixel_buffer_free(ar);
+
+four(pixel_buffer_data(ra), 200, 100, 50, 128); four(pixel_buffer_data(ra) + 4, 10, 20, 30, 64);
+var rgb = rgba8_to_rgb8(ra, err);
+assert_eq(pixel_buffer_format(rgb), PF_RGB8, "rgba8_to_rgb8_then_back_sets_alpha_255: Rgb8");
+var rb = rgb8_to_rgba8(rgb, err);
+assert_eq(pixel_buffer_format(rb), PF_RGBA8, "back to Rgba8");
+assert_eq(bytes_eq(pixel_buffer_data(rb), pixel_buffer_data(ra), 3) && load8(pixel_buffer_data(rb) + 3) == 255
+  && bytes_eq(pixel_buffer_data(rb) + 4, pixel_buffer_data(ra) + 4, 3) && load8(pixel_buffer_data(rb) + 7) == 255, 1,
+  "RGB kept, alpha 255");
+pixel_buffer_free(rb); pixel_buffer_free(rgb); pixel_buffer_free(ra);
+
+var exit_code = assert_summary();
+# assert_summary() returns the raw failure count, and a wait status is 8 bits.
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

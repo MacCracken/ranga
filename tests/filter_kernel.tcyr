@@ -379,6 +379,30 @@ assert_eq(all_extreme, 1, "density 1 makes every pixel pure black or pure white"
 assert_eq(mid_found, 0, "no pixel keeps its original value at density 1");
 assert_eq(noise_gaussian(argb, f32c(0.1), 1), RG_ERR_INVALID_FORMAT, "noise rejects non-Rgba8");
 assert_eq(noise_salt_pepper(argb, f32c(0.1), 1), RG_ERR_INVALID_FORMAT, "salt-pepper rejects non-Rgba8");
+
+# noise_salt_pepper_creates_extremes / _preserves_alpha (Rust's own cases). The
+# buffer is 128 in every byte, alpha included, so a write to alpha would show.
+var sp32 = mkbuf(32, 32);
+fill(sp32, 128);
+assert_eq(noise_salt_pepper(sp32, f32c(0.5), 42), RG_ERR_NONE, "salt-pepper density 0.5 succeeds");
+var sp_black = 0;
+var sp_white = 0;
+var spi = 0;
+while (spi < 1024) {
+    if (px3(sp32, spi, 0, 0, 0) == 1) { sp_black = 1; }
+    if (px3(sp32, spi, 255, 255, 255) == 1) { sp_white = 1; }
+    spi = spi + 1;
+}
+assert_eq(sp_black && sp_white, 1, "noise_salt_pepper_creates_extremes: both black and white pixels");
+pixel_buffer_free(sp32);
+var sp8 = mkbuf(8, 8);
+fill(sp8, 128);
+assert_eq(noise_salt_pepper(sp8, f32c(0.5), 99), RG_ERR_NONE, "salt-pepper on 8 x 8 succeeds");
+var sp_alpha = 1;
+spi = 0;
+while (spi < 64) { if (chan(sp8, spi, 3) != 128) { sp_alpha = 0; } spi = spi + 1; }
+assert_eq(sp_alpha, 1, "noise_salt_pepper_preserves_alpha");
+pixel_buffer_free(sp8);
 pixel_buffer_free(n1); pixel_buffer_free(n2); pixel_buffer_free(n3);
 pixel_buffer_free(n4); pixel_buffer_free(n5); pixel_buffer_free(n6);
 

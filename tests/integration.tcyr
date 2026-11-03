@@ -1,0 +1,514 @@
+# Integration, reference and visual-regression tests.
+#
+# Every test in three rust-old/tests/ files, under Rust's test names:
+#   - integration.rs (23): the multi-step pipelines, which check that steps unit-
+#     tested elsewhere compose, plus its buffer, blend, histogram, conversion and
+#     error-handling cases;
+#   - photoshop_reference.rs (12): Photoshop's blend results for one fixed pixel
+#     pair, within the same ±2 Rust allows, and its identity edge cases;
+#   - visual_regression.rs (10).
+
+include "src/error.cyr"
+include "src/bytevec.cyr"
+include "src/simd_u8.cyr"
+include "src/pixel.cyr"
+include "src/color.cyr"
+include "src/composite.cyr"
+include "src/transform.cyr"
+include "src/filter_point.cyr"
+include "src/filter_kernel.cyr"
+include "src/blend.cyr"
+include "src/histogram.cyr"
+include "src/convert.cyr"
+
+alloc_init();
+var err = fl_alloc(8);
+var px = fl_alloc(8);
+var i = 0;
+
+fn buf_filled(w, h, v) {
+    var b = pixel_buffer_zeroed(w, h, PF_RGBA8, err);
+    var d = pixel_buffer_data(b);
+    var i = 0;
+    while (i < w * h * 4) { store8(d + i, v); i = i + 1; }
+    return b;
+}
+fn rgba4(p, r, g, b, a) { store8(p, r); store8(p + 1, g); store8(p + 2, b); store8(p + 3, a); return p; }
+fn absd(a, b) { if (a > b) { return a - b; } return b - a; }
+fn bytes_eq(p, q, n) {
+    var k = 0;
+    while (k < n) { if (load8(p + k) != load8(q + k)) { return 0; } k = k + 1; }
+    return 1;
+}
+fn max_diff(p, q, n) {
+    var m = 0;
+    var k = 0;
+    while (k < n) { var d = absd(load8(p + k), load8(q + k)); if (d > m) { m = d; } k = k + 1; }
+    return m;
+}
+
+# ================================================================
+test_group("integration.rs");
+
+# pixel_buffer_new_and_access
+var nb = bv_zeroed(8);
+rgba4(bv_data(nb), 10, 20, 30, 255); rgba4(bv_data(nb) + 4, 40, 50, 60, 128);
+var nbuf = pixel_buffer_new(nb, 2, 1, PF_RGBA8, err);
+assert_eq(pixel_buffer_width(nbuf) == 2 && pixel_buffer_height(nbuf) == 1 && pixel_buffer_format(nbuf) == PF_RGBA8
+  && pixel_buffer_pixel_count(nbuf) == 2 && load8(pixel_buffer_data(nbuf) + 7) == 128, 1,
+  "pixel_buffer_new_and_access");
+pixel_buffer_free(nbuf);
+
+# pixel_buffer_zeroed_roundtrip
+var zb8 = pixel_buffer_zeroed(8, 8, PF_RGBA8, err);
+var zcopy = bv_zeroed(256);
+memcpy(bv_data(zcopy), pixel_buffer_data(zb8), 256);
+var zb8b = pixel_buffer_new(zcopy, 8, 8, PF_RGBA8, err);
+assert_eq(pixel_buffer_len(zb8) == 256 && max_diff(pixel_buffer_data(zb8), pixel_buffer_data(zb8b), 256) == 0
+  && load8(pixel_buffer_data(zb8) + 255) == 0, 1, "pixel_buffer_zeroed_roundtrip");
+pixel_buffer_free(zb8b); pixel_buffer_free(zb8);
+
+# blend_red_over_blue_{full,half,zero}_opacity
+var red = rgba4(fl_alloc(8), 255, 0, 0, 255);
+var blue = rgba4(fl_alloc(8), 0, 0, 255, 255);
+var bo = fl_alloc(8);
+blend_pixel(red, blue, BM_NORMAL, 255, bo);
+assert_eq(load8(bo) > 200 && load8(bo + 2) < 60, 1, "blend_red_over_blue_full_opacity");
+blend_pixel(red, blue, BM_NORMAL, 128, bo);
+assert_eq(load8(bo) > 50 && load8(bo) < 220 && load8(bo + 2) > 50 && load8(bo + 2) < 220, 1,
+  "blend_red_over_blue_half_opacity");
+blend_pixel(red, blue, BM_NORMAL, 0, bo);
+assert_eq(bytes_eq(bo, blue, 4), 1, "blend_red_over_blue_zero_opacity");
+
+# blend_row_normal_produces_correct_length: the row is fixed-length here, so the
+# check is that every pixel took the red and nothing past the row was written.
+var rs = fl_alloc(20);
+var rd = fl_alloc(20);
+i = 0;
+while (i < 4) { rgba4(rs + i * 4, 255, 0, 0, 255); rgba4(rd + i * 4, 0, 0, 255, 255); i = i + 1; }
+rgba4(rd + 16, 7, 7, 7, 7);
+blend_row_normal(rs, rd, 4, 200);
+var row_ok = load8(rd + 16) == 7;
+i = 0;
+while (i < 4) { if (load8(rd + i * 4) <= 100) { row_ok = 0; } i = i + 1; }
+assert_eq(row_ok, 1, "blend_row_normal_produces_correct_length");
+
+# filter_invert_double_is_identity
+var inv = pixel_buffer_zeroed(2, 1, PF_RGBA8, err);
+rgba4(pixel_buffer_data(inv), 100, 150, 200, 255); rgba4(pixel_buffer_data(inv) + 4, 10, 20, 30, 128);
+var inv0 = pixel_buffer_clone(inv);
+invert(inv); invert(inv);
+assert_eq(bytes_eq(pixel_buffer_data(inv), pixel_buffer_data(inv0), 8), 1, "filter_invert_double_is_identity");
+pixel_buffer_free(inv0); pixel_buffer_free(inv);
+
+# rgba_yuv420p_roundtrip_within_tolerance
+var yu = pixel_buffer_zeroed(8, 8, PF_RGBA8, err);
+i = 0;
+while (i < 64) { rgba4(pixel_buffer_data(yu) + i * 4, 128, 100, 80, 255); i = i + 1; }
+var yuv = rgba_to_yuv420p(yu, err);
+var yub = yuv420p_to_rgba(yuv, err);
+var yu_max = 0;
+i = 0;
+while (i < 64) {
+    var ch = 0;
+    while (ch < 3) {
+        var d = absd(load8(pixel_buffer_data(yu) + i * 4 + ch), load8(pixel_buffer_data(yub) + i * 4 + ch));
+        if (d > yu_max) { yu_max = d; }
+        ch = ch + 1;
+    }
+    i = i + 1;
+}
+assert_eq(pixel_buffer_format(yuv) == PF_YUV420P && pixel_buffer_format(yub) == PF_RGBA8
+  && pixel_buffer_len(yub) == 256, 1, "rgba_yuv420p_roundtrip_within_tolerance: formats and size");
+assert_lt(yu_max, 20, "and every channel within 20");
+pixel_buffer_free(yub); pixel_buffer_free(yuv); pixel_buffer_free(yu);
+
+# histogram_uniform_buffer_peaks_at_one_bin
+var hu = buf_filled(4, 4, 128);
+var hh = luminance_histogram(hu, 256, err);
+var nonzero = 0;
+var peak = 0;
+i = 0;
+while (i < 256) {
+    if (f64_gt(hist_get(hh, i), 0) == 1) { nonzero = nonzero + 1; peak = hist_get(hh, i); }
+    i = i + 1;
+}
+assert_eq(hist_len(hh) == 256 && nonzero == 1 && f64_lt(f64_abs(f64_sub(peak, 1.0)), 0.000001) == 1, 1,
+  "histogram_uniform_buffer_peaks_at_one_bin");
+hist_free(hh); pixel_buffer_free(hu);
+
+# rgb_histograms_pure_red_buffer
+var hr = pixel_buffer_zeroed(4, 4, PF_RGBA8, err);
+i = 0;
+while (i < 16) { rgba4(pixel_buffer_data(hr) + i * 4, 255, 0, 0, 255); i = i + 1; }
+var h3 = fl_alloc(24);
+assert_eq(rgb_histograms(hr, h3), RG_ERR_NONE, "rgb_histograms succeeds");
+fn near1(v) { return f64_lt(f64_abs(f64_sub(v, 1.0)), 0.000001); }
+assert_eq(near1(hist_get(load64(h3), 255)) && near1(hist_get(load64(h3 + 8), 0))
+  && near1(hist_get(load64(h3 + 16), 0)), 1, "rgb_histograms_pure_red_buffer");
+hist_free(load64(h3)); hist_free(load64(h3 + 8)); hist_free(load64(h3 + 16)); pixel_buffer_free(hr);
+
+# chi_squared_identical_histograms
+var ca4 = hist_new(4);
+var cb4 = hist_new(4);
+i = 0;
+while (i < 4) { hist_set(ca4, i, 0.25); hist_set(cb4, i, 0.25); i = i + 1; }
+assert_eq(f64_lt(f64_abs(chi_squared(ca4, cb4, err)), 0.0000000001), 1, "chi_squared_identical_histograms");
+hist_free(ca4); hist_free(cb4);
+
+# pixel_buffer_dimension_mismatch: 10 bytes for a 2 x 2 RGBA8 buffer.
+var short10 = bv_zeroed(10);
+assert_eq(pixel_buffer_new(short10, 2, 2, PF_RGBA8, err), 0, "pixel_buffer_dimension_mismatch is refused");
+assert_eq(load64(err), RG_ERR_DIMENSION_MISMATCH, "as DimensionMismatch");
+bv_free(short10);
+
+# filter_rejects_wrong_format
+var rgb44 = pixel_buffer_zeroed(4, 4, PF_RGB8, err);
+assert_eq(ranga_is_err(brightness(rgb44, f32_from(0.1))) && ranga_is_err(contrast(rgb44, f32_from(1.0)))
+  && ranga_is_err(grayscale(rgb44)) && ranga_is_err(invert(rgb44)), 1, "filter_rejects_wrong_format");
+
+# convert_rejects_wrong_format
+var rgba44 = pixel_buffer_zeroed(4, 4, PF_RGBA8, err);
+assert_eq(yuv420p_to_rgba(rgba44, err) == 0 && rgba_to_yuv420p(rgb44, err) == 0
+  && argb_to_nv12(rgba44, err) == 0, 1, "convert_rejects_wrong_format");
+pixel_buffer_free(rgba44); pixel_buffer_free(rgb44);
+
+# affine_rotate_and_back
+var ar32 = pixel_buffer_zeroed(32, 32, PF_RGBA8, err);
+pixel_buffer_set_rgba(ar32, 16, 16, red);
+var rot = affine_rotate(0.1);
+var ar32r = affine_transform(ar32, rot, 32, 32, SF_BILINEAR, err);
+assert_eq(pixel_buffer_width(ar32r), 32, "affine_rotate_and_back: the rotated image is 32 wide");
+pixel_buffer_free(ar32r); affine_free(rot); pixel_buffer_free(ar32);
+
+# flip_preserves_pixel_count
+var fp8 = pixel_buffer_zeroed(8, 8, PF_RGBA8, err);
+i = 0;
+while (i < 64) { rgba4(pixel_buffer_data(fp8) + i * 4, i, i, i, 255); i = i + 1; }
+var fph = flip_horizontal(fp8, err);
+var fpv = flip_vertical(fp8, err);
+assert_eq(pixel_buffer_len(fph) == 256 && pixel_buffer_len(fpv) == 256, 1, "flip_preserves_pixel_count");
+pixel_buffer_free(fph); pixel_buffer_free(fpv); pixel_buffer_free(fp8);
+
+# premultiply_composite_unpremultiply
+var pl = pixel_buffer_zeroed(1, 1, PF_RGBA8, err);
+rgba4(pixel_buffer_data(pl), 255, 0, 0, 128);
+premultiply_alpha(pl);
+assert_eq(load8(pixel_buffer_data(pl)), 128, "premultiply_composite_unpremultiply: 255 * 128 / 255 = 128");
+unpremultiply_alpha(pl);
+assert_gt(load8(pixel_buffer_data(pl)), 250, "and back to about 255");
+pixel_buffer_free(pl);
+
+# The six pipelines.
+
+# brightness → contrast → grayscale: grey, alpha kept.
+var fp = pixel_buffer_zeroed(4, 4, PF_RGBA8, err);
+i = 0;
+while (i < 16) {
+    var v = i * 16;
+    rgba4(pixel_buffer_data(fp) + i * 4, v, (v + 30) & 255, (v + 60) & 255, 255);
+    i = i + 1;
+}
+brightness(fp, f32_from(0.1));
+contrast(fp, f32_from(1.2));
+grayscale(fp);
+var grey_ok = 1;
+i = 0;
+while (i < 16) {
+    var q = pixel_buffer_data(fp) + i * 4;
+    if (load8(q) != load8(q + 1) || load8(q + 1) != load8(q + 2) || load8(q + 3) != 255) { grey_ok = 0; }
+    i = i + 1;
+}
+assert_eq(grey_ok, 1, "brightness -> contrast -> grayscale leaves r == g == b and alpha 255");
+pixel_buffer_free(fp);
+
+# crop → resize.
+var z = pixel_buffer_zeroed(100, 100, PF_RGBA8, err);
+var cz = crop(z, 10, 10, 60, 60, err);
+assert_eq(pixel_buffer_width(cz), 50, "crop to 50 wide");
+assert_eq(pixel_buffer_height(cz), 50, "and 50 high");
+var rz = resize(cz, 200, 200, SF_BILINEAR, err);
+assert_eq(pixel_buffer_width(rz), 200, "then a bilinear resize to 200 wide");
+assert_eq(pixel_buffer_height(rz), 200, "and 200 high");
+pixel_buffer_free(rz); pixel_buffer_free(cz); pixel_buffer_free(z);
+
+# checkerboard background, half-transparent red overlay.
+var bg = pixel_buffer_zeroed(64, 64, PF_RGBA8, err);
+var ca = rgba4(fl_alloc(8), 200, 200, 200, 255);
+var cbb = rgba4(fl_alloc(8), 255, 255, 255, 255);
+fill_checkerboard(bg, 8, ca, cbb);
+var ov = pixel_buffer_zeroed(16, 16, PF_RGBA8, err);
+i = 0;
+while (i < 256) { rgba4(pixel_buffer_data(ov) + i * 4, 255, 0, 0, 128); i = i + 1; }
+composite_at(ov, bg, 24, 24, f32_from(0.8));
+pixel_buffer_get_rgba(bg, 24, 24, px);
+assert_gt(load8(px), 100, "the composited overlay's red is present");
+pixel_buffer_free(ov); pixel_buffer_free(bg);
+
+# dissolve then fade.
+var da = buf_filled(4, 4, 200);
+var db = buf_filled(4, 4, 50);
+var mid = dissolve(da, db, f32_from(0.5), err);
+assert_eq(load8(pixel_buffer_data(mid)) > 100 && load8(pixel_buffer_data(mid)) < 150, 1,
+  "a half dissolve of 200 and 50 lands between them");
+fade(mid, f32_from(0.5));
+assert_lt(load8(pixel_buffer_data(mid)), 80, "then fading by half takes it below 80");
+pixel_buffer_free(mid); pixel_buffer_free(da); pixel_buffer_free(db);
+
+# salt-and-pepper noise, then median.
+var sp = buf_filled(16, 16, 128);
+noise_salt_pepper(sp, f32_from(0.3), 42);
+var noisy = 0;
+i = 0;
+while (i < 256) {
+    var c0 = load8(pixel_buffer_data(sp) + i * 4);
+    if (c0 == 0 || c0 == 255) { noisy = noisy + 1; }
+    i = i + 1;
+}
+assert_gt(noisy, 0, "salt-and-pepper produces extremes");
+var med = median(sp, 1, err);
+var clean = 0;
+i = 0;
+while (i < 256) {
+    var c1 = load8(pixel_buffer_data(med) + i * 4);
+    if (c1 == 0 || c1 == 255) { clean = clean + 1; }
+    i = i + 1;
+}
+assert_lt(clean, noisy, "a radius-1 median removes most of them");
+pixel_buffer_free(med); pixel_buffer_free(sp);
+
+# flood fill, then threshold.
+var ff = buf_filled(8, 8, 100);
+flood_fill(ff, 0, 0, rgba4(fl_alloc(8), 200, 200, 200, 255), 10);
+assert_eq(load8(pixel_buffer_data(ff)), 200, "flood fill paints the uniform region");
+threshold(ff, 150);
+assert_eq(load8(pixel_buffer_data(ff)), 255, "then 200 is above a 150 threshold");
+pixel_buffer_free(ff);
+
+# crop → bilinear resize back to the original size.
+var cg = pixel_buffer_zeroed(32, 32, PF_RGBA8, err);
+i = 0;
+while (i < 1024) {
+    var x = i % 32;
+    var y = i / 32;
+    var r8 = x * 8; if (r8 > 255) { r8 = 255; }
+    var g8 = y * 8; if (g8 > 255) { g8 = 255; }
+    rgba4(pixel_buffer_data(cg) + i * 4, r8, g8, 128, 255);
+    i = i + 1;
+}
+var cgc = crop(cg, 8, 8, 24, 24, err);
+assert_eq(pixel_buffer_width(cgc) == 16 && pixel_buffer_height(cgc) == 16, 1,
+  "crop_resize_composition: crop is 16 x 16");
+var cgr = resize(cgc, 32, 32, SF_BILINEAR, err);
+assert_eq(pixel_buffer_len(cgr), 32 * 32 * 4, "and the bilinear resize is 32 x 32");
+pixel_buffer_get_rgba(cgr, 16, 16, px);
+assert_eq(load8(px) > 0 || load8(px + 1) > 0, 1, "with content at its centre");
+pixel_buffer_free(cgr); pixel_buffer_free(cgc); pixel_buffer_free(cg);
+
+# ================================================================
+test_group("photoshop_reference.rs");
+
+var SRC = rgba4(fl_alloc(8), 200, 50, 50, 255);
+var DST = rgba4(fl_alloc(8), 50, 50, 200, 255);
+var out = fl_alloc(8);
+fn ps_ok(mode, er, eg, eb) {
+    blend_pixel(SRC, DST, mode, 255, out);
+    if (absd(load8(out), er) > 2) { return 0; }
+    if (absd(load8(out + 1), eg) > 2) { return 0; }
+    if (absd(load8(out + 2), eb) > 2) { return 0; }
+    if (absd(load8(out + 3), 255) > 2) { return 0; }
+    return 1;
+}
+assert_eq(ps_ok(BM_NORMAL, 200, 50, 50), 1, "Photoshop Normal");
+assert_eq(ps_ok(BM_MULTIPLY, 39, 10, 39), 1, "Photoshop Multiply [39,10,39]");
+assert_eq(ps_ok(BM_SCREEN, 211, 90, 211), 1, "Photoshop Screen [211,90,211]");
+assert_eq(ps_ok(BM_OVERLAY, 78, 20, 167), 1, "Photoshop Overlay [78,20,167]");
+assert_eq(ps_ok(BM_DARKEN, 50, 50, 50), 1, "Photoshop Darken [50,50,50]");
+assert_eq(ps_ok(BM_LIGHTEN, 200, 50, 200), 1, "Photoshop Lighten [200,50,200]");
+assert_eq(ps_ok(BM_DIFFERENCE, 150, 0, 150), 1, "Photoshop Difference [150,0,150]");
+assert_eq(ps_ok(BM_EXCLUSION, 172, 80, 172), 1, "Photoshop Exclusion [172,80,172]");
+fn ps_eq(src, dst, mode, opacity, e) {
+    blend_pixel(src, dst, mode, opacity, out);
+    return max_diff(out, e, 4) <= 2;
+}
+var ps_dst = rgba4(fl_alloc(8), 100, 150, 200, 255);
+assert_eq(ps_eq(rgba4(fl_alloc(8), 255, 255, 255, 255), ps_dst, BM_MULTIPLY, 255, ps_dst), 1,
+  "photoshop_multiply_with_white: Multiply by white is the identity");
+assert_eq(ps_eq(rgba4(fl_alloc(8), 0, 0, 0, 255), ps_dst, BM_SCREEN, 255, ps_dst), 1,
+  "photoshop_screen_with_black: Screen with black is the identity");
+blend_pixel(rgba4(fl_alloc(8), 200, 50, 50, 0), ps_dst, BM_NORMAL, 255, out);
+assert_eq(bytes_eq(out, ps_dst, 4), 1, "photoshop_transparent_src_unchanged");
+# Half opacity over the real destination, not a transparent one.
+blend_pixel(SRC, DST, BM_NORMAL, 128, out);
+assert_eq(load8(out) > 100 && load8(out) < 160, 1, "Normal at half opacity mixes red");
+assert_eq(load8(out + 2) > 100 && load8(out + 2) < 160, 1, "and blue");
+
+# ================================================================
+test_group("visual_regression.rs");
+
+# checkerboard_resize_bilinear: 2 x 2 black/white to 4 x 4 keeps the corners and
+# blends the interior.
+var ck = pixel_buffer_zeroed(2, 2, PF_RGBA8, err);
+rgba4(pixel_buffer_data(ck), 0, 0, 0, 255); rgba4(pixel_buffer_data(ck) + 4, 255, 255, 255, 255);
+rgba4(pixel_buffer_data(ck) + 8, 255, 255, 255, 255); rgba4(pixel_buffer_data(ck) + 12, 0, 0, 0, 255);
+var ckr = resize(ck, 4, 4, SF_BILINEAR, err);
+assert_eq(pixel_buffer_width(ckr) == 4 && pixel_buffer_height(ckr) == 4, 1, "checkerboard_resize_bilinear: 4 x 4");
+fn red_at(b, x, y) { pixel_buffer_get_rgba(b, x, y, px); return load8(px); }
+assert_eq(red_at(ckr, 0, 0) == 0 && red_at(ckr, 3, 0) == 255 && red_at(ckr, 0, 3) == 255 && red_at(ckr, 3, 3) == 0, 1,
+  "the corners keep their source values");
+assert_eq(red_at(ckr, 1, 1) >= 100 && red_at(ckr, 1, 1) <= 156, 1, "and the interior is mid-grey");
+pixel_buffer_free(ckr); pixel_buffer_free(ck);
+
+# invert_idempotency_large
+var il = pixel_buffer_zeroed(16, 16, PF_RGBA8, err);
+i = 0;
+while (i < 256) {
+    rgba4(pixel_buffer_data(il) + i * 4, (i * 7) % 256, (i * 13) % 256, (i * 23) % 256, 255);
+    i = i + 1;
+}
+var il0 = pixel_buffer_clone(il);
+invert(il);
+assert_eq(bytes_eq(pixel_buffer_data(il), pixel_buffer_data(il0), 1024), 0,
+  "invert_idempotency_large: one invert changes it");
+invert(il);
+assert_eq(bytes_eq(pixel_buffer_data(il), pixel_buffer_data(il0), 1024), 1, "and a second restores it");
+pixel_buffer_free(il0); pixel_buffer_free(il);
+
+# premultiply_roundtrip_precision: within 3 on a semi-transparent gradient.
+var pr = pixel_buffer_zeroed(16, 1, PF_RGBA8, err);
+i = 0;
+while (i < 16) { rgba4(pixel_buffer_data(pr) + i * 4, (i * 255) / 15, 200, 100, 64 + (i * 191) / 15); i = i + 1; }
+var pr0 = pixel_buffer_clone(pr);
+premultiply_alpha(pr);
+unpremultiply_alpha(pr);
+assert_lt(max_diff(pixel_buffer_data(pr), pixel_buffer_data(pr0), 64), 4, "premultiply_roundtrip_precision: within 3");
+pixel_buffer_free(pr0); pixel_buffer_free(pr);
+
+# color_balance_neutral_identity: all-zero adjustments are exactly the identity.
+var cbn = pixel_buffer_zeroed(8, 8, PF_RGBA8, err);
+i = 0;
+while (i < 64) {
+    rgba4(pixel_buffer_data(cbn) + i * 4, (i * 19) % 256, (i * 47) % 256, (i * 89) % 256, 255);
+    i = i + 1;
+}
+var cbn0 = pixel_buffer_clone(cbn);
+var zero3 = fl_calloc(12);
+color_balance(cbn, zero3, zero3, zero3);
+assert_eq(bytes_eq(pixel_buffer_data(cbn), pixel_buffer_data(cbn0), 256), 1, "color_balance_neutral_identity");
+fl_free(zero3); pixel_buffer_free(cbn0); pixel_buffer_free(cbn);
+
+# yuv_roundtrip_color_fidelity: eight colours through BT.601 4:2:0 and back, pixel
+# (1, 1) within each colour's drift bound.
+fn yuv_drift_ok(r, g, b, bound) {
+    var src = pixel_buffer_zeroed(4, 4, PF_RGBA8, err);
+    var k = 0;
+    while (k < 16) { rgba4(pixel_buffer_data(src) + k * 4, r, g, b, 255); k = k + 1; }
+    var y = rgba_to_yuv420p(src, err);
+    var back = yuv420p_to_rgba(y, err);
+    var p = pixel_buffer_data(back) + (1 * 4 + 1) * 4;
+    var ok = absd(load8(p), r) <= bound && absd(load8(p + 1), g) <= bound && absd(load8(p + 2), b) <= bound;
+    pixel_buffer_free(back); pixel_buffer_free(y); pixel_buffer_free(src);
+    return ok;
+}
+assert_eq(yuv_drift_ok(128, 128, 128, 5) && yuv_drift_ok(255, 255, 255, 5) && yuv_drift_ok(0, 0, 0, 5)
+  && yuv_drift_ok(220, 180, 150, 15) && yuv_drift_ok(180, 200, 160, 15) && yuv_drift_ok(160, 140, 180, 15)
+  && yuv_drift_ok(200, 190, 170, 10) && yuv_drift_ok(100, 120, 140, 10), 1,
+  "yuv_roundtrip_color_fidelity: all eight colours within their bounds");
+
+# A blurred horizontal ramp has no banding: it never steps down by more than 1.
+var ramp = pixel_buffer_zeroed(64, 1, PF_RGBA8, err);
+i = 0;
+while (i < 64) {
+    var rv = (i * 255) / 63;
+    rgba4(pixel_buffer_data(ramp) + i * 4, rv, rv, rv, 255);
+    i = i + 1;
+}
+var rb = gaussian_blur(ramp, 3, err);
+var banding = 0;
+var prev = 0;
+i = 0;
+while (i < 64) {
+    var cur = load8(pixel_buffer_data(rb) + i * 4);
+    if (cur < prev && prev - cur > 1) { banding = 1; }
+    prev = cur;
+    i = i + 1;
+}
+assert_eq(banding, 0, "gradient_blur_smoothness: a blurred ramp never steps down by more than 1");
+pixel_buffer_free(rb); pixel_buffer_free(ramp);
+
+# gaussian_blur_symmetry: one white pixel at the centre of a 17 x 17 black frame
+# blurs into an image that is mirror-symmetric left/right and top/bottom, exactly.
+var sy = pixel_buffer_zeroed(17, 17, PF_RGBA8, err);
+i = 0;
+while (i < 289) { store8(pixel_buffer_data(sy) + i * 4 + 3, 255); i = i + 1; }
+rgba4(pixel_buffer_data(sy) + (8 * 17 + 8) * 4, 255, 255, 255, 255);
+var syb = gaussian_blur(sy, 3, err);
+var sym_ok = 1;
+var sy_y = 0;
+while (sy_y < 17) {
+    var sy_x = 0;
+    while (sy_x < 8) {
+        var c3 = 0;
+        while (c3 < 3) {
+            var left = load8(pixel_buffer_data(syb) + (sy_y * 17 + sy_x) * 4 + c3);
+            var right = load8(pixel_buffer_data(syb) + (sy_y * 17 + 16 - sy_x) * 4 + c3);
+            var top = load8(pixel_buffer_data(syb) + (sy_x * 17 + sy_y) * 4 + c3);
+            var bottom = load8(pixel_buffer_data(syb) + ((16 - sy_x) * 17 + sy_y) * 4 + c3);
+            if (left != right || top != bottom) { sym_ok = 0; }
+            c3 = c3 + 1;
+        }
+        sy_x = sy_x + 1;
+    }
+    sy_y = sy_y + 1;
+}
+assert_eq(sym_ok, 1, "gaussian_blur_symmetry: exact left/right and top/bottom mirror symmetry");
+assert_gt(load8(pixel_buffer_data(syb) + (8 * 17 + 8) * 4), 0, "and the centre is still lit");
+pixel_buffer_free(syb); pixel_buffer_free(sy);
+
+# Shifting hue by 360 degrees returns every byte within 1.
+var hs = pixel_buffer_zeroed(8, 8, PF_RGBA8, err);
+i = 0;
+while (i < 64) {
+    rgba4(pixel_buffer_data(hs) + i * 4, (i * 37) % 256, (i * 73) % 256, (i * 113) % 256, 255);
+    i = i + 1;
+}
+var hs0 = pixel_buffer_clone(hs);
+hue_shift(hs, f32_from(360.0));
+var hue_ok = 1;
+i = 0;
+while (i < 256) {
+    if (absd(load8(pixel_buffer_data(hs) + i), load8(pixel_buffer_data(hs0) + i)) > 1) { hue_ok = 0; }
+    i = i + 1;
+}
+assert_eq(hue_ok, 1, "hsl_hue_shift_360_identity: every byte within 1");
+pixel_buffer_free(hs); pixel_buffer_free(hs0);
+
+# Screen is commutative within 1.
+var vals = fl_alloc(56);
+rgba4(vals, 0, 0, 0, 255); rgba4(vals + 8, 255, 255, 255, 255); rgba4(vals + 16, 128, 64, 200, 255);
+rgba4(vals + 24, 50, 100, 150, 255); rgba4(vals + 32, 200, 30, 90, 255); rgba4(vals + 40, 1, 1, 1, 255);
+rgba4(vals + 48, 254, 254, 254, 255);
+var ab = fl_alloc(8);
+var ba = fl_alloc(8);
+var comm = 1;
+var a = 0;
+while (a < 7) {
+    var b = 0;
+    while (b < 7) {
+        blend_pixel(vals + a * 8, vals + b * 8, BM_SCREEN, 255, ab);
+        blend_pixel(vals + b * 8, vals + a * 8, BM_SCREEN, 255, ba);
+        var c = 0;
+        while (c < 3) {
+            if (absd(load8(ab + c), load8(ba + c)) > 1) { comm = 0; }
+            c = c + 1;
+        }
+        b = b + 1;
+    }
+    a = a + 1;
+}
+assert_eq(comm, 1, "blend_screen_commutativity: Screen(a, b) == Screen(b, a) within 1");
+
+var exit_code = assert_summary();
+# assert_summary() returns the raw failure count, and a wait status is 8 bits.
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

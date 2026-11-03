@@ -273,16 +273,16 @@ assert_eq(curves(argb, lut), RG_ERR_INVALID_FORMAT, "curves rejects non-Rgba8");
 # ================================================================
 test_group("grayscale");
 
-var b6 = mkbuf(3, 1);
-put(b6, 0, 255, 0, 0, 255);
-put(b6, 1, 0, 255, 0, 255);
-put(b6, 2, 0, 0, 255, 200);
-assert_eq(grayscale(b6), RG_ERR_NONE, "grayscale succeeds");
-assert_eq(px3(b6, 0, 76, 76, 76), 1, "grayscale red -> 76 (integer kernel)");
-assert_eq(px3(b6, 1, 149, 149, 149), 1, "grayscale green -> 149");
+var gs3 = mkbuf(3, 1);
+put(gs3, 0, 255, 0, 0, 255);
+put(gs3, 1, 0, 255, 0, 255);
+put(gs3, 2, 0, 0, 255, 200);
+assert_eq(grayscale(gs3), RG_ERR_NONE, "grayscale succeeds");
+assert_eq(px3(gs3, 0, 76, 76, 76), 1, "grayscale red -> 76 (integer kernel)");
+assert_eq(px3(gs3, 1, 149, 149, 149), 1, "grayscale green -> 149");
 # 28, not 29 — this is the integer kernel, not the float one.
-assert_eq(px3(b6, 2, 28, 28, 28), 1, "grayscale blue -> 28, the INTEGER kernel result");
-assert_eq(chan(b6, 2, 3), 200, "grayscale leaves alpha alone");
+assert_eq(px3(gs3, 2, 28, 28, 28), 1, "grayscale blue -> 28, the INTEGER kernel result");
+assert_eq(chan(gs3, 2, 3), 200, "grayscale leaves alpha alone");
 # grayscale is vectorised (luma via the SSE2 kernel, scatter scalar), so it
 # needs SIMD-group + odd-tail coverage. Five pixels is two pairs plus one tail.
 var g5 = mkbuf(5, 1);
@@ -333,21 +333,21 @@ assert_eq(chan(b7v, 5, 3), 33, "scalar tail preserves alpha");
 pixel_buffer_free(b7v);
 
 test_group("threshold");
-var b8 = mkbuf(2, 1);
-put(b8, 0, 0, 0, 255, 255);     # integer luma 28
-put(b8, 1, 0, 255, 0, 255);     # integer luma 149
-assert_eq(threshold(b8, 100), RG_ERR_NONE, "threshold succeeds");
-assert_eq(px3(b8, 0, 0, 0, 0), 1, "luma 28 below level 100 -> black");
-assert_eq(px3(b8, 1, 255, 255, 255), 1, "luma 149 above level 100 -> white");
+var th2 = mkbuf(2, 1);
+put(th2, 0, 0, 0, 255, 255);     # integer luma 28
+put(th2, 1, 0, 255, 0, 255);     # integer luma 149
+assert_eq(threshold(th2, 100), RG_ERR_NONE, "threshold succeeds");
+assert_eq(px3(th2, 0, 0, 0, 0), 1, "luma 28 below level 100 -> black");
+assert_eq(px3(th2, 1, 255, 255, 255), 1, "luma 149 above level 100 -> white");
 
 # The comparison is INCLUSIVE: lum == level is white. A strict `>` would make
 # this black, and no other assertion here distinguishes the two.
-put(b8, 0, 0, 0, 255, 255);
-assert_eq(threshold(b8, 28), RG_ERR_NONE, "threshold at exactly the luma succeeds");
-assert_eq(px3(b8, 0, 255, 255, 255), 1, "lum == level is WHITE (>=, not >)");
-put(b8, 0, 0, 0, 255, 255);
-assert_eq(threshold(b8, 29), RG_ERR_NONE, "threshold one above the luma succeeds");
-assert_eq(px3(b8, 0, 0, 0, 0), 1, "lum one below level is black");
+put(th2, 0, 0, 0, 255, 255);
+assert_eq(threshold(th2, 28), RG_ERR_NONE, "threshold at exactly the luma succeeds");
+assert_eq(px3(th2, 0, 255, 255, 255), 1, "lum == level is WHITE (>=, not >)");
+put(th2, 0, 0, 0, 255, 255);
+assert_eq(threshold(th2, 29), RG_ERR_NONE, "threshold one above the luma succeeds");
+assert_eq(px3(th2, 0, 0, 0, 0), 1, "lum one below level is black");
 
 # threshold is vectorised too — 3 pixels is one SIMD pair plus one tail pixel,
 # and the inclusive boundary must hold on BOTH paths.
@@ -366,6 +366,13 @@ assert_eq(threshold(t3, 29), RG_ERR_NONE, "3-pixel threshold above succeeds");
 assert_eq(px3(t3, 0, 0, 0, 0), 1, "SIMD pair: below level is black");
 assert_eq(px3(t3, 2, 0, 0, 0), 1, "SCALAR tail: below level is black");
 pixel_buffer_free(t3);
+
+# threshold_preserves_alpha: (200, 200, 200, 128) keeps alpha 128.
+var ta = mkbuf(1, 1);
+put(ta, 0, 200, 200, 200, 128);
+assert_eq(threshold(ta, 128), RG_ERR_NONE, "threshold on a translucent pixel succeeds");
+assert_eq(chan(ta, 0, 3), 128, "threshold_preserves_alpha");
+pixel_buffer_free(ta);
 
 # ================================================================
 # hue_shift
@@ -519,8 +526,8 @@ pixel_buffer_free(bg);
 assert_eq(auto_white_balance(argb), RG_ERR_INVALID_FORMAT, "awb rejects non-Rgba8");
 
 pixel_buffer_free(b1); pixel_buffer_free(b2); pixel_buffer_free(b3);
-pixel_buffer_free(b4); pixel_buffer_free(b5); pixel_buffer_free(b6);
-pixel_buffer_free(b7); pixel_buffer_free(b8); pixel_buffer_free(b9);
+pixel_buffer_free(b4); pixel_buffer_free(b5); pixel_buffer_free(gs3);
+pixel_buffer_free(b7); pixel_buffer_free(th2); pixel_buffer_free(b9);
 pixel_buffer_free(ba); pixel_buffer_free(bb); pixel_buffer_free(bc);
 pixel_buffer_free(bd); pixel_buffer_free(be); pixel_buffer_free(bf);
 pixel_buffer_free(argb);

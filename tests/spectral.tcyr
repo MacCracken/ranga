@@ -200,6 +200,66 @@ cie_xyz_free(w555); cie_xyz_free(w450); cie_xyz_free(w600);
 cie_xyz_free(wlo); cie_xyz_free(whi);
 cie_xyz_free(bbx); cie_xyz_free(bb3); cie_xyz_free(bb9); cie_xyz_free(id65);
 
+# ================================================================
+# The re-exported prakash items (rust-old/tests/spectral.rs, the 8 tests that
+# exercise prakash rather than ranga's bridge). prakash's own suite covers these
+# in depth; they are here so a prakash bump that changes what ranga re-exports
+# fails ranga's suite too. Three names differ from Rust's (parity doc):
+# CIE_1931_2DEG is cie_1931_table() with cie_cmf_len() rows.
+test_group("re-exported prakash items");
+
+# cie_cmf_data_structure: 380-780 nm in 5 nm steps is 81 rows.
+assert_eq(cie_cmf_len(), 81, "cie_cmf_data_structure: the CIE 1931 table has 81 rows");
+
+# cie_cmf_peak_y_bar: row 35 (555 nm) has the largest y-bar.
+var cmf = cie_1931_table();
+var y555 = load64(cmf + 35 * 24 + 8);
+var ybar_ok = 1;
+var ci = 0;
+while (ci < cie_cmf_len()) {
+    if (f64_gt(load64(cmf + ci * 24 + 8), f64_add(y555, 0.0000000001)) == 1) { ybar_ok = 0; }
+    ci = ci + 1;
+}
+assert_eq(ybar_ok, 1, "cie_cmf_peak_y_bar: no row exceeds 555 nm's y-bar");
+
+# illuminant_spds_valid: D65, D50, A, F2 and F11 each have 81 values from 380 nm.
+fn illum_ok(spd) {
+    if (spd == 0) { return 0; }
+    if (Spd_len(spd) != 81) { return 0; }
+    return approx(Spd_start_nm(spd), 380.0, 0.000001);
+}
+assert_eq(illum_ok(illuminant_d65()) && illum_ok(illuminant_d50()) && illum_ok(illuminant_a())
+  && illum_ok(illuminant_f2()) && illum_ok(illuminant_f11()), 1,
+  "illuminant_spds_valid: D65, D50, A, F2, F11 have 81 values from 380 nm");
+
+# color_temperature_to_rgb_neutral / _warm.
+var ct65 = color_temperature_to_rgb(6500.0);
+assert_eq(approx(Rgb_r(ct65), Rgb_g(ct65), 0.1) && approx(Rgb_g(ct65), Rgb_b(ct65), 0.1), 1,
+  "color_temperature_to_rgb_neutral: 6500 K is near-neutral");
+var ct20 = color_temperature_to_rgb(2000.0);
+assert_eq(f64_gt(Rgb_r(ct20), Rgb_b(ct20)), 1, "color_temperature_to_rgb_warm: 2000 K has r > b");
+
+# srgb_gamma_roundtrip over Rust's eight values, within 1e-6.
+var gv = fl_alloc(64);
+store64(gv, 0.0); store64(gv + 8, 0.01); store64(gv + 16, 0.04045); store64(gv + 24, 0.1);
+store64(gv + 32, 0.5); store64(gv + 40, 0.73); store64(gv + 48, 0.99); store64(gv + 56, 1.0);
+var gam_ok = 1;
+var gi = 0;
+while (gi < 8) {
+    var gx = load64(gv + gi * 8);
+    if (approx(linear_to_srgb_gamma(srgb_gamma_to_linear(gx)), gx, 0.000001) == 0) { gam_ok = 0; }
+    gi = gi + 1;
+}
+assert_eq(gam_ok, 1, "srgb_gamma_roundtrip: all eight values within 1e-6");
+fl_free(gv);
+
+# wien_peak_sun_temperature: 5778 K peaks near 501 nm (wien_peak is in metres).
+assert_eq(approx(f64_mul(wien_peak(5778.0), 1000000000.0), 501.0, 10.0), 1,
+  "wien_peak_sun_temperature: about 501 nm");
+
+# cri_d65_illuminant: D65 renders colour almost perfectly.
+assert_eq(f64_gt(color_rendering_index(illuminant_d65()), 95.0), 1, "cri_d65_illuminant: CRI above 95");
+
 var exit_code = assert_summary();
 if (exit_code > 0) { exit_code = 1; }
 sys_exit_group(exit_code);

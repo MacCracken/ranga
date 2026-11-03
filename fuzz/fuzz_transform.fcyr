@@ -1,0 +1,113 @@
+# Fuzz: geometric transforms.
+# Rust 1.0.1 target: rust-old/fuzz/fuzz_targets/fuzz_transform.rs (crop, resize,
+# both flips, affine_transform with entries clamped to -10..10; no crash).
+# Invariants (from Rust's definitions):
+#   - crop clamps the rectangle to the image (right/bottom to the size, then
+#     right >= left and bottom >= top). An empty result is 0 x 0. Otherwise it is
+#     exactly the source pixels of that rectangle.
+#   - resize returns the requested size, and a Nearest resize to the same size is
+#     a copy.
+#   - flip_horizontal and flip_vertical are each their own inverse.
+#   - affine_transform returns out_w x out_h, or RG_ERR_OTHER for a singular
+#     matrix (Rust's Other), and the identity matrix with Nearest is a copy.
+
+include "src/error.cyr"
+include "src/bytevec.cyr"
+include "src/simd_u8.cyr"
+include "src/pixel.cyr"
+include "src/transform.cyr"
+include "fuzz/fz_common.cyr"
+
+var ERR = 0;
+
+fn imin(a, b) { if (a < b) { return a; } return b; }
+fn imax(a, b) { if (a > b) { return a; } return b; }
+
+fn one(iter) {
+    var w = 1 + fz_u(48);
+    var h = 1 + fz_u(48);
+    var src = fz_rgba(w, h);
+    var ps = pixel_buffer_data(src);
+
+    # crop
+    var l = fz_u(64); var t = fz_u(64); var rr = fz_u(64); var bb = fz_u(64);
+    var cr = crop(src, l, t, rr, bb, ERR);
+    fz_check(cr != 0 && load64(ERR) == RG_ERR_NONE, "crop failed");
+    var cl = imin(l, w);
+    var ct = imin(t, h);
+    var cw = imax(imin(rr, w), cl) - cl;
+    var ch = imax(imin(bb, h), ct) - ct;
+    if (cw == 0 || ch == 0) { cw = 0; ch = 0; }
+    fz_check(fz_dims(cr, cw, ch), "crop returned the wrong size");
+    var pc = pixel_buffer_data(cr);
+    var y = 0;
+    while (y < ch) {
+        var x = 0;
+        while (x < cw) {
+            var so = ((ct + y) * w + cl + x) * 4;
+            var co = (y * cw + x) * 4;
+            fz_check(load8(pc + co) == load8(ps + so) && load8(pc + co + 3) == load8(ps + so + 3),
+              "crop did not copy its rectangle");
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    pixel_buffer_free(cr);
+
+    # resize
+    var nw = 1 + fz_u(63);
+    var nh = 1 + fz_u(63);
+    var flt = fz_u(3);
+    var rs = resize(src, nw, nh, flt, ERR);
+    fz_check(rs != 0 && fz_dims(rs, nw, nh), "resize did not return the requested size");
+    pixel_buffer_free(rs);
+    var same = resize(src, w, h, SF_NEAREST, ERR);
+    fz_check(fz_same(same, src), "a Nearest resize to the same size is not a copy");
+    pixel_buffer_free(same);
+
+    # flips
+    var fh = flip_horizontal(src, ERR);
+    var fh2 = flip_horizontal(fh, ERR);
+    fz_check(fz_same(fh2, src), "flip_horizontal twice is not the identity");
+    pixel_buffer_free(fh); pixel_buffer_free(fh2);
+    var fv = flip_vertical(src, ERR);
+    var fv2 = flip_vertical(fv, ERR);
+    fz_check(fz_same(fv2, src), "flip_vertical twice is not the identity");
+    pixel_buffer_free(fv); pixel_buffer_free(fv2);
+
+    # affine, entries in -10..10 as in the Rust target
+    var m = affine_new(f64_sub(f64_mul(f32_to(fz_unit()), 20.0), 10.0), f64_sub(f64_mul(f32_to(fz_unit()), 20.0), 10.0),
+      f64_sub(f64_mul(f32_to(fz_unit()), 20.0), 10.0), f64_sub(f64_mul(f32_to(fz_unit()), 20.0), 10.0),
+      f64_sub(f64_mul(f32_to(fz_unit()), 20.0), 10.0), f64_sub(f64_mul(f32_to(fz_unit()), 20.0), 10.0));
+    if (fz_u(8) == 0) { store64(m + 8, 0); store64(m, 0); store64(m + 16, 0); }   # singular
+    var ow = imin(w, 32);
+    var oh = imin(h, 32);
+    store64(ERR, 0x7777);
+    var at = affine_transform(src, m, ow, oh, fz_u(3), ERR);
+    var inv = affine_inverse(m);
+    if (inv == 0) {
+        fz_check(at == 0 && load64(ERR) == RG_ERR_OTHER, "a singular affine did not report OTHER");
+    } else {
+        fz_check(at != 0 && fz_dims(at, ow, oh), "affine_transform returned the wrong size");
+        pixel_buffer_free(at);
+        affine_free(inv);
+    }
+    affine_free(m);
+    var idm = affine_new(1.0, 0.0, 0.0, 1.0, 0.0, 0.0);
+    var ai = affine_transform(src, idm, w, h, SF_NEAREST, ERR);
+    fz_check(fz_same(ai, src), "the identity affine with Nearest is not a copy");
+    pixel_buffer_free(ai);
+    affine_free(idm);
+
+    pixel_buffer_free(src);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    ERR = fl_alloc(8);
+    return fz_run("fuzz_transform", 1500, &one);
+}
+
+var r = main();
+sys_exit_group(r);
