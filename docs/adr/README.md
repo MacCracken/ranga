@@ -21,5 +21,6 @@ Decisions about ranga — what we chose, the context, and the consequences we ac
 
 - [001 — The YUV→RGB inverse does not reproduce Rust's i16 wrap](001-yuv-inverse-does-not-reproduce-rusts-i16-wrap.md)
 - [002 — f32 transcendentals follow correct rounding, not the oracle host's libm](002-f32-transcendentals-follow-correct-rounding-not-glibc.md)
+- [003 — The separable blurs keep an f32 intermediate and round once](003-blur-keeps-an-f32-intermediate-and-rounds-once.md)
 
 The first two ADRs use three-digit numbers. New ones continue that series (`003-…`).

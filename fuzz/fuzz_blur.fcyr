@@ -8,16 +8,15 @@
 #     only) RG_ERR_OTHER exactly when a sigma is <= 0, as Rust's Other.
 #   - Radius 0 is a copy for gaussian_blur, box_blur, median and bilateral.
 #   - A uniform image is unchanged by median.
-#   - On a uniform image of value v, Rust's own outputs stay in these bounds, which
-#     were measured against the Rust 1.0.1 crate over every v and radii 0..10:
-#       - gaussian_blur: [v - 2, v]. Rust truncates after each of its two passes,
-#         and its weights sum to just under 1, so it darkens a uniform image in
-#         979 of 2,816 cases. Its own uniform test passes only because of the
-#         value it uses. The port matches Rust exactly.
-#       - box_blur: [v - 2, v], from the same two-pass truncation (4,278 of 13,824
-#         measured cases change).
-#       - bilateral: [v - 1, v].
-#       - unsharp_mask: [v, v + 2 * amount + 1], since it adds amount * (v - blur).
+#   - On a uniform image of value v:
+#       - gaussian_blur, box_blur and unsharp_mask return v exactly. The blurs keep
+#         an f32 intermediate and round once (docs/adr/003-blur-keeps-an-f32-
+#         intermediate-and-rounds-once.md); unsharp adds amount * (v - blur),
+#         which is then 0. Rust 1.0.1 truncated between passes and darkened a
+#         uniform image by up to 2 (gaussian in 979 of 2,816 measured cases, box
+#         in 4,278 of 13,824), so up to 2.3.0 this target asserted [v - 2, v].
+#       - bilateral: [v - 1, v], measured against the Rust 1.0.1 crate over every
+#         v and radii 0..10.
 #   - bilateral with a NaN sigma is a copy (every weight NaN, so `sum_w > 0`
 #     fails and each pixel is copied, as in Rust).
 
@@ -54,18 +53,18 @@ fn within(out, src, lo, hi) {
 
 # Runs each filter at `radius` on `src`.
 # expect: 0 = shape only, 1 = every output is an exact copy (radius 0),
-# 2 = `src` is uniform (Rust's bounds above).
+# 2 = `src` is uniform (the invariants above).
 fn run_all(src, radius, expect) {
     var gb = gaussian_blur(src, radius, ERR);
     ok_same_shape(gb, src, "gaussian_blur failed");
     if (expect == 1) { fz_check(fz_same(gb, src), "gaussian_blur radius 0 is not a copy"); }
-    if (expect == 2) { fz_check(within(gb, src, 0 - 2, 0), "gaussian_blur left [v - 2, v] on a uniform image"); }
+    if (expect == 2) { fz_check(fz_same(gb, src), "gaussian_blur changed a uniform image"); }
     pixel_buffer_free(gb);
 
     var bb = box_blur(src, radius, ERR);
     ok_same_shape(bb, src, "box_blur failed");
     if (expect == 1) { fz_check(fz_same(bb, src), "box_blur radius 0 is not a copy"); }
-    if (expect == 2) { fz_check(within(bb, src, 0 - 2, 0), "box_blur left [v - 2, v] on a uniform image"); }
+    if (expect == 2) { fz_check(fz_same(bb, src), "box_blur changed a uniform image"); }
     pixel_buffer_free(bb);
 
     var mr = radius;
@@ -79,10 +78,7 @@ fn run_all(src, radius, expect) {
     var amount = f32_from(f64_mul(f32_to(af), 5.0));
     var um = unsharp_mask(src, radius, amount, ERR);
     ok_same_shape(um, src, "unsharp_mask failed");
-    if (expect == 2) {
-        var top = f64_to(f64_mul(f32_to(amount), 2.0)) + 1;
-        fz_check(within(um, src, 0, top), "unsharp_mask left [v, v + 2 * amount + 1] on a uniform image");
-    }
+    if (expect == 2) { fz_check(fz_same(um, src), "unsharp_mask changed a uniform image"); }
     pixel_buffer_free(um);
 
     var br = radius;

@@ -78,20 +78,42 @@ assert_eq(chan(g0, 5, 0), 100, "radius 0 is an exact copy");
 assert_eq(pixel_buffer_data(g0) != pixel_buffer_data(b1), 1, "radius 0 returns a SEPARATE allocation (a clone)");
 pixel_buffer_free(g0);
 
-# ⚠ A uniform image does NOT survive gaussian_blur unchanged, and asserting
-# that it does would mean "fixing" a faithful port. The r=1 taps sum to
-# 0.999999881 in f32 — just BELOW 1 — so a uniform 100 accumulates to 99.99998
-# and `as u8` truncates to 99 on the horizontal pass, then 98 on the vertical.
-# The oracle confirms Rust produces exactly the same 98.
-#
-# box_blur below is the instructive contrast: its 1/3 taps sum to 1.0000000298,
-# just ABOVE 1, so a uniform image DOES survive it. Same code path, opposite
-# side of the rounding boundary.
+# A uniform image survives both blurs EXACTLY. Rust 1.0.1 did not: it truncated
+# each pass to u8, and its r=1 taps sum to 0.999999881 in f32, so a uniform 100
+# went to 99 on the horizontal pass and 98 on the vertical. ranga keeps the
+# intermediate in f32 and rounds once (docs/adr/003-blur-keeps-an-f32-
+# intermediate-and-rounds-once.md).
 var g1 = gaussian_blur(b1, 1, err);
 assert_eq(load64(err), RG_ERR_NONE, "gaussian_blur succeeds");
-assert_eq(chan(g1, 5, 0), 98, "uniform 100 -> 98: the f32 kernel sums just below 1 and each pass truncates");
-assert_eq(chan(g1, 0, 0), 98, "edge clamping gives the corner the same 98, not a darker fringe");
+assert_eq(chan(g1, 5, 0), 100, "uniform 100 stays 100 (Rust 1.0.1 gave 98)");
+assert_eq(chan(g1, 0, 0), 100, "edge clamping gives the corner the same 100, not a darker fringe");
 pixel_buffer_free(g1);
+
+# Every value at every small radius, both blurs: no darkening anywhere. Rust 1.0.1
+# changed 979 of these 2,816 gaussian cases and 4,278 of 13,824 box cases.
+var uv = mkbuf(5, 5);
+var udark = 0;
+var uval = 0;
+while (uval < 256) {
+    fill(uv, uval);
+    var urad = 1;
+    while (urad <= 10) {
+        var ug = gaussian_blur(uv, urad, err);
+        var ub = box_blur(uv, urad, err);
+        var upx = 0;
+        while (upx < 25) {
+            if (chan(ug, upx, 0) != uval || chan(ug, upx, 2) != uval) { udark = udark + 1; }
+            if (chan(ub, upx, 0) != uval || chan(ub, upx, 2) != uval) { udark = udark + 1; }
+            upx = upx + 1;
+        }
+        pixel_buffer_free(ug);
+        pixel_buffer_free(ub);
+        urad = urad + 1;
+    }
+    uval = uval + 1;
+}
+assert_eq(udark, 0, "every uniform value 0..255 survives both blurs at radii 1..10");
+pixel_buffer_free(uv);
 
 # A single bright pixel must SPREAD — that is what distinguishes a blur from a
 # copy, and the centre must drop.
@@ -102,6 +124,12 @@ assert_lt(chan(g2, 12, 0), 255, "the bright centre is dimmed by the blur");
 assert_gt(chan(g2, 11, 0), 0, "brightness spread to the left neighbour");
 assert_gt(chan(g2, 7, 0), 0, "brightness spread to the pixel above (the VERTICAL pass ran)");
 assert_eq(chan(g2, 0, 0), 0, "a far corner is untouched by a radius-1 kernel");
+# ROUNDED ONCE, not truncated twice. The r=1 taps are 0.1065 / 0.7870 / 0.1065,
+# so the centre accumulates to 157.93 and the diagonal to 2.89. Rust 1.0.1
+# truncated the horizontal pass first and gave 157 and 2.
+assert_eq(chan(g2, 12, 0), 158, "the centre is 157.93 rounded, not 157 (Rust's double truncation)");
+assert_eq(chan(g2, 11, 0), 21, "the left neighbour is 21.37 rounded");
+assert_eq(chan(g2, 6, 0), 3, "the diagonal is 2.89 rounded, not 2");
 pixel_buffer_free(g2);
 
 # Alpha is copied through, never blurred — blurring coverage is a classic bug.
@@ -115,7 +143,7 @@ pixel_buffer_free(g3);
 
 var bx = box_blur(b1, 1, err);
 assert_eq(load64(err), RG_ERR_NONE, "box_blur succeeds");
-assert_eq(chan(bx, 5, 0), 100, "box_blur DOES preserve a uniform image — its taps sum just above 1");
+assert_eq(chan(bx, 5, 0), 100, "box_blur preserves a uniform image too");
 pixel_buffer_free(bx);
 
 # The two blurs must DIFFER on a point source: box weights all taps equally,

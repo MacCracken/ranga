@@ -23,6 +23,11 @@
 > [`scripts/oracle`](../../scripts/oracle/README.md) now measures this on every run,
 > and the six remaining SUSPECT items are all GPU (roadmap 2.5.x). Rows below that
 > 2.2.0 changed are marked "(2.2.0)".
+>
+> **Updated for 2.3.1.** `gaussian_blur`, `box_blur` and `unsharp_mask` move from
+> PARITY to IMPROVED. Rust's blur darkening is fixed in Cyrius, not reproduced
+> ([ADR 003](../adr/003-blur-keeps-an-f32-intermediate-and-rounds-once.md)), and the
+> 26 GPU benchmarks are ported.
 
 ## How each item is classified
 
@@ -44,10 +49,10 @@ item is either ported or given an ADR. Nothing stays SUSPECT.
 | Area (Rust files) | Items | PARITY | IMPROVED | DIV-DOC | PARTIAL | MISSING | SUSPECT |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | error, lib, pixel, color, convert | 88 | 58 | 3 | 16 | 7 | 4 | 0 |
-| filter, transform, histogram | 73 | 57 | 1 | 4 | 0 | 11 | 0 |
+| filter, transform, histogram | 73 | 54 | 4 | 4 | 0 | 11 | 0 |
 | composite, blend, icc, spectral, hwaccel | 70 | 57 | 1 | 5 | 3 | 4 | 0 |
 | gpu (context, buffer, shaders, pipeline) | 72 | 39 | 0 | 4 | 9 | 14 | 6 |
-| **Total** | **303** | **211** | **5** | **29** | **19** | **33** | **6** |
+| **Total** | **303** | **208** | **8** | **29** | **19** | **33** | **6** |
 
 An item is a pub fn (impl methods included), struct, enum, const, or trait impl/derive.
 Each derive counts once per type. The M7 audit counted 318 under a looser
@@ -109,6 +114,11 @@ convention, so the two totals are not comparable line for line.
 - **`brightness`**: a huge offset saturates. Rust's i16 wrap, which turns
   `(255, 0, 0)` at offset 1000, is not reproduced; byte-exact on 1,042 ordinary offsets.
 - **`blend_row`**: an invalid mode returns `RG_ERR_INVALID_PARAMETER`.
+- **`gaussian_blur`, `box_blur`, `unsharp_mask`** (2.3.1, ADR 003): the blurs keep an
+  f32 intermediate and round once. Rust truncated after each pass, which biased
+  output about one count dark (mean −1.00, worst −1.94) and darkened a uniform image
+  by up to 2. Now the mean error is 0.00, the worst 0.50, a uniform image is exact,
+  and the blurs are 12% faster.
 
 ## Deliberate divergences (documented; not to be re-litigated)
 
@@ -172,6 +182,7 @@ convention, so the two totals are not comparable line for line.
 | Rust item | Port | Status | What is wrong or missing |
 | --- | --- | --- | --- |
 | `levels`, `hue_shift`, `bilateral`, `Affine::inverse`, `affine_transform`, `Affine::is_identity` | filter_point.cyr, filter_kernel.cyr, transform.cyr | PARITY (2.2.0) | Were SUSPECT: f64 where Rust is f32 (levels, hue_shift, bilateral), a reassociated inverse, a NaN-passing identity test. Also bilateral's σ ≤ 0 → OTHER and NaN σ proceeding. Bit-exact on every oracle case. |
+| `gaussian_blur`, `box_blur`, `unsharp_mask` | filter_kernel.cyr | IMPROVED (2.3.1) | Were PARITY with a Rust defect: truncation after each separable pass darkened a uniform image by up to 2 and biased every image about one count dark. Fixed in Cyrius by ADR 003; values move 0 to +2 against Rust, never down. |
 | `Affine::rotate` | transform.cyr:100 | PARITY (2.1.2) | The review counted this as parity with a documented NaN for \|θ\| ≥ 2^63. That guard had outlived the toolchain fault it worked around, so `rotate(1e20)` was NaN where Rust is finite. 2.1.2 delegates every finite angle; the item is not counted twice. |
 | `Lut3d` Clone | — | MISSING | Heap-owning, and there is no `lut3d_clone`. |
 | `Affine`: Clone, Copy, PartialEq, Serialize, Deserialize | — | MISSING ×5 | No `affine_clone` / `affine_eq`, and no codec. |
@@ -249,7 +260,7 @@ That is counted as PARITY.
 | 161 doctests (118 runnable, 110 with asserts, 42 `no_run`, 1 `ignore`) | ~85 covered, 16 partial, 10 missing (of the 110) |
 | Property tests (31, proptest) | **All 31 since 2.3.0** (`properties.tcyr`): an edge grid plus 4,096 seeded random inputs each. |
 | Photoshop golden vectors (7 modes on one fixed pixel pair) | **Pinned since 2.3.0,** within Rust's ±2. |
-| 134 benchmarks (108 CPU, 26 GPU) | **The 108 CPU benchmarks since 2.3.0,** under Rust's names and on its workloads (`ranga.bcyr`, `spectral.bcyr`). The 26 GPU ones wait on a decision (roadmap 2.3.x). |
+| 134 benchmarks (108 CPU, 26 GPU) | **All 134:** the 108 CPU benchmarks since 2.3.0 (`ranga.bcyr`, `spectral.bcyr`) and the 26 GPU ones since 2.3.1 (`gpu.bcyr`, run on the AMD dev host), under Rust's names and on its workloads. Five GPU benchmarks print `MISSING` until their operations are ported (2.5.x). |
 | 8 fuzz targets | **All 8 since 2.3.0** (`fuzz/`), with invariants, run by CI under `--poison`. |
 | Oracle outputs (no Rust counterpart) | **Captured since 2.3.0:** `oracle_golden.tcyr` checks 53 exact groups (~2.1M values) against Rust 1.0.1's digests. |
 | 11 examples | **0.** `docs/examples/` is empty, and the guides are Rust-era. |

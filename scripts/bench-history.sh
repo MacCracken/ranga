@@ -4,14 +4,16 @@ set -euo pipefail
 # Run ranga's Cyrius benchmark suite and append the results to a CSV history.
 #
 # Usage:
-#   ./scripts/bench-history.sh                       # both suites -> bench-history.csv
+#   ./scripts/bench-history.sh                       # all suites -> bench-history.csv
 #   ./scripts/bench-history.sh results.csv           # custom CSV
 #   ./scripts/bench-history.sh "" tests/other.bcyr   # one custom suite
 #
-# The default suites are tests/ranga.bcyr (100 CPU benchmarks) and
-# tests/spectral.bcyr (8). The second needs prakash, so it runs only when
-# lib/prakash.cyr is vendored (`cyrius deps --features spectral`); otherwise it is
-# skipped with a note, as Rust skips its feature-gated bench.
+# The default suites are tests/ranga.bcyr (100 CPU benchmarks), tests/spectral.bcyr
+# (8) and tests/gpu.bcyr (26). spectral needs prakash and gpu needs mabda, so each
+# runs only when its library is vendored (`cyrius deps --features spectral,gpu`);
+# otherwise it is skipped with a note. gpu.bcyr also needs an AMD GPU for its GPU
+# half; without one it records only the CPU half. Its MISSING lines (operations
+# the port does not have yet) carry no timing and are not recorded.
 #
 # Until 2.1.2 this was still the Rust script: it ran `cargo bench` and wrote
 # benches/history.csv, neither of which exists in this tree. So it failed on every
@@ -48,6 +50,11 @@ if [ -z "${2:-}" ]; then
         SUITES+=(tests/spectral.bcyr)
     else
         echo "note: lib/prakash.cyr is not vendored; skipping tests/spectral.bcyr"
+    fi
+    if [ -f lib/mabda.cyr ]; then
+        SUITES+=(tests/gpu.bcyr)
+    else
+        echo "note: lib/mabda.cyr is not vendored; skipping tests/gpu.bcyr"
     fi
 fi
 

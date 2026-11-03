@@ -1,0 +1,225 @@
+# gpu.bcyr — GPU against CPU at 1080p, rust-old/benches/gpu.rs
+#
+# Rust's 26 GPU benchmarks under the same names, inputs and parameters: 13 GPU
+# operations, each paired with the CPU operation it replaces. A uniform 128
+# frame everywhere except the blur, which uses the `i % 256` frame, and dst 64
+# for blend and dissolve.
+#
+# Needs the gpu feature (`cyrius deps --features gpu`) and an AMD GPU that mabda's
+# native backend can open. The CPU half runs on every host. Without a GPU, the
+# GPU half prints one SKIPPED line instead of timings.
+#
+# WHAT IS MISSING. Five GPU benchmarks print `MISSING:` instead of a time,
+# because the port has no implementation yet (roadmap 2.5.x):
+#   gpu_blend_normal_1080p                        no blend kernel
+#   gpu_gaussian_blur_r3_1080p                    no loop helpers in gpu_spirv
+#   gpu_noise_gaussian_1080p                      no log/sin/cos in the lowerer
+#   gpu_resize_bilinear_1080p_to_720p             over mabda's 256-id cap
+#   gpu_chain_invert_brightness_saturation_1080p  no GpuChain
+# The first four are probed once with a real call. When an operation stops
+# reporting UNSUPPORTED it is timed, so this list cannot go stale silently.
+#
+# Every GPU call uploads the frame, dispatches and reads it back, as Rust's did.
+# In-place operations run repeatedly on one buffer, also as in Rust.
+
+include "src/error.cyr"
+include "src/bytevec.cyr"
+include "src/simd_u8.cyr"
+include "src/pixel.cyr"
+include "src/color.cyr"
+include "src/composite.cyr"
+include "src/transform.cyr"
+include "src/filter_point.cyr"
+include "src/filter_kernel.cyr"
+include "src/blend.cyr"
+include "src/gpu_spirv.cyr"
+include "src/gpu_kernels.cyr"
+include "src/gpu_context.cyr"
+include "src/gpu_buffer.cyr"
+include "src/gpu_pipeline.cyr"
+
+var W = 1920;
+var H = 1080;
+var err = 0;
+var gerr = 0;
+var CTX = 0;
+
+fn mk_uniform(v) {
+    var b = pixel_buffer_zeroed(W, H, PF_RGBA8, err);
+    if (b == 0) { return 0; }
+    bv_fill(pixel_buffer_bv(b), v);
+    return b;
+}
+
+fn mk_varied() {
+    var b = pixel_buffer_zeroed(W, H, PF_RGBA8, err);
+    if (b == 0) { return 0; }
+    var p = pixel_buffer_data(b);
+    var n = pixel_buffer_len(b);
+    var i = 0;
+    while (i < n) { store8(p + i, i & 255); i = i + 1; }
+    return b;
+}
+
+fn frame(name, iters, fp) {
+    var bn = bench_new(name);
+    bench_batch_start(bn);
+    var i = 0;
+    while (i < iters) { fncall0(fp); i = i + 1; }
+    bench_batch_stop(bn, iters);
+    bench_report(bn);
+    return 0;
+}
+
+fn missing(name, why) {
+    print("  MISSING: ", 11);
+    print(name, strlen(name));
+    print(" (", 2);
+    print(why, strlen(why));
+    println(")");
+    return 0;
+}
+
+# Frames. One per benchmark where Rust cloned a fresh one, so an in-place
+# operation never feeds another benchmark's input.
+var F_SRC = 0;
+var F_DST = 0;
+var F_CPU_DST = 0;
+var F_INV = 0;
+var F_CINV = 0;
+var F_GRAY = 0;
+var F_CGRAY = 0;
+var F_BC = 0;
+var F_CBR = 0;
+var F_SAT = 0;
+var F_CSAT = 0;
+var F_VAR = 0;
+var F_SEQ = 0;
+var F_CNOISE = 0;
+var F_DSRC = 0;
+var F_DDST = 0;
+var F_FADE = 0;
+var F_CFADE = 0;
+var F_GEO = 0;
+
+fn w_gpu_invert() { gpu_invert(CTX, F_INV, gerr); return 0; }
+fn w_gpu_grayscale() { gpu_grayscale(CTX, F_GRAY, gerr); return 0; }
+fn w_gpu_bc() { gpu_brightness_contrast(CTX, F_BC, 0.1, 1.2, gerr); return 0; }
+fn w_gpu_saturation() { gpu_saturation(CTX, F_SAT, 1.5, gerr); return 0; }
+fn w_gpu_sequential() {
+    gpu_invert(CTX, F_SEQ, gerr);
+    gpu_brightness_contrast(CTX, F_SEQ, 0.1, 1.2, gerr);
+    gpu_saturation(CTX, F_SEQ, 1.5, gerr);
+    return 0;
+}
+fn w_gpu_dissolve() { gpu_dissolve(CTX, F_DSRC, F_DDST, 0.5, gerr); return 0; }
+fn w_gpu_fade() { gpu_fade(CTX, F_FADE, 0.5, gerr); return 0; }
+fn w_gpu_crop() { pixel_buffer_free(gpu_crop(CTX, F_GEO, 240, 180, 1520, 900, gerr)); return 0; }
+fn w_gpu_flip_h() { pixel_buffer_free(gpu_flip_horizontal(CTX, F_GEO, gerr)); return 0; }
+fn w_gpu_blend() { gpu_blend(CTX, F_SRC, F_DST, BM_NORMAL, 0.8, gerr); return 0; }
+fn w_gpu_blur() { pixel_buffer_free(gpu_gaussian_blur(CTX, F_VAR, 3, gerr)); return 0; }
+fn w_gpu_noise() { gpu_noise_gaussian(CTX, F_CNOISE, 0.1, 42, gerr); return 0; }
+fn w_gpu_resize_bl() {
+    pixel_buffer_free(gpu_resize(CTX, F_GEO, 1280, 720, SF_BILINEAR, gerr));
+    return 0;
+}
+
+fn w_cpu_blend() {
+    blend_row_normal(pixel_buffer_data(F_SRC), pixel_buffer_data(F_CPU_DST), W * H, 204);
+    return 0;
+}
+fn w_cpu_invert() { invert(F_CINV); return 0; }
+fn w_cpu_grayscale() { grayscale(F_CGRAY); return 0; }
+fn w_cpu_brightness() { brightness(F_CBR, f32_from(0.1)); return 0; }
+fn w_cpu_saturation() { saturation(F_CSAT, f32_from(1.5)); return 0; }
+fn w_cpu_blur() { pixel_buffer_free(gaussian_blur(F_VAR, 3, err)); return 0; }
+fn w_cpu_noise() { noise_gaussian(F_CNOISE, f32_from(0.1), 42); return 0; }
+fn w_cpu_dissolve() { pixel_buffer_free(dissolve(F_DSRC, F_DDST, f32_from(0.5), err)); return 0; }
+fn w_cpu_fade() { fade(F_CFADE, f32_from(0.5)); return 0; }
+fn w_cpu_crop() { pixel_buffer_free(crop(F_GEO, 240, 180, 1520, 900, err)); return 0; }
+fn w_cpu_resize_bl() { pixel_buffer_free(resize(F_GEO, 1280, 720, SF_BILINEAR, err)); return 0; }
+fn w_cpu_flip_h() { pixel_buffer_free(flip_horizontal(F_GEO, err)); return 0; }
+
+# Time a GPU operation that the native backend may not have yet. One probe call
+# decides: UNSUPPORTED prints MISSING, anything else is timed.
+fn gpu_or_missing(name, iters, fp, why) {
+    store64(gerr, RG_GPU_ERR_NONE);
+    fncall0(fp);
+    if (load64(gerr) == RG_GPU_ERR_UNSUPPORTED) { missing(name, why); return 0; }
+    frame(name, iters, fp);
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    err = fl_alloc(8);
+    gerr = fl_alloc(8);
+
+    F_SRC = mk_uniform(128);
+    F_DST = mk_uniform(64);
+    F_CPU_DST = mk_uniform(64);
+    F_INV = mk_uniform(128);
+    F_CINV = mk_uniform(128);
+    F_GRAY = mk_uniform(128);
+    F_CGRAY = mk_uniform(128);
+    F_BC = mk_uniform(128);
+    F_CBR = mk_uniform(128);
+    F_SAT = mk_uniform(128);
+    F_CSAT = mk_uniform(128);
+    F_VAR = mk_varied();
+    F_SEQ = mk_uniform(128);
+    F_CNOISE = mk_uniform(128);
+    F_DSRC = mk_uniform(128);
+    F_DDST = mk_uniform(64);
+    F_FADE = mk_uniform(128);
+    F_CFADE = mk_uniform(128);
+    F_GEO = mk_uniform(128);
+
+    CTX = gpu_context_new_amd(gerr);
+    if (CTX == 0) {
+        println("  SKIPPED: 13 GPU benchmarks (no AMD GPU context on this host)");
+    }
+
+    # In Rust's order: each GPU benchmark, then its CPU counterpart.
+    if (CTX != 0) {
+        gpu_or_missing("gpu_blend_normal_1080p", 20, &w_gpu_blend, "no blend kernel");
+    }
+    frame("cpu_blend_normal_1080p", 20, &w_cpu_blend);
+    if (CTX != 0) { frame("gpu_invert_1080p", 20, &w_gpu_invert); }
+    frame("cpu_invert_1080p", 100, &w_cpu_invert);
+    if (CTX != 0) { frame("gpu_grayscale_1080p", 20, &w_gpu_grayscale); }
+    frame("cpu_grayscale_1080p", 50, &w_cpu_grayscale);
+    if (CTX != 0) { frame("gpu_brightness_contrast_1080p", 20, &w_gpu_bc); }
+    frame("cpu_brightness_1080p", 200, &w_cpu_brightness);
+    if (CTX != 0) { frame("gpu_saturation_1080p", 20, &w_gpu_saturation); }
+    frame("cpu_saturation_1080p", 20, &w_cpu_saturation);
+    if (CTX != 0) {
+        gpu_or_missing("gpu_gaussian_blur_r3_1080p", 10, &w_gpu_blur, "no loop helpers in gpu_spirv");
+    }
+    frame("cpu_gaussian_blur_r3_1080p", 5, &w_cpu_blur);
+    if (CTX != 0) {
+        missing("gpu_chain_invert_brightness_saturation_1080p", "no GpuChain");
+        frame("gpu_sequential_invert_brightness_saturation_1080p", 10, &w_gpu_sequential);
+        gpu_or_missing("gpu_noise_gaussian_1080p", 10, &w_gpu_noise, "no log/sin/cos in the lowerer");
+    }
+    frame("cpu_noise_gaussian_1080p", 3, &w_cpu_noise);
+    if (CTX != 0) { frame("gpu_dissolve_1080p", 20, &w_gpu_dissolve); }
+    frame("cpu_dissolve_1080p", 10, &w_cpu_dissolve);
+    if (CTX != 0) { frame("gpu_fade_1080p", 20, &w_gpu_fade); }
+    frame("cpu_fade_1080p", 20, &w_cpu_fade);
+    if (CTX != 0) { frame("gpu_crop_1080p_to_720p", 20, &w_gpu_crop); }
+    frame("cpu_crop_1080p_to_720p", 200, &w_cpu_crop);
+    if (CTX != 0) {
+        gpu_or_missing("gpu_resize_bilinear_1080p_to_720p", 20, &w_gpu_resize_bl,
+          "over mabda's 256-id cap");
+    }
+    frame("cpu_resize_bilinear_1080p_to_720p", 5, &w_cpu_resize_bl);
+    if (CTX != 0) { frame("gpu_flip_horizontal_1080p", 20, &w_gpu_flip_h); }
+    frame("cpu_flip_horizontal_1080p", 50, &w_cpu_flip_h);
+
+    if (CTX != 0) { gpu_context_free(CTX); }
+    return 0;
+}
+
+var r = main();
+sys_exit_group(r);

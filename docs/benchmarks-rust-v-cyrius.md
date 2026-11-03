@@ -1,10 +1,15 @@
-# Benchmarks — Rust 1.0.1 vs. Cyrius 2.3.0
+# Benchmarks — Rust 1.0.1 vs. Cyrius 2.3.1
 
-The Rust side is the crate frozen at tag `1.0.1` and kept at `rust-old/`. The Cyrius
-side is 2.3.0. Since 2.3.0 every one of Rust's 108 CPU benchmarks has a Cyrius
-counterpart **under the same name and on the same workload**: `tests/ranga.bcyr` (100)
-and `tests/spectral.bcyr` (8, which needs prakash). Rust's 26 GPU benchmarks wait on a
-decision about GPU hardware (roadmap 2.3.x).
+The Rust side is the crate frozen at tag `1.0.1` and kept at `rust-old/`. Every one of
+Rust's 134 benchmarks has a Cyrius counterpart **under the same name and on the same
+workload**:
+- `tests/ranga.bcyr`: 100 CPU benchmarks, since 2.3.0;
+- `tests/spectral.bcyr`: 8, since 2.3.0 (needs prakash);
+- `tests/gpu.bcyr`: 26 GPU-against-CPU benchmarks, since 2.3.1 (needs mabda and an
+  AMD GPU). See [GPU](#gpu-gpurs-231).
+
+The CPU tables were measured at 2.3.0. The three blur rows were re-measured at 2.3.1,
+after ADR 003 changed the blurs.
 
 The full Rust-era series, 534 rows from 0.20.3 to 1.0.1, is preserved in
 [`rust-v1-bench-history.csv`](rust-v1-bench-history.csv).
@@ -16,8 +21,8 @@ performance target. Cyrius runs are recorded in `bench-history.csv` by
 
 | | Rust 1.0.1 | Cyrius 2.3.0 |
 |---|---:|---:|
-| Library source | 13,958 lines across 18 files | 11,961 lines across 22 files |
-| Benchmark harness | 1,353 lines across 10 criterion suites | 755 lines across 2 suites |
+| Library source | 13,958 lines across 18 files | 11,981 lines across 22 files |
+| Benchmark harness | 1,353 lines across 10 criterion suites | 980 lines across 3 suites |
 | Tests | 2,292 lines across 6 integration files, plus in-module tests | 9,782 lines across 23 suites |
 | Fuzz targets | 532 lines across 8 targets | 1,292 lines across 8 harnesses |
 | Examples | 893 lines across 11 examples | none (roadmap 2.7.x) |
@@ -46,8 +51,8 @@ median of 0.98×. The exceptions are the separable blurs: `gaussian_blur_r3` and
 `box_blur_r3` take 61 ms today against 18.5 ms then, and `unsharp_mask_r2` 59 ms
 against 28 ms, with tight intervals on both runs. The most likely cause is codegen in
 the newer rustc, which was not investigated. `resize_bicubic` went the other way,
-55 ms against 105 ms. Against the frozen series the blurs would be about 22× rather
-than about 7×.
+55 ms against 105 ms. Against the frozen series the blurs would be about 19× rather
+than about 6×.
 
 **What "same workload" means.** The inputs and parameters are Rust's: uniform 128
 frames where Rust uses `make_buf`, `i % 256` where it uses `make_varied_buf`, opacity
@@ -69,15 +74,16 @@ with later ones.
 
 ## Results
 
-**Median 8.0× slower than Rust, from 0.5× to 367×.**
+**Median 7.9× slower than Rust, from 0.5× to 367×.** These are the 108 CPU benchmarks,
+with the three blur rows at 2.3.1. At 2.3.0, before ADR 003, the median was 8.0×.
 
 | Ratio | Benchmarks |
 |---|---:|
 | faster than Rust (< 1×) | 2 |
 | 1–2× | 2 |
 | 2–4× | 6 |
-| 4–8× | 43 |
-| 8–16× | 24 |
+| 4–8× | 44 |
+| 8–16× | 23 |
 | 16× and over | 31 |
 
 ### Reading the spread
@@ -206,9 +212,9 @@ The full table follows, grouped by Rust bench file in Rust's order.
 | `invert_1080p` | 1.06 ms | 1.03 ms | 3.38 ms | 3.3× |
 | `levels_1080p` | 2.01 ms | 2.00 ms | 8.48 ms | 4.2× |
 | `curves_1080p` | 2.02 ms | 1.99 ms | 9.08 ms | 4.6× |
-| `gaussian_blur_r3_1080p` | 18.50 ms | 61.40 ms | 407.10 ms | 6.6× |
-| `box_blur_r3_1080p` | 18.60 ms | 60.49 ms | 406.92 ms | 6.7× |
-| `unsharp_mask_r2_1080p` | 28.38 ms | 58.73 ms | 471.02 ms | 8.0× |
+| `gaussian_blur_r3_1080p` ¹ | 18.50 ms | 61.40 ms | 360.40 ms | 5.9× |
+| `box_blur_r3_1080p` ¹ | 18.60 ms | 60.49 ms | 358.93 ms | 5.9× |
+| `unsharp_mask_r2_1080p` ¹ | 28.38 ms | 58.73 ms | 427.49 ms | 7.3× |
 | `hue_shift_1080p` | 48.81 ms | 47.08 ms | 382.88 ms | 8.1× |
 | `color_balance_1080p` | 10.04 ms | 10.42 ms | 213.29 ms | 20.5× |
 | `vignette_1080p` | 12.80 ms | 12.54 ms | 133.68 ms | 10.7× |
@@ -223,6 +229,10 @@ The full table follows, grouped by Rust bench file in Rust's order.
 | `threshold_1080p` | 2.75 ms | 2.66 ms | 9.52 ms | 3.6× |
 | `flood_fill_1080p_uniform` | 18.00 ms | 18.10 ms | 158.79 ms | 8.8× |
 | `auto_white_balance_1080p` | 6.48 ms | 5.85 ms | 62.31 ms | 10.7× |
+
+¹ Cyrius 2.3.1. ADR 003 keeps the blur intermediate in f32 and rounds once, which also
+removed a byte-to-f32 conversion per tap from the vertical pass. At 2.3.0 these rows
+were 407.10 ms, 406.92 ms and 471.02 ms.
 
 ### `histogram.rs`
 
@@ -272,6 +282,75 @@ The full table follows, grouped by Rust bench file in Rust's order.
 | `cie_cmf_at` | 3.6 ns | 3.5 ns | 62.0 ns | 17.9× |
 | `color_rendering_index` | 885.4 ns | 844.0 ns | 309.64 µs | 366.9× |
 | `xyz_conversion_roundtrip` | 1.0 ns | 1.0 ns | 53.0 ns | 53.0× |
+
+## GPU (`gpu.rs`, 2.3.1)
+
+Rust's 26 GPU benchmarks pair 13 GPU operations with the CPU operations they replace,
+on 1080p frames. Both sides ran on the same machine as above, on its integrated
+**AMD Radeon Vega** (Cezanne, `RADV RENOIR`, Mesa 26.2.6). Rust goes through wgpu on
+Vulkan, and the port goes through mabda's native amdgpu backend.
+
+- **Rust:** `cargo bench --features gpu --bench gpu -- --warm-up-time 1
+  --measurement-time 2`, from the same scratch copy.
+- **Cyrius:** `tests/gpu.bcyr` as recorded by `./scripts/bench-history.sh`.
+
+| Benchmark | Rust 1.0.1 (frozen series) | Rust 1.0.1 (this run) | Cyrius 2.3.1 | Ratio |
+|---|---:|---:|---:|---:|
+| `gpu_blend_normal_1080p` | 3.83 ms | 4.18 ms | MISSING | — |
+| `cpu_blend_normal_1080p` | 4.69 ms | 4.46 ms | 1.86 ms | 0.4× |
+| `gpu_invert_1080p` | 2.99 ms | 2.65 ms | 30.32 ms | 11.4× |
+| `cpu_invert_1080p` | 1.07 ms | 1.04 ms | 3.51 ms | 3.4× |
+| `gpu_grayscale_1080p` | 3.00 ms | 2.88 ms | 30.13 ms | 10.5× |
+| `cpu_grayscale_1080p` | 1.56 ms | 1.64 ms | 9.07 ms | 5.5× |
+| `gpu_brightness_contrast_1080p` | 3.15 ms | 2.94 ms | 30.29 ms | 10.3× |
+| `cpu_brightness_1080p` | 296.10 µs | 271.77 µs | 3.71 ms | 13.6× |
+| `gpu_saturation_1080p` | 3.18 ms | 2.95 ms | 30.11 ms | 10.2× |
+| `cpu_saturation_1080p` | 5.95 ms | 7.00 ms | 87.77 ms | 12.5× |
+| `gpu_gaussian_blur_r3_1080p` | 7.44 ms | 7.64 ms | MISSING | — |
+| `cpu_gaussian_blur_r3_1080p` | 16.08 ms | 61.21 ms | 365.11 ms | 6.0× |
+| `gpu_chain_invert_brightness_saturation_1080p` | 4.95 ms | 5.08 ms | MISSING | — |
+| `gpu_sequential_invert_brightness_saturation_1080p` | 8.66 ms | 8.53 ms | 90.27 ms | 10.6× |
+| `gpu_noise_gaussian_1080p` | 2.99 ms | 2.86 ms | MISSING | — |
+| `cpu_noise_gaussian_1080p` | 60.60 ms | 57.75 ms | 475.10 ms | 8.2× |
+| `gpu_dissolve_1080p` | 4.72 ms | 4.46 ms | 45.76 ms | 10.3× |
+| `cpu_dissolve_1080p` | 10.24 ms | 9.57 ms | 486.77 ms | 50.8× |
+| `gpu_fade_1080p` | 3.66 ms | 2.97 ms | 30.48 ms | 10.3× |
+| `cpu_fade_1080p` | 7.11 ms | 5.45 ms | 322.36 ms | 59.1× |
+| `gpu_crop_1080p_to_720p` | 2.54 ms | 2.43 ms | 30.16 ms | 12.4× |
+| `cpu_crop_1080p_to_720p` | 156.25 µs | 122.27 µs | 6.72 ms | 55.0× |
+| `gpu_resize_bilinear_1080p_to_720p` | 2.24 ms | 2.65 ms | MISSING | — |
+| `cpu_resize_bilinear_1080p_to_720p` | 19.38 ms | 18.33 ms | 94.00 ms | 5.1× |
+| `gpu_flip_horizontal_1080p` | 4.70 ms | 5.58 ms | 46.50 ms | 8.3× |
+| `cpu_flip_horizontal_1080p` | 1.98 ms | 1.62 ms | 27.39 ms | 16.9× |
+
+**MISSING** means the port has no implementation yet, and the suite says so instead
+of timing anything (roadmap 2.5.x):
+- `gpu_blend`: no blend kernel has been written;
+- `gpu_gaussian_blur`: `gpu_spirv.cyr` has no loop helpers;
+- `gpu_noise_gaussian`: mabda's lowerer has no log, sin or cos;
+- bilinear `gpu_resize`: the module exceeds mabda's 256-id cap;
+- `GpuChain`: not ported.
+
+The first four are probed with a real call, so one that starts working is timed
+without editing the suite.
+
+**Every native GPU call costs about 30 ms, whatever the kernel.**
+- Invert, grayscale, brightness/contrast, saturation, fade and crop all land within
+  30.1–30.5 ms. Dissolve and the flip, which upload two buffers, take 46 ms.
+- mabda's native `gpu_buffer_write` and `gpu_buffer_read` are each a single stdlib
+  `memcpy`, and at cyrius 6.7.18 that is a byte loop. A one-buffer operation moves
+  16 MB, about 30 ms at the roughly 530 MB/s that `crop` also gets on the CPU.
+- So these rows measure two copies, not the shaders. Rust's wgpu path runs the same
+  operations in 2.4–3 ms on the same iGPU.
+- The fix is upstream: an architecture-guarded `memcpy` in the stdlib, or mabda
+  mapping buffers so it doesn't copy (roadmap 2.6.x). A `GpuChain` that keeps buffers
+  resident between operations would remove most of the copies anyway (2.5.x).
+
+Even so, the native GPU path is already ahead of the port's CPU path where the
+per-pixel work is heavy: about 10.6× for dissolve and fade, and 2.9× for saturation.
+For the light operations (invert, brightness, crop, flip) the copies cost more than
+the work. `cpu_blend_normal_1080p` is 0.4×, faster than Rust, through the SSE2 row
+kernel.
 
 ## Earlier performance passes (2.0.x)
 
@@ -377,5 +456,6 @@ or per-tap path. See `port-mechanics.md`.
   will move on a quiesced machine; the ratios share the conditions.
 - A correct SIMD path is invisible to assertions. These benchmarks are the only
   evidence that vector code is executing at all.
-- Rust's GPU benchmarks (`gpu.rs`, 26 of them, half of which are CPU baselines run
-  beside the GPU ones) are not ported. See roadmap 2.3.x.
+- The GPU benchmarks ran on one integrated GPU (Radeon Vega, Cezanne). The native
+  backend's numbers are dominated by host-side copies (see [GPU](#gpu-gpurs-231)), so
+  they say little about the kernels themselves yet.

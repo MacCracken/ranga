@@ -8,11 +8,11 @@
 
 ## Where things stand
 
-The port shipped as **2.0.0** and is at **2.3.0** on cyrius 6.7.18. The 2026-11-02 review
+The port shipped as **2.0.0** and is at **2.3.1** on cyrius 6.7.18. The 2026-11-02 review
 of all 303 public Rust items, updated for 2.1.2 and 2.2.0, found:
 
-- 211 at parity;
-- 5 improved on Rust;
+- 208 at parity;
+- 8 improved on Rust (3 of them the blurs, since 2.3.1);
 - 29 that diverge on purpose, with the reason written down;
 - 19 partial and 33 missing;
 - **6 that compute something different from Rust without a documented reason**. All
@@ -28,11 +28,13 @@ of all 303 public Rust items, updated for 2.1.2 and 2.2.0, found:
 The 2.1.2 P(-1) review ([`../audit/2026-11-02-audit.md`](../audit/2026-11-02-audit.md))
 had already shown that none of these divergences came from the toolchain bumps.
 
-**2.3.0 closed milestone 2.3.x, "verification parity"** apart from three decisions
-(below). The port now has Rust's 8 fuzz targets in CI under allocator redzones, its 31
-properties, its integration, edge-case and Photoshop tests, golden vectors that
-capture the oracle's Rust outputs in `tests/`, and 108 of its 134 benchmarks (the 26
-left are GPU). Still missing: examples, and any Cyrius consumer.
+**2.3.0 closed milestone 2.3.x, "verification parity"**, and 2.3.1 settled what it
+left open apart from NVIDIA (below). The port now has Rust's 8 fuzz targets in CI under
+allocator redzones, its 31 properties, its integration, edge-case and Photoshop tests,
+golden vectors that capture the oracle's Rust outputs in `tests/`, and all 134 of its
+benchmarks. Five GPU benchmarks print `MISSING`, because their operations are not
+ported yet (2.5.x). The blurs no longer reproduce Rust's darkening (ADR 003). Still
+missing: examples, and any Cyrius consumer.
 
 Several of the original 2.0.0 criteria were never met, and they are carried below.
 
@@ -47,10 +49,12 @@ Milestones are ordered by what unblocks what, not by size. Correctness came firs
 Verification is next, because the oracle's evidence must be captured in tests before
 that happens.
 
-**Rule for every item:** the port's bar is "matches what Rust did", so diverge only with
-an ADR. Each SUSPECT item is either fixed to match Rust or given an ADR, and each
-MISSING item is either ported or given an ADR. Sizes are S (hours), M (a day or two) and
-L (more).
+**Rule for every item:** Cyrius is the product and `rust-old/` is the code being retired.
+Rust shows what the port is still **missing**, and the oracle catches porting
+mistakes. Neither makes Rust's behaviour correct by default. A MISSING item is ported
+or given an ADR. A divergence that is a port mistake is fixed. A Rust defect is fixed in
+Cyrius, not reproduced, and recorded in an ADR, as ADR 003 did for the blurs. Sizes are
+S (hours), M (a day or two) and L (more).
 
 ---
 
@@ -58,23 +62,24 @@ L (more).
 
 2.3.0 closed this milestone's main work: all 8 fuzz targets under `--poison` in CI,
 all 31 properties, every Rust integration and edge-case test, golden vectors from the
-oracle, the oracle in CI, and Rust's 108 CPU benchmarks on Rust's workloads. What is
-left is three decisions:
+oracle, the oracle in CI, and Rust's 108 CPU benchmarks on Rust's workloads. 2.3.1
+settled two of the three items it left:
 
-- [ ] **(S) Decide on Rust's blur darkening.** Rust 1.0.1's `gaussian_blur` and
-      `box_blur` truncate between passes, so a uniform image comes back up to 2
-      counts darker (gaussian in 979 of 2,816 measured cases, box in 4,278 of
-      13,824). The port matches Rust, and `fuzz_blur` asserts Rust's bounds. Either
-      keep parity, or round between passes under an ADR and tighten the fuzz bounds
-      to exact.
-- [ ] **(S) GPU benchmarks.** Rust's 26 GPU benchmarks (`gpu.rs`, half of them CPU
-      baselines) need a GPU host to mean anything. Decide whether to run them on the
-      AMD dev host only, recorded like the CPU series, or to wait for a GPU runner.
+- Rust's blur darkening is fixed in Cyrius, not kept: an f32 intermediate and one
+  rounding ([ADR 003](../adr/003-blur-keeps-an-f32-intermediate-and-rounds-once.md)).
+  `fuzz_blur` now asserts that a uniform image survives exactly.
+- Rust's 26 GPU benchmarks are `tests/gpu.bcyr`. They run on the AMD dev host and are
+  recorded in `bench-history.csv`. Five print `MISSING`: blend, blur, noise, bilinear
+  resize and `GpuChain` (2.5.x).
+
+One item is left:
+
 - [ ] **(S) NVIDIA coverage.** `gpu_context_new_nvidia` has no test at all; every
-      gated GPU suite opens an AMD context. Decide whether it needs a host to test on,
-      or an ADR that it is unverified.
+      gated GPU suite opens an AMD context. The dev host has an AMD Radeon Vega iGPU
+      and no NVIDIA card, so testing it needs NVIDIA hardware. Otherwise, write an
+      ADR that the path is unverified.
 
-**Done when** those three are decided.
+**Done when** NVIDIA is tested or ADR'd.
 
 ## 2.4.x — Surface completion (CPU)
 
@@ -168,8 +173,9 @@ what mabda 4.2.0 accepts.
 ## 2.6.x — Performance
 
 The baseline is the same-session comparison of all 108 CPU benchmarks in
-[`benchmarks-rust-v-cyrius.md`](../benchmarks-rust-v-cyrius.md) (2.3.0: median 8.0×
-slower than Rust). Ratios below are from that run.
+[`benchmarks-rust-v-cyrius.md`](../benchmarks-rust-v-cyrius.md) (median 7.9× slower
+than Rust; 2.3.0 with the blur rows re-measured at 2.3.1). Ratios below are from that
+run.
 
 - [ ] **(S–M) `memcpy` and `memset` are byte loops** in the 6.7.18 stdlib (the x86
       `rep movsb` path was removed for aarch64's sake). That is most of
@@ -177,6 +183,12 @@ slower than Rust). Ratios below are from that run.
       `flip_horizontal` (18×) and `fill_solid` (18.5×). File an architecture-guarded
       fast path upstream, and meanwhile use a word-at-a-time copy and fill in ranga's
       hot paths.
+      - **It is also the whole cost of a GPU call.** mabda's native
+        `gpu_buffer_write` and `gpu_buffer_read` are each one stdlib `memcpy`, so a
+        1080p GPU operation spends about 30 ms copying 16 MB at about 530 MB/s. Rust's
+        wgpu path does the same operation in 2.4–3 ms on the same iGPU. The fix is
+        upstream (mabda or the stdlib). A `GpuChain` that keeps buffers resident would
+        avoid most of the copies (2.5.x).
 - [ ] **(S–M) Inline the per-byte f32 helper calls** in `fade` (57×), `dissolve`
       (50×), the angled and radial gradients (37–42×), `vibrance` (27×),
       `color_balance` (21×), `channel_mixer` and `contrast` (16–17×), as was done for
@@ -187,9 +199,9 @@ slower than Rust). Ratios below are from that run.
       has SSE2 at 8 pixels per iteration; these have had a loop hoist only.
 - [ ] **(M) f32 SIMD for `contrast` and `saturation`.**
 - [ ] **(S–M) `hue_shift`:** remove its two heap allocations per pixel.
-- [ ] **(L) Vectorised or tiled separable blur.** About 7× against today's rustc and
-      22× against the frozen series (whose blur was 3.3× faster). Rust auto-vectorises
-      the passes.
+- [ ] **(L) Vectorised or tiled separable blur.** About 6× against today's rustc and
+      19× against the frozen series (whose blur was 3.3× faster), after ADR 003's f32
+      intermediate. Rust auto-vectorises the passes.
 - [ ] **(L) 256-bit AVX2,** cyrius-port-plan §3 item 4. It comes after all of the
       above.
 - Upstream, not ranga: prakash's `color_rendering_index` takes 310 µs against Rust's

@@ -29,7 +29,7 @@ This file (`CLAUDE.md`) is durable rules.
 
 ## Scaffolding
 
-Project was scaffolded with `cyrius port`. Original Rust at `rust-old/` is the reference oracle — do not modify it; cross-check the port against it.
+Project was scaffolded with `cyrius port`. Original Rust at `rust-old/` is the reference oracle — do not modify it; use it to find what is still missing and to catch porting mistakes.
 
 ## Quick Start
 
@@ -41,8 +41,8 @@ cyrius test                              # run tests/*.tcyr
 
 ## Key Principles
 
-- **Cross-check against `rust-old/`** — the port's correctness bar is "matches what Rust did". Diverge only with an ADR.
-- **Correctness over cleverness** — if the Cyrius behavior diverges silently from Rust, the bugs win
+- **Port direction is Rust → Cyrius** — Cyrius is the product; `rust-old/` is the code being retired. Use it to find what is still **missing** and to catch porting mistakes, never as the definition of correct. A Rust defect is fixed in Cyrius, not reproduced, and recorded in an ADR.
+- **No silent divergence** — every difference from Rust is either a port mistake that gets fixed, or a deliberate improvement with an ADR
 - Test after every change, not after the feature is "done"
 - ONE change at a time — never bundle unrelated changes
 - Build with `cyrius build`, not raw `cat file | cc5` — the manifest auto-resolves deps

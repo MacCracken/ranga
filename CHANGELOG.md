@@ -2,6 +2,74 @@
 
 ## [Unreleased]
 
+## [2.3.1] - 2026-11-02
+
+Closes two of the three items 2.3.0 left open. Rust's blur darkening is **fixed, not
+kept**: the separable blurs now keep an f32 intermediate and round once, so they are
+unbiased and 12% faster. Rust's 26 GPU benchmarks are ported and run on the AMD dev
+host's Radeon Vega iGPU. NVIDIA coverage stays open, because the dev host has no
+NVIDIA card.
+
+### Changed
+
+- **`gaussian_blur`, `box_blur` and `unsharp_mask` no longer darken**
+  ([ADR 003](docs/adr/003-blur-keeps-an-f32-intermediate-and-rounds-once.md)).
+  Rust 1.0.1, and the port up to 2.3.0, truncated the horizontal pass to `u8` and
+  truncated again after the vertical pass. The new code works as follows:
+  - the horizontal pass writes three f32 per pixel;
+  - the vertical pass reads them back and rounds once, half up;
+  - alpha is still copied from the source.
+
+  Measured on 65,328 channel values against an exact f64 convolution:
+
+  | | Mean error before | Mean error now | Worst error before | Worst error now |
+  |---|---:|---:|---:|---:|
+  | gaussian | −1.00 | 0.00 | 1.94 | 0.50 |
+  | box | −0.88 | 0.00 | 1.85 | 0.50 |
+
+  A uniform image now survives exactly at every value and radius. On 1080p, gaussian
+  and box r3 drop from 408 ms to 358 ms and unsharp r2 from 475 ms to 430 ms, because
+  the vertical pass no longer converts a byte to f32 at every tap. Against Rust,
+  values move by 0 to +2 and never down. The scratch buffer is 12 bytes per pixel
+  instead of 4.
+- **`fuzz_blur`** asserts that gaussian, box and unsharp leave a uniform image exactly
+  unchanged. It used to allow Rust's [v − 2, v].
+- **`tests/filter_kernel.tcyr`:**
+  - The two tests that pinned Rust's 98 assert 100.
+  - New: every value 0..255 at radii 1..10 through both blurs.
+  - New: a point-source test that pins the single rounding (centre 158 and diagonal
+    3, where Rust gave 157 and 2).
+  - 138 assertions, up from 134.
+- **The roadmap's rule for parity items:** a Rust defect is fixed in Cyrius and
+  recorded in an ADR, not reproduced. `rust-old/` shows what is missing and catches
+  porting mistakes; it does not make Rust's behaviour correct.
+
+### Added
+
+- **`tests/gpu.bcyr`: Rust's 26 GPU benchmarks** (`rust-old/benches/gpu.rs`), with
+  Rust's names, inputs and parameters, and each GPU operation beside its CPU
+  counterpart.
+  - Five operations are not ported yet, so they print `MISSING:` with the reason
+    instead of a time: `gpu_blend`, `gpu_gaussian_blur`, `gpu_noise_gaussian`,
+    bilinear `gpu_resize` and `GpuChain`. The first four are probed with a real call,
+    and an operation that stops returning UNSUPPORTED is timed automatically.
+  - Without a GPU, the suite prints one SKIPPED line and runs the CPU half.
+- **`scripts/bench-history.sh`** runs `tests/gpu.bcyr` whenever `lib/mabda.cyr` is
+  vendored, so there are three default suites.
+
+### Found
+
+- **A native GPU call costs about 30 ms at 1080p whatever the kernel.**
+  - mabda's native `gpu_buffer_write` and `gpu_buffer_read` are each one stdlib
+    `memcpy`, which is a byte loop at 6.7.18. A one-buffer operation copies 16 MB,
+    and a two-buffer one 24 MB (about 45 ms).
+  - Rust's wgpu path does the same operations in 2.4–3 ms on the same iGPU.
+  - This is the 2.6.x `memcpy` item. The fix is upstream, and a resident-buffer
+    `GpuChain` (2.5.x) would avoid most of the copies.
+- **`bilateral` truncates after its weighted division,** so a uniform image can come
+  back one count darker, as in Rust. This is separate code from the separable blurs
+  and is not changed here.
+
 ## [2.3.0] - 2026-11-02
 
 Milestone 2.3.x, "verification parity". Rust 1.0.1 was checked by 8 fuzz targets, 31

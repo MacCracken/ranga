@@ -3,8 +3,8 @@
 # One benchmark for each of Rust 1.0.1's 100 CPU benchmarks outside spectral, under
 # the same name and on the same workload: rust-old/benches/{blend,color_convert,
 # color_science,composite,filter,histogram,icc,transform}.rs, in that order. The
-# 8 spectral benchmarks are tests/spectral.bcyr, feature-gated as in Rust. The 26
-# GPU benchmarks wait on a decision about GPU hardware in CI (roadmap).
+# 8 spectral benchmarks are tests/spectral.bcyr and the 26 GPU benchmarks are
+# tests/gpu.bcyr, each feature-gated as in Rust.
 #
 # SAME WORKLOAD means the same inputs and parameters: uniform 128 frames where
 # Rust uses make_buf, `i % 256` where it uses make_varied_buf, opacity 200 for
