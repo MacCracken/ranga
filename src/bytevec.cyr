@@ -1,7 +1,7 @@
 # bytevec.cyr -- byte-granular growable buffer
 #
 # Cyrius `lib/vec.cyr` stores i64 SLOTS: every accessor is hardcoded to
-# `data + idx * 8`, so a 4-byte RGBA pixel would occupy 32 bytes and `bv_get`
+# `data + idx * 8`, so a 4-byte RGBA pixel would occupy 32 bytes and `rg_bv_get`
 # would read past its neighbours. Image data is bytes, so ranga needs its own.
 # This is internalizing item 2 in docs/development/cyrius-port-plan.md §3 —
 # a candidate to upstream once a second consumer wants it.
@@ -16,13 +16,19 @@
 # (lib/freelist.cyr:268), so a 1080p RGBA8 frame — 8,294,400 bytes — is one
 # syscall to acquire and one to release. The bump allocator has no individual
 # free at all, which would make BufferPool pointless.
+#
+# NAMESPACE. Every function is `rg_bv_*`. Up to 2.3.3 they were bare `bv_*`, in
+# the same flat namespace as every consumer and every vendored library. Cyrius
+# resolves a duplicate name as LAST DEFINITION WINS, with only a warning, so a
+# consumer's own `bv_len` would silently replace ranga's inside ranga's own code.
+# Nothing collided yet, and 2.4.0 renamed them before a consumer could (ADR 006).
 
 var _BV_HDR = 24;
 
 # Allocate a byte vector with `cap` bytes of capacity and length 0.
 # Returns 0 if either allocation fails.
 #must_use
-fn bv_new(cap) {
+fn rg_bv_new(cap) {
     var v = fl_alloc(_BV_HDR);
     if (v == 0) { return 0; }
     var data = 0;
@@ -40,7 +46,7 @@ fn bv_new(cap) {
 # This is the PixelBuffer::zeroed path — the caller wants n addressable bytes,
 # not an empty vec with capacity.
 #must_use
-fn bv_zeroed(n) {
+fn rg_bv_zeroed(n) {
     var v = fl_alloc(_BV_HDR);
     if (v == 0) { return 0; }
     var data = 0;
@@ -60,13 +66,13 @@ fn bv_zeroed(n) {
 # the caller provably writes every byte before any read — crop's per-row memcpy,
 # a flip, a format conversion. Anything that SKIPS pixels (affine_transform and
 # perspective_transform leave out-of-source pixels transparent) must keep
-# bv_zeroed, because the zero fill IS the transparent black.
+# rg_bv_zeroed, because the zero fill IS the transparent black.
 #
 # This exists because the zero fill is not free: crop was measured at 79.9x
 # Rust, and most of that was fl_calloc zeroing a buffer that the very next loop
 # overwrote in full.
 #must_use
-fn bv_uninit(n) {
+fn rg_bv_uninit(n) {
     var v = fl_alloc(_BV_HDR);
     if (v == 0) { return 0; }
     var data = 0;
@@ -81,17 +87,17 @@ fn bv_uninit(n) {
 }
 
 #must_use
-fn bv_data(v) { return load64(v); }
+fn rg_bv_data(v) { return load64(v); }
 #must_use
-fn bv_len(v) { return load64(v + 8); }
+fn rg_bv_len(v) { return load64(v + 8); }
 #must_use
-fn bv_cap(v) { return load64(v + 16); }
+fn rg_bv_cap(v) { return load64(v + 16); }
 
 # Set the length without touching the payload. The caller is asserting that
-# `n` bytes are initialised; used after writing through bv_data directly.
+# `n` bytes are initialised; used after writing through rg_bv_data directly.
 # Refuses to grow past capacity — returns RG_ERR_INVALID_PARAMETER rather than
 # handing back a vec whose len exceeds its allocation.
-fn bv_set_len(v, n) {
+fn rg_bv_set_len(v, n) {
     if (n < 0) { return RG_ERR_INVALID_PARAMETER; }
     if (n > load64(v + 16)) { return RG_ERR_INVALID_PARAMETER; }
     store64(v + 8, n);
@@ -101,7 +107,7 @@ fn bv_set_len(v, n) {
 # Byte at `idx`, or 0 if out of range. Zero-extends — load8 does not sign-extend,
 # so a 0xFF byte reads back as 255, not -1.
 #must_use
-fn bv_get(v, idx) {
+fn rg_bv_get(v, idx) {
     if (idx < 0) { return 0; }
     if (idx >= load64(v + 8)) { return 0; }
     return load8(load64(v) + idx);
@@ -110,7 +116,7 @@ fn bv_get(v, idx) {
 # Write a byte at `idx`. Returns 1 on success, 0 if out of range — mirroring
 # PixelBuffer::set_rgba's bool rather than trapping, because the Rust original
 # reports out-of-bounds to the caller instead of panicking.
-fn bv_set(v, idx, val) {
+fn rg_bv_set(v, idx, val) {
     if (idx < 0) { return 0; }
     if (idx >= load64(v + 8)) { return 0; }
     store8(load64(v) + idx, val & 255);
@@ -120,18 +126,18 @@ fn bv_set(v, idx, val) {
 # Unchecked read for hot loops where the caller has already bounds-checked the
 # whole row. Mirrors slice_unchecked_get_8.
 #must_use
-fn bv_get_unchecked(v, idx) {
+fn rg_bv_get_unchecked(v, idx) {
     return load8(load64(v) + idx);
 }
 
-fn bv_set_unchecked(v, idx, val) {
+fn rg_bv_set_unchecked(v, idx, val) {
     store8(load64(v) + idx, val & 255);
     return RG_ERR_NONE;
 }
 
 # Grow capacity to at least `want`, preserving the first `len` bytes.
 # Doubling, so repeated pushes stay amortised O(1).
-fn bv_reserve(v, want) {
+fn rg_bv_reserve(v, want) {
     var cap = load64(v + 16);
     if (want <= cap) { return RG_ERR_NONE; }
     var ncap = cap;
@@ -150,9 +156,9 @@ fn bv_reserve(v, want) {
     return RG_ERR_NONE;
 }
 
-fn bv_push(v, val) {
+fn rg_bv_push(v, val) {
     var len = load64(v + 8);
-    var rc = bv_reserve(v, len + 1);
+    var rc = rg_bv_reserve(v, len + 1);
     if (rc != RG_ERR_NONE) { return rc; }
     store8(load64(v) + len, val & 255);
     store64(v + 8, len + 1);
@@ -160,7 +166,7 @@ fn bv_push(v, val) {
 }
 
 # Set every byte in [0, len) to `val`. The memset path, for fill_solid.
-fn bv_fill(v, val) {
+fn rg_bv_fill(v, val) {
     var len = load64(v + 8);
     if (len > 0) { memset(load64(v), val & 255, len); }
     return RG_ERR_NONE;
@@ -168,7 +174,7 @@ fn bv_fill(v, val) {
 
 # Copy `n` bytes from a raw pointer into the vec at `off`. Bounds-checked
 # against len, not cap.
-fn bv_write(v, off, src, n) {
+fn rg_bv_write(v, off, src, n) {
     if (off < 0) { return RG_ERR_INVALID_PARAMETER; }
     if (n < 0) { return RG_ERR_INVALID_PARAMETER; }
     if (off + n > load64(v + 8)) { return RG_ERR_BUFFER_TOO_SMALL; }
@@ -179,9 +185,9 @@ fn bv_write(v, off, src, n) {
 # Deep copy. Length and capacity of the clone are both the source's length —
 # a clone is not expected to be pushed to.
 #must_use
-fn bv_clone(v) {
+fn rg_bv_clone(v) {
     var len = load64(v + 8);
-    var c = bv_new(len);
+    var c = rg_bv_new(len);
     if (c == 0) { return 0; }
     if (len > 0) { memcpy(load64(c), load64(v), len); }
     store64(c + 8, len);
@@ -190,16 +196,16 @@ fn bv_clone(v) {
 
 # Truncate to length 0, keeping the allocation for reuse. This is the
 # BufferPool::acquire path — Vec::clear in the Rust original.
-fn bv_clear(v) {
+fn rg_bv_clear(v) {
     store64(v + 8, 0);
     return RG_ERR_NONE;
 }
 
 # Set length to `n`, zeroing any newly exposed bytes. Grows the allocation if
 # needed. Rust's Vec::resize(n, 0).
-fn bv_resize_zero(v, n) {
+fn rg_bv_resize_zero(v, n) {
     if (n < 0) { return RG_ERR_INVALID_PARAMETER; }
-    var rc = bv_reserve(v, n);
+    var rc = rg_bv_reserve(v, n);
     if (rc != RG_ERR_NONE) { return rc; }
     var len = load64(v + 8);
     if (n > len) { memset(load64(v) + len, 0, n - len); }
@@ -208,7 +214,7 @@ fn bv_resize_zero(v, n) {
 }
 
 # Release the payload and the header. Safe on 0.
-fn bv_free(v) {
+fn rg_bv_free(v) {
     if (v == 0) { return RG_ERR_NONE; }
     var data = load64(v);
     if (data != 0) { fl_free(data); }

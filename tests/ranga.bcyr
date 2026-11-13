@@ -49,7 +49,7 @@ var err = 0;
 fn mk_uniform(w, h, fmt, v) {
     var b = pixel_buffer_zeroed(w, h, fmt, err);
     if (b == 0) { return 0; }
-    bv_fill(pixel_buffer_bv(b), v);
+    rg_bv_fill(pixel_buffer_bv(b), v);
     return b;
 }
 
@@ -363,14 +363,14 @@ fn benches_composite() {
     CP_A = mk_uniform(W, H, PF_RGBA8, 128);
     CP_B = mk_uniform(W, H, PF_RGBA8, 64);
     frame("dissolve_1080p", 10, &w_dissolve);
-    bv_fill(pixel_buffer_bv(CP_BUF), 128);
+    rg_bv_fill(pixel_buffer_bv(CP_BUF), 128);
     frame("fade_1080p", 20, &w_fade);
     frame("wipe_1080p", 50, &w_wipe);
     frame("gradient_linear_1080p", 10, &w_gradient);
     frame("checkerboard_1080p", 20, &w_checkerboard);
-    bv_fill(pixel_buffer_bv(CP_BUF), 128);
+    rg_bv_fill(pixel_buffer_bv(CP_BUF), 128);
     frame("unpremultiply_alpha_1080p", 20, &w_unpremultiply);
-    bv_fill(pixel_buffer_bv(CP_BUF), 128);
+    rg_bv_fill(pixel_buffer_bv(CP_BUF), 128);
     CP_MASK = mk_uniform(W, H, PF_RGBA8, 128);
     frame("apply_mask_1080p", 50, &w_apply_mask);
     frame("gradient_radial_1080p", 10, &w_gradient_radial);
@@ -422,7 +422,7 @@ fn w_channel_mixer() { channel_mixer(FV, F_MIX); return 0; }
 fn w_threshold() { threshold(FV, 128); return 0; }
 fn w_flood_fill() {
     # Rust resets the frame inside the timed closure, so the reset is timed here too.
-    bv_fill(pixel_buffer_bv(FB), 128);
+    rg_bv_fill(pixel_buffer_bv(FB), 128);
     flood_fill(FB, 0, 0, F_FILL, 10);
     return 0;
 }
@@ -566,7 +566,7 @@ fn benches_icc() {
     var bn = bench_new("srgb_v2_profile_generation");
     bench_batch_start(bn);
     var i = 0;
-    while (i < 200000) { bv_free(srgb_v2_profile(lenp)); i = i + 1; }
+    while (i < 200000) { rg_bv_free(srgb_v2_profile(lenp)); i = i + 1; }
     bench_batch_stop(bn, 200000);
     bench_report(bn);
 
@@ -575,18 +575,18 @@ fn benches_icc() {
     bn = bench_new("icc_from_bytes_srgb_v2");
     bench_batch_start(bn);
     i = 0;
-    while (i < 200000) { icc_profile_free(icc_profile_from_bytes(bv_data(bytes), plen, err)); i = i + 1; }
+    while (i < 200000) { icc_profile_free(icc_profile_from_bytes(rg_bv_data(bytes), plen, err)); i = i + 1; }
     bench_batch_stop(bn, 200000);
     bench_report(bn);
 
-    var prof = icc_profile_from_bytes(bv_data(bytes), plen, err);
+    var prof = icc_profile_from_bytes(rg_bv_data(bytes), plen, err);
     var xyz = fl_alloc(24);
     bench_icc_apply("icc_apply_mid_gray", prof, 0.5, 0.5, 0.5, xyz);
     bench_icc_apply("icc_apply_white", prof, 1.0, 1.0, 1.0, xyz);
     bench_icc_apply("icc_apply_black", prof, 0.0, 0.0, 0.0, xyz);
     bench_icc_apply("icc_apply_saturated_red", prof, 1.0, 0.0, 0.0, xyz);
     icc_profile_free(prof);
-    bv_free(bytes);
+    rg_bv_free(bytes);
 
     var acc = 0;
     var tg = tone_curve_gamma(2.2);

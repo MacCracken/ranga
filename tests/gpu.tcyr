@@ -129,7 +129,7 @@ if (ctx != 0) {
     assert_eq(gb != 0, 1, "the pixel buffer uploads to the GPU");
     assert_eq(load64(err), RG_GPU_ERR_NONE, "with no error reported");
     # 16 * 16 * 4 — the size must come from the pixel buffer's LENGTH, not from
-    # bv_len of its data pointer, which reads pixel bytes as a length and gives 0.
+    # rg_bv_len of its data pointer, which reads pixel bytes as a length and gives 0.
     assert_eq(gpu_buffer_size(gb), 1024, "the GPU buffer is 1024 bytes");
     assert_eq(gpu_buffer_width(gb), 16, "width is carried across");
     assert_eq(gpu_buffer_height(gb), 16, "height is carried across");

@@ -250,9 +250,9 @@ test_group("format round trips");
 fails = 0; i = 0;
 while (i < 512) {
     var len3 = (12 + ru(289)) / 3 * 3;
-    var bv3 = bv_zeroed(len3);
+    var bv3 = rg_bv_zeroed(len3);
     var j = 0;
-    while (j < len3) { store8(bv_data(bv3) + j, rbyte()); j = j + 1; }
+    while (j < len3) { store8(rg_bv_data(bv3) + j, rbyte()); j = j + 1; }
     var rgb = pixel_buffer_new(bv3, len3 / 3, 1, PF_RGB8, err);
     var rgba = rgb8_to_rgba8(rgb, err);
     var rgb2 = rgba8_to_rgb8(rgba, err);
@@ -260,9 +260,9 @@ while (i < 512) {
     pixel_buffer_free(rgb2); pixel_buffer_free(rgba); pixel_buffer_free(rgb);
 
     var len4 = (4 + ru(397)) / 4 * 4;
-    var bv4 = bv_zeroed(len4);
+    var bv4 = rg_bv_zeroed(len4);
     j = 0;
-    while (j < len4) { store8(bv_data(bv4) + j, rbyte()); j = j + 1; }
+    while (j < len4) { store8(rg_bv_data(bv4) + j, rbyte()); j = j + 1; }
     var argb = pixel_buffer_new(bv4, len4 / 4, 1, PF_ARGB8, err);
     var rgba4 = argb8_to_rgba8(argb, err);
     var argb2 = rgba8_to_argb8(rgba4, err);

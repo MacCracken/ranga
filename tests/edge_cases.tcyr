@@ -235,8 +235,8 @@ assert_eq(pixel_view_new(small, 10, 4, 4, PF_RGBA8, err), 0, "pixel_view_too_sma
 assert_eq(ranga_is_err(load64(err)), 1, "with an error code");
 
 var cp = buffer_pool_new(8);
-buffer_pool_release(cp, bv_zeroed(1024));
-buffer_pool_release(cp, bv_zeroed(2048));
+buffer_pool_release(cp, rg_bv_zeroed(1024));
+buffer_pool_release(cp, rg_bv_zeroed(2048));
 assert_eq(buffer_pool_len(cp), 2, "buffer_pool_clear_empties: two pooled");
 buffer_pool_clear(cp);
 assert_eq(buffer_pool_len(cp), 0, "clear leaves none");

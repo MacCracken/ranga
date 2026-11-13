@@ -153,8 +153,8 @@ fn build_lut(len_out) {
     var lut_start = in_start + 3 * entries * width;
     var out_start = lut_start + cells * 3 * width;
     var total = out_start + 3 * entries * width;
-    var bv = bv_zeroed(total);
-    var d = bv_data(bv);
+    var bv = rg_bv_zeroed(total);
+    var d = rg_bv_data(bv);
     store64(len_out, total);
     _icc_write_u32_be(d, 0, total);
     store8(d + 8, 2);
@@ -235,8 +235,8 @@ fn one(iter) {
         var lbv = build_lut(lenp);
         var ll = load64(lenp);
         if (ll > cap) { ll = cap; }
-        memcpy(buf, bv_data(lbv), ll);
-        bv_free(lbv); fl_free(lenp);
+        memcpy(buf, rg_bv_data(lbv), ll);
+        rg_bv_free(lbv); fl_free(lenp);
         len = ll;
         if (fz_u(4) != 0) { len = mutate(buf, ll, cap); }
     }
@@ -277,7 +277,7 @@ fn main() {
     var lp = fl_alloc(8);
     var sbv = srgb_v2_profile(lp);
     SRGB_LEN = load64(lp);
-    SRGB = bv_data(sbv);
+    SRGB = rg_bv_data(sbv);
     fz_run("fuzz_icc", 20000, &one);
     print_num(N_MATRIX_OK); _fz_puts(" matrix and ");
     print_num(N_LUT_OK); println(" LUT profiles parsed and checked");

@@ -1,21 +1,219 @@
 # Fuzz: 3D LUTs.
 # Rust 1.0.1 target: rust-old/fuzz/fuzz_targets/fuzz_lut.rs, which fuzzes
-# `Lut3d::from_cube` (the .cube text parser) and then apply_lut3d. The parser is
-# not ported (roadmap 2.4.x), so this harness builds LUTs through lut3d_new /
-# lut3d_set instead, with sizes 2..6 and arbitrary entries: NaN, the infinities
-# and values far outside [0, 1].
+# `Lut3d::from_cube` (the .cube text parser) and then apply_lut3d. Since 2.4.0
+# the parser is ported (src/cube.cyr), and this harness runs Rust's two
+# strategies plus two of its own, beside the lut3d_new / lut3d_set LUTs it has
+# always built:
+#   1. Rust's "raw bytes as .cube text": here random text drawn from the format's
+#      own alphabet (keywords, digits, signs, points, exponents, Unicode
+#      whitespace, comments), which reaches far more of the parser than uniform
+#      bytes would.
+#   2. Rust's "valid cube with fuzz-driven floats": every entry is a random f32
+#      written as its EXACT decimal expansion.
+#   3. Midpoint traps: the exact midpoint of two adjacent f32s with a 1 appended
+#      far out, which is the input that defeats f64-then-f32 double rounding.
 # Invariants:
 #   - apply_lut3d succeeds on RGBA8 and never touches alpha.
 #   - An identity LUT returns every channel within 1 of its input (Rust's
 #     lut3d_identity_preserves_values uses the same bound).
 #   - lut3d_new rejects sizes below 2.
+#   - from_cube either returns a LUT of size >= 2 or fails with RG_ERR_OTHER;
+#     a LUT it returns applies cleanly and leaves alpha alone.
+#   - An f32 written as its exact decimal parses back to the same bits.
+#   - A hair above a midpoint parses to the upper f32, never the even one.
 
 include "src/error.cyr"
 include "src/bytevec.cyr"
 include "src/simd_u8.cyr"
 include "src/pixel.cyr"
 include "src/filter_kernel.cyr"
+include "src/decimal.cyr"
+include "src/cube.cyr"
 include "fuzz/fz_common.cyr"
+
+var FZ_TXT = 0;           # the text under construction
+var FZ_TXT_N = 0;
+var FZ_TXT_CAP = 65536;
+var FZ_ERR = 0;
+
+fn fz_put(s) {
+    var i = 0;
+    while (load8(s + i) != 0 && FZ_TXT_N < FZ_TXT_CAP - 1) {
+        store8(FZ_TXT + FZ_TXT_N, load8(s + i));
+        FZ_TXT_N = FZ_TXT_N + 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn fz_putc(c) {
+    if (FZ_TXT_N < FZ_TXT_CAP - 1) { store8(FZ_TXT + FZ_TXT_N, c); FZ_TXT_N = FZ_TXT_N + 1; }
+    return 0;
+}
+
+fn fz_put_int(v) {
+    var d = fl_alloc(24);
+    var n = 0;
+    var x = v;
+    if (x == 0) { fz_putc(48); fl_free(d); return 0; }
+    while (x > 0) { store8(d + n, 48 + x % 10); x = x / 10; n = n + 1; }
+    while (n > 0) { n = n - 1; fz_putc(load8(d + n)); }
+    fl_free(d);
+    return 0;
+}
+
+# Write the finite f32 `b` as its exact decimal: [-]0.<digits>e<x>. `extra`
+# appends that many '0's and then a '1' to the digits, which nudges the value a
+# hair away from zero without moving its f64 rounding.
+fn fz_put_f32_exact(b, extra) {
+    if ((b & 0x80000000) != 0) { fz_putc(45); }
+    var a = b & 0x7FFFFFFF;
+    if (a == 0) { fz_put("0"); return 0; }
+    var dg = fl_alloc(_DC_DIGITS_CAP);
+    var xo = fl_alloc(8);
+    var n = _dc_digits(f32_to(a), dg, xo);
+    fz_put("0.");
+    var i = 0;
+    while (i < n) { fz_putc(48 + load8(dg + i)); i = i + 1; }
+    if (extra > 0) {
+        i = 0;
+        while (i < extra) { fz_putc(48); i = i + 1; }
+        fz_putc(49);
+    }
+    fz_putc(101);
+    var x = load64(xo);
+    if (x < 0) { fz_putc(45); x = 0 - x; }
+    fz_put_int(x);
+    fl_free(xo);
+    fl_free(dg);
+    return 0;
+}
+
+# A random finite f32 bit pattern, of any sign and magnitude, subnormals included.
+fn fz_f32_finite() {
+    var b = fz_rand() & 0xFFFFFFFF;
+    if ((b & 0x7F800000) == 0x7F800000) { b = b & 0xFF7FFFFF; }
+    return b;
+}
+
+# Strategy 1: text from the format's alphabet.
+fn fz_cube_soup() {
+    FZ_TXT_N = 0;
+    var pieces = fz_u(60);
+    var k = 0;
+    while (k < pieces) {
+        var t = fz_u(24);
+        if (t == 0) { fz_put("LUT_3D_SIZE "); }
+        elif (t == 1) { fz_put("LUT_1D_SIZE "); }
+        elif (t == 2) { fz_put("DOMAIN_MIN "); }
+        elif (t == 3) { fz_put("DOMAIN_MAX "); }
+        elif (t == 4) { fz_put("LUT_3D_INPUT_RANGE "); }
+        elif (t == 5) { fz_put("TITLE "); }
+        elif (t == 6) { fz_put("# "); }
+        elif (t == 7) { fz_putc(10); }
+        elif (t == 8) { fz_put("\r\n"); }
+        elif (t == 9) { fz_putc(32); }
+        elif (t == 10) { fz_putc(9); }
+        elif (t == 11) { fz_put("\xC2\xA0"); }
+        elif (t == 12) { fz_put("\xE3\x80\x80"); }
+        elif (t == 13) { fz_putc(46); }
+        elif (t == 14) { fz_putc(101); }
+        elif (t == 15) { fz_putc(45); }
+        elif (t == 16) { fz_putc(43); }
+        elif (t == 17) { fz_put("inf"); }
+        elif (t == 18) { fz_put("nan"); }
+        elif (t == 19) { fz_putc(fz_byte()); }
+        else { fz_put_int(fz_u(5)); }
+        k = k + 1;
+    }
+    return 0;
+}
+
+fn fz_cube_apply_ok(l) {
+    var img = fz_rgba(4, 4);
+    var ref = pixel_buffer_clone(img);
+    fz_check(apply_lut3d(img, l) == RG_ERR_NONE, "apply_lut3d failed on a parsed LUT");
+    fz_check(fz_same_alpha(img, ref), "apply_lut3d changed alpha on a parsed LUT");
+    pixel_buffer_free(ref);
+    pixel_buffer_free(img);
+    return 0;
+}
+
+fn fz_cube(iter) {
+    # 1. Soup: parse or fail cleanly.
+    fz_cube_soup();
+    var l1 = lut3d_from_cube(FZ_TXT, FZ_TXT_N, FZ_ERR);
+    if (l1 == 0) {
+        fz_check(load64(FZ_ERR) == RG_ERR_OTHER, "from_cube failed with a code other than RG_ERR_OTHER");
+    } else {
+        fz_check(lut3d_size(l1) >= 2, "from_cube returned a LUT below size 2");
+        fz_cube_apply_ok(l1);
+        lut3d_free(l1);
+    }
+
+    # 2. A valid cube of exact decimals: every entry round-trips bit for bit.
+    var size = 2 + fz_u(4);
+    var n = size * size * size;
+    var want = fl_alloc(n * 12);
+    FZ_TXT_N = 0;
+    fz_put("LUT_3D_SIZE ");
+    fz_put_int(size);
+    fz_putc(10);
+    var i = 0;
+    while (i < n * 3) {
+        var b = fz_f32_finite();
+        store32(want + i * 4, b);
+        fz_put_f32_exact(b, 0);
+        if (i % 3 == 2) { fz_putc(10); } else { fz_putc(32); }
+        i = i + 1;
+    }
+    var l2 = lut3d_from_cube(FZ_TXT, FZ_TXT_N, FZ_ERR);
+    fz_check(l2 != 0, "from_cube refused a valid cube of exact decimals");
+    if (l2 != 0) {
+        var bad = 0;
+        i = 0;
+        while (i < n * 3) {
+            # -0.0 is written "-0", which parses to -0.0: bits compare exactly.
+            if (load32(lut3d_data(l2) + i * 4) != load32(want + i * 4)) { bad = bad + 1; }
+            i = i + 1;
+        }
+        fz_check(bad == 0, "an f32 written as its exact decimal did not parse back to the same bits");
+        lut3d_free(l2);
+    }
+    fl_free(want);
+
+    # 3. Midpoint traps: a hair above the midpoint of (b, b+1) must give b+1.
+    var t = 0;
+    while (t < 8) {
+        var lo = fz_f32_finite() & 0x7FFFFFFF;
+        if (lo >= 0x7F7FFFFF) { lo = 0x7F7FFFFE; }
+        var mid = f64_div(f64_add(f32_to(lo), f32_to(lo + 1)), 2.0);
+        # The midpoint has at most 25 significant bits, so its exact decimal is
+        # mid's own: format it as an f64 through the same digit generator.
+        FZ_TXT_N = 0;
+        var dg = fl_alloc(_DC_DIGITS_CAP);
+        var xo = fl_alloc(8);
+        var nd = _dc_digits(mid, dg, xo);
+        fz_put("0.");
+        var j = 0;
+        while (j < nd) { fz_putc(48 + load8(dg + j)); j = j + 1; }
+        j = 0;
+        while (j < 20) { fz_putc(48); j = j + 1; }
+        fz_putc(49);
+        fz_putc(101);
+        var x = load64(xo);
+        if (x < 0) { fz_putc(45); x = 0 - x; }
+        fz_put_int(x);
+        fl_free(xo);
+        fl_free(dg);
+        var got = fl_alloc(8);
+        fz_check(_cb_parse_f32(FZ_TXT, 0, FZ_TXT_N, got) == 1, "a midpoint token did not parse");
+        fz_check(load64(got) == lo + 1, "a hair above a midpoint did not round up");
+        fl_free(got);
+        t = t + 1;
+    }
+    return 0;
+}
 
 fn one(iter) {
     var w = 1 + fz_u(16);
@@ -78,11 +276,14 @@ fn one(iter) {
 
     fz_check(lut3d_new(fz_u(2)) == 0, "lut3d_new accepted a size below 2");
     pixel_buffer_free(src);
+    fz_cube(iter);
     return 0;
 }
 
 fn main() {
     alloc_init();
+    FZ_TXT = fl_alloc(FZ_TXT_CAP);
+    FZ_ERR = fl_alloc(8);
     return fz_run("fuzz_lut", 2000, &one);
 }
 

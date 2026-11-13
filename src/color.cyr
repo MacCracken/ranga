@@ -10,6 +10,21 @@
 #   LinRgba 16 bytes   +0 r  +4 g  +8 b  +12 a         (f32 bits, load32/store32)
 #   CieXyz  24 bytes   +0 x  +8 y  +16 z               (f64 bits, load64/store64)
 #   CieLab  24 bytes   +0 l  +8 a  +16 b               (f64 bits)
+#   Hsl     12 bytes   +0 h  +4 s  +8 l                (f32 bits; h in degrees)
+#   Cmyk    16 bytes   +0 c  +4 m  +8 y  +12 k         (f32 bits)
+#   Oklab   12 bytes   +0 l  +4 a  +8 b                (f32 bits)
+#   Oklch   12 bytes   +0 l  +4 c  +8 h                (f32 bits; h in degrees)
+#
+# RECORD SURFACE. Rust's fields are `pub` and every struct derives Clone, Copy
+# and PartialEq (Srgba also Eq and Hash), so each record here has:
+#   <type>_<field>(c)          read a field
+#   <type>_set_<field>(c, v)   write a field (same bit-pattern convention)
+#   <type>_clone(c)            a new record the caller owns (Clone and Copy)
+#   <type>_eq(a, b)            1 or 0, field by field with IEEE `==`, as derived
+#                              PartialEq does: NaN equals nothing, not even
+#                              itself, and -0.0 equals +0.0
+#   srgba_hash(c)              Srgba's Hash, an injective u32 key
+# A null argument to `_eq` compares unequal; `_clone(0)` returns 0.
 #
 # PRECISION. Rust carries LinRgba as f32 and XYZ/Lab as f64, and this port keeps
 # that split exactly rather than promoting everything to f64 — the sRGB matrices
@@ -75,6 +90,59 @@ fn color_space_name(s) {
     return "unknown";
 }
 
+# ── Record helpers: clone and equality ────────
+#
+# Rust derives Clone/Copy and PartialEq on every colour struct. One copy and two
+# comparison loops serve all eight; each record's public `_clone` and `_eq` below
+# names its own size and field count.
+
+# A byte-for-byte copy of an `n`-byte record, owned by the caller. 0 if `c` is 0
+# or the allocation fails.
+#must_use
+fn _c_clone(c, n) {
+    if (c == 0) { return 0; }
+    var d = fl_alloc(n);
+    if (d == 0) { return 0; }
+    memcpy(d, c, n);
+    return d;
+}
+
+# 1 if the first `n` f32 fields of `a` and `b` are all equal under IEEE `==`.
+#
+# ⚠ NOT A BYTE COMPARE. Derived PartialEq on f32 is IEEE equality: a NaN field
+# makes a record unequal even to itself, and -0.0 equals +0.0. A memcmp gets both
+# of those backwards. The typed locals are what make `==` a float compare.
+#must_use
+fn _c_eq_f32(a, b, n) {
+    if (a == 0 || b == 0) { return 0; }
+    var i = 0;
+    while (i < n) {
+        var x: f32 = load32(a + i * 4);
+        var y: f32 = load32(b + i * 4);
+        var same = 0;
+        if (x == y) { same = 1; }
+        if (same == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# The f64 form of _c_eq_f32, for CieXyz and CieLab (and transform.cyr's records).
+#must_use
+fn _c_eq_f64(a, b, n) {
+    if (a == 0 || b == 0) { return 0; }
+    var i = 0;
+    while (i < n) {
+        var x: f64 = load64(a + i * 8);
+        var y: f64 = load64(b + i * 8);
+        var same = 0;
+        if (x == y) { same = 1; }
+        if (same == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
 # ── Srgba (4 x u8) ────────
 var _SRGBA_SIZE = 4;
 
@@ -108,6 +176,29 @@ fn srgba_set(c, r, g, b, a) {
 
 fn srgba_free(c) { if (c != 0) { fl_free(c); } return RG_ERR_NONE; }
 
+fn srgba_set_r(c, v) { store8(c, v & 255); return RG_ERR_NONE; }
+fn srgba_set_g(c, v) { store8(c + 1, v & 255); return RG_ERR_NONE; }
+fn srgba_set_b(c, v) { store8(c + 2, v & 255); return RG_ERR_NONE; }
+fn srgba_set_a(c, v) { store8(c + 3, v & 255); return RG_ERR_NONE; }
+
+#must_use
+fn srgba_clone(c) { return _c_clone(c, _SRGBA_SIZE); }
+
+# Srgba is Eq as well as PartialEq in Rust: four bytes, no float subtleties.
+#must_use
+fn srgba_eq(a, b) {
+    if (a == 0 || b == 0) { return 0; }
+    if (load32(a) == load32(b)) { return 1; }
+    return 0;
+}
+
+# Rust's `impl Hash for Srgba`. The trait's only contract is that equal values
+# hash equally; Rust's actual hash value is SipHash output and unspecified. The
+# four bytes as one u32 (r | g<<8 | b<<16 | a<<24) satisfy that contract and are
+# injective, so two colours share a key only if they are equal.
+#must_use
+fn srgba_hash(c) { return load32(c); }
+
 # ── LinRgba (4 x f32) ────────
 var _LINRGBA_SIZE = 16;
 
@@ -134,6 +225,15 @@ fn lin_rgba_a(c) { return load32(c + 12); }
 
 fn lin_rgba_free(c) { if (c != 0) { fl_free(c); } return RG_ERR_NONE; }
 
+fn lin_rgba_set_r(c, v) { store32(c, v); return RG_ERR_NONE; }
+fn lin_rgba_set_g(c, v) { store32(c + 4, v); return RG_ERR_NONE; }
+fn lin_rgba_set_b(c, v) { store32(c + 8, v); return RG_ERR_NONE; }
+fn lin_rgba_set_a(c, v) { store32(c + 12, v); return RG_ERR_NONE; }
+#must_use
+fn lin_rgba_clone(c) { return _c_clone(c, _LINRGBA_SIZE); }
+#must_use
+fn lin_rgba_eq(a, b) { return _c_eq_f32(a, b, 4); }
+
 # ── CieXyz (3 x f64) ────────
 var _CIEXYZ_SIZE = 24;
 
@@ -154,6 +254,13 @@ fn cie_xyz_y(c) { return load64(c + 8); }
 #must_use
 fn cie_xyz_z(c) { return load64(c + 16); }
 fn cie_xyz_free(c) { if (c != 0) { fl_free(c); } return RG_ERR_NONE; }
+fn cie_xyz_set_x(c, v) { store64(c, v); return RG_ERR_NONE; }
+fn cie_xyz_set_y(c, v) { store64(c + 8, v); return RG_ERR_NONE; }
+fn cie_xyz_set_z(c, v) { store64(c + 16, v); return RG_ERR_NONE; }
+#must_use
+fn cie_xyz_clone(c) { return _c_clone(c, _CIEXYZ_SIZE); }
+#must_use
+fn cie_xyz_eq(a, b) { return _c_eq_f64(a, b, 3); }
 
 # Rust's CieXyz::D65_WHITE / D50_WHITE associated consts. Functions rather than
 # globals because each call hands back a fresh heap record the caller owns.
@@ -182,6 +289,13 @@ fn cie_lab_a(c) { return load64(c + 8); }
 #must_use
 fn cie_lab_b(c) { return load64(c + 16); }
 fn cie_lab_free(c) { if (c != 0) { fl_free(c); } return RG_ERR_NONE; }
+fn cie_lab_set_l(c, v) { store64(c, v); return RG_ERR_NONE; }
+fn cie_lab_set_a(c, v) { store64(c + 8, v); return RG_ERR_NONE; }
+fn cie_lab_set_b(c, v) { store64(c + 16, v); return RG_ERR_NONE; }
+#must_use
+fn cie_lab_clone(c) { return _c_clone(c, _CIELAB_SIZE); }
+#must_use
+fn cie_lab_eq(a, b) { return _c_eq_f64(a, b, 3); }
 
 # ── sRGB transfer function ────────
 # The piecewise sRGB EOTF. Rust takes u8 and returns f32; this takes an integer
@@ -378,6 +492,13 @@ fn hsl_s(c) { return load32(c + 4); }
 #must_use
 fn hsl_l(c) { return load32(c + 8); }
 fn hsl_free(c) { if (c != 0) { fl_free(c); } return RG_ERR_NONE; }
+fn hsl_set_h(c, v) { store32(c, v); return RG_ERR_NONE; }
+fn hsl_set_s(c, v) { store32(c + 4, v); return RG_ERR_NONE; }
+fn hsl_set_l(c, v) { store32(c + 8, v); return RG_ERR_NONE; }
+#must_use
+fn hsl_clone(c) { return _c_clone(c, _HSL_SIZE); }
+#must_use
+fn hsl_eq(a, b) { return _c_eq_f32(a, b, 3); }
 
 # HSL runs in SINGLE precision throughout, as Rust's `From<Srgba> for Hsl` and
 # `From<Hsl> for Srgba` do: f32 channels, f32 min/max, the `< 1e-6` tests, and
@@ -490,6 +611,14 @@ fn cmyk_y(v) { return load32(v + 8); }
 #must_use
 fn cmyk_k(v) { return load32(v + 12); }
 fn cmyk_free(v) { if (v != 0) { fl_free(v); } return RG_ERR_NONE; }
+fn cmyk_set_c(v, x) { store32(v, x); return RG_ERR_NONE; }
+fn cmyk_set_m(v, x) { store32(v + 4, x); return RG_ERR_NONE; }
+fn cmyk_set_y(v, x) { store32(v + 8, x); return RG_ERR_NONE; }
+fn cmyk_set_k(v, x) { store32(v + 12, x); return RG_ERR_NONE; }
+#must_use
+fn cmyk_clone(v) { return _c_clone(v, _CMYK_SIZE); }
+#must_use
+fn cmyk_eq(a, b) { return _c_eq_f32(a, b, 4); }
 
 # Naive CMYK, no ICC profile — for print-accurate conversion use icc.cyr.
 #must_use
@@ -572,6 +701,13 @@ fn oklab_a(c) { return load32(c + 4); }
 #must_use
 fn oklab_b(c) { return load32(c + 8); }
 fn oklab_free(c) { if (c != 0) { fl_free(c); } return RG_ERR_NONE; }
+fn oklab_set_l(c, v) { store32(c, v); return RG_ERR_NONE; }
+fn oklab_set_a(c, v) { store32(c + 4, v); return RG_ERR_NONE; }
+fn oklab_set_b(c, v) { store32(c + 8, v); return RG_ERR_NONE; }
+#must_use
+fn oklab_clone(c) { return _c_clone(c, _OKLAB_SIZE); }
+#must_use
+fn oklab_eq(a, b) { return _c_eq_f32(a, b, 3); }
 
 var _OKLCH_SIZE = 12;
 
@@ -592,6 +728,13 @@ fn oklch_c(v) { return load32(v + 4); }
 #must_use
 fn oklch_h(v) { return load32(v + 8); }
 fn oklch_free(v) { if (v != 0) { fl_free(v); } return RG_ERR_NONE; }
+fn oklch_set_l(v, x) { store32(v, x); return RG_ERR_NONE; }
+fn oklch_set_c(v, x) { store32(v + 4, x); return RG_ERR_NONE; }
+fn oklch_set_h(v, x) { store32(v + 8, x); return RG_ERR_NONE; }
+#must_use
+fn oklch_clone(v) { return _c_clone(v, _OKLCH_SIZE); }
+#must_use
+fn oklch_eq(a, b) { return _c_eq_f32(a, b, 3); }
 
 # One row of a 3x3 matrix, in SINGLE precision.
 #

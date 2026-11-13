@@ -65,6 +65,12 @@ let smooth = filter::bilateral(&denoised, 2, 10.0, 30.0)?;
 let lut = filter::Lut3d::from_cube(include_str!("film_look.cube"))?;
 filter::apply_lut3d(&mut buf, &lut)?;
 ```
+In the Cyrius port (since 2.4.0), which also honours the file's DOMAIN lines (ADR 007):
+```cyrius
+var lut = lut3d_from_cube(text, len, err);   # 0 with RG_ERR_OTHER on a malformed file
+apply_lut3d(buf, lut);
+lut3d_free(lut);
+```
 
 ### Sharpening after resize
 ```rust

@@ -33,6 +33,14 @@
 > weighted mean, where Rust truncated
 > ([ADR 004](../adr/004-bilateral-rounds-its-weighted-mean.md)).
 >
+> **Updated for 2.4.0** (milestone 2.4.x, "surface completion"). Outside the GPU layer
+> every MISSING and PARTIAL item is now ported: 19 MISSING and 10 PARTIAL items move,
+> and `Lut3d::from_cube` moves from DIV-DOC to IMPROVED. The serde surface (11 items)
+> is JSON in serde_json's form; it matches serde_json 1.0.151 byte for byte on encode
+> and decision for decision on decode, with numbers correctly rounded where serde_json's
+> best-effort parser is not (ADR 008), so it counts as IMPROVED. The 14 MISSING items
+> left are all GPU (`GpuChain` and `new_with_hwaccel`).
+>
 > **Updated for 2.3.3.** No status changes. GPU compute is refused on every backend but
 > native AMD ([ADR 005](../adr/005-gpu-compute-runs-only-on-native-amd.md)), and the
 > GPU table's statuses describe the AMD backend.
@@ -56,11 +64,13 @@ item is either ported or given an ADR. Nothing stays SUSPECT.
 
 | Area (Rust files) | Items | PARITY | IMPROVED | DIV-DOC | PARTIAL | MISSING | SUSPECT |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| error, lib, pixel, color, convert | 88 | 58 | 3 | 16 | 7 | 4 | 0 |
-| filter, transform, histogram | 73 | 53 | 5 | 4 | 0 | 11 | 0 |
-| composite, blend, icc, spectral, hwaccel | 70 | 57 | 1 | 5 | 3 | 4 | 0 |
+| error, lib, pixel, color, convert | 88 | 66 | 6 | 16 | 0 | 0 | 0 |
+| filter, transform, histogram | 73 | 60 | 10 | 3 | 0 | 0 | 0 |
+| composite, blend, icc, spectral, hwaccel | 70 | 60 | 5 | 5 | 0 | 0 | 0 |
 | gpu (context, buffer, shaders, pipeline) | 72 | 39 | 0 | 4 | 9 | 14 | 6 |
-| **Total** | **303** | **207** | **9** | **29** | **19** | **33** | **6** |
+| **Total** | **303** | **225** | **21** | **28** | **9** | **14** | **6** |
+
+(At 2.3.3: 207 parity, 9 improved, 29 divergent, 19 partial, 33 missing, 6 suspect.)
 
 An item is a pub fn (impl methods included), struct, enum, const, or trait impl/derive.
 Each derive counts once per type. The M7 audit counted 318 under a looser
@@ -103,15 +113,15 @@ convention, so the two totals are not comparable line for line.
      backend, and so is bilinear/bicubic `gpu_resize`;
    - `GpuChain` (13 items) is not ported at all, although `hwaccel.cyr`'s cost model
      assumes it.
-5. **The serde surface is 14 types, and no codec exists.** The old audit said
+5. **The serde surface is 14 types (resolved in 2.4.0, ADR 008).** The old audit said
    "four enums, hand-written codecs". In fact Rust derives Serialize/Deserialize on:
    - the 8 colour structs;
    - `PixelFormat`, `ColorSpace`, `BlendMode`, `ToneCurve`, `Affine` and `Perspective`.
 
-   `src/` has no codec for any of them. Rust has **no `FromStr` anywhere**, so the old
-   "missing FromStr" gaps were never gaps. At the 6.7.18 pin `#derive(Serialize)` on
-   an enum works and writes the variant name, which is serde's wire form (checked
-   for 2.1.2), so the enum codecs can be derived.
+   Up to 2.3.3 `src/` had no codec for any of them. Since 2.4.0 each has
+   `<type>_to_json` / `<type>_from_json` in `src/serde.cyr`, checked against serde_json
+   1.0.151 by the oracle's serde group. Rust has **no `FromStr` anywhere**, so the old
+   "missing FromStr" gaps were never gaps.
 
 ## Improved in Cyrius (keep)
 
@@ -127,6 +137,12 @@ convention, so the two totals are not comparable line for line.
   output about one count dark (mean −1.00, worst −1.94) and darkened a uniform image
   by up to 2. Now the mean error is 0.00, the worst 0.50, a uniform image is exact,
   and the blurs are 12% faster.
+- **`Lut3d::from_cube`** (2.4.0, ADR 007): honours the file's `DOMAIN_MIN`/`DOMAIN_MAX`,
+  which Rust skipped and so mis-applied every non-[0, 1] LUT, and reads Resolve's
+  `LUT_3D_INPUT_RANGE`, which Rust rejected.
+- **serde** (2.4.0, ADR 008): JSON in serde_json 1.0.151's exact form, with numbers
+  decoded correctly rounded; serde_json's default parser is best effort (2,782 of 4,000
+  long f64 decimals right, against ranga's 4,000).
 - **`bilateral`** (2.3.2, ADR 004): rounds its weighted mean. Rust truncated it, which
   biased output half a count dark (mean −0.47, worst −1.00) and darkened a uniform
   image by 1 in about half of all cases. Now the mean error is 0.00, the worst 0.50,
@@ -175,9 +191,9 @@ convention, so the two totals are not comparable line for line.
 | `linear_to_srgb`, `From<LinRgba> for Srgba`, `From<Srgba> for Hsl`, `From<Hsl> for Srgba`, `cmyk_to_srgb`, `srgb_to_cmyk`, `From<Oklab> for Oklch`, `rgbaf32_to_rgba8` | color.cyr, convert.cyr | PARITY (2.2.0) | Were SUSPECT: f64 where Rust is f32. Rewritten in f32 in Rust's order; bit-exact over the oracle's grids and, for the byte paths, every f32 in [0, 1]. |
 | `From<Oklch> for Oklab`, `color_temperature` | color.cyr | DIV-DOC (2.2.0) | Were SUSPECT. Now f32 as in Rust; the residual ≤ 2 ULP is glibc's libm rounding, accepted by ADR 002. |
 | `BufferPool::new` (and acquire/release) | pixel.cyr | PARITY (2.2.0) | Was SUSPECT: eager `max_buffers` slots. Now a growable array with swap_remove, like Rust's Vec. |
-| `LinRgba`, `Hsl`, `CieXyz`, `CieLab`, `Cmyk`, `Oklab`, `Oklch` | color.cyr | PARTIAL ×7 | Getters only; Rust's pub fields are writable. The Hsl and Cmyk layouts are not in the module header. |
-| `PixelBuffer::into_data` | — | MISSING | No way to take the bytevec and free only the header. |
-| serde on `PixelFormat`, `ColorSpace` and the 8 colour structs | — | MISSING ×3 | No codec. |
+| `LinRgba`, `Hsl`, `CieXyz`, `CieLab`, `Cmyk`, `Oklab`, `Oklch` | color.cyr | PARITY ×7 (2.4.0) | Were PARTIAL (getters only). Each field has a setter, every struct (Srgba too) has `_clone` and `_eq` (IEEE `==`, as derived PartialEq), Srgba has `srgba_hash`, and all eight layouts are in the module header. |
+| `PixelBuffer::into_data` | `pixel_buffer_into_bv` | PARITY (2.4.0) | Was MISSING. Frees the header, hands back the bytevec. |
+| serde on `PixelFormat`, `ColorSpace` and the 8 colour structs | serde.cyr | IMPROVED ×3 (2.4.0) | Were MISSING. JSON in serde_json 1.0.151's form; decoded numbers correctly rounded (ADR 008). ColorSpace's CieLab and Oklab are `"CieLab"`/`"Oklab"`. |
 | `PixelBuffer::new` overflow | pixel.cyr | PARITY (2.2.0) | Was DIV-DOC without an ADR. Now BUFFER_TOO_SMALL, as Rust's. |
 | `yuv420p_to_rgba_bt709` / `_bt2020`, `nv12_to_rgba` | convert.cyr | DIV-DOC | ADR 001's i16 wrap; named in the ADR since 2.2.0. |
 
@@ -186,8 +202,8 @@ convention, so the two totals are not comparable line for line.
   - `convert.cyr` ignored `_cv_y_row`'s return value, so a failed 16-byte allocation
     handed back an uninitialised Y plane with `RG_ERR_NONE`.
   - `buffer_pool_acquire` did not guard against a negative size.
-- **Open (roadmap 2.4.x):** `bytevec.cyr`'s 19 `bv_*` functions sit in the unprefixed
-  global namespace.
+- **Resolved in 2.4.0 (ADR 006):** `bytevec.cyr`'s 19 `bv_*` functions sat in the
+  unprefixed global namespace. They are `rg_bv_*` now.
 
 ### filter, transform, histogram
 
@@ -197,10 +213,10 @@ convention, so the two totals are not comparable line for line.
 | `bilateral` | filter_kernel.cyr | IMPROVED (2.3.2) | PARITY in 2.2.0 (f32 weights, σ guards). 2.3.2 rounds the weighted mean where Rust truncated it (ADR 004). The weights are still bit-exact; outputs move 0 or +1 against Rust, and the oracle bounds them at 1. |
 | `gaussian_blur`, `box_blur`, `unsharp_mask` | filter_kernel.cyr | IMPROVED (2.3.1) | Were PARITY with a Rust defect: truncation after each separable pass darkened a uniform image by up to 2 and biased every image about one count dark. Fixed in Cyrius by ADR 003; values move 0 to +2 against Rust, never down. |
 | `Affine::rotate` | transform.cyr:100 | PARITY (2.1.2) | The review counted this as parity with a documented NaN for \|θ\| ≥ 2^63. That guard had outlived the toolchain fault it worked around, so `rotate(1e20)` was NaN where Rust is finite. 2.1.2 delegates every finite angle; the item is not counted twice. |
-| `Lut3d` Clone | — | MISSING | Heap-owning, and there is no `lut3d_clone`. |
-| `Affine`: Clone, Copy, PartialEq, Serialize, Deserialize | — | MISSING ×5 | No `affine_clone` / `affine_eq`, and no codec. |
-| `Perspective`: Clone, Copy, PartialEq, Serialize, Deserialize | — | MISSING ×5 | Same. |
-| `Lut3d::from_cube` | — | DIV-DOC | Listed "not ported" with no reason. |
+| `Lut3d` Clone | `lut3d_clone` | PARITY (2.4.0) | Was MISSING. A deep copy, domain included. |
+| `Affine`: Clone, Copy, PartialEq, Serialize, Deserialize | `affine_clone`, `affine_eq`, `affine_to/from_json` | PARITY ×3, IMPROVED ×2 (2.4.0) | Were MISSING. Setters for the six pub fields too. serde per ADR 008. |
+| `Perspective`: Clone, Copy, PartialEq, Serialize, Deserialize | `perspective_clone`, `_eq`, `_set_m`, `_to/from_json` | PARITY ×3, IMPROVED ×2 (2.4.0) | Same. |
+| `Lut3d::from_cube` | `lut3d_from_cube` (cube.cyr) | IMPROVED (2.4.0) | Was DIV-DOC ("not ported"). Rust's grammar and errors, and its correctly rounded f32 parse, exactly (124 exact-oracle cases, 46 of them double-rounding traps). Honours DOMAIN_MIN/MAX and reads LUT_3D_INPUT_RANGE, which Rust skipped or rejected (ADR 007). |
 
 **Also found:**
 - **Fixed in 2.2.0:**
@@ -211,8 +227,8 @@ convention, so the two totals are not comparable line for line.
   does, so NaN coordinates read pixel 0 in both. The oracle's `affine_nonfinite` group
   (NaN and inf matrices, 1×1 and 20×20 sources) is byte-identical to Rust. The comment
   claiming the inverse "cannot produce NaN" was wrong, and is corrected.
-- **Open (roadmap 2.4.x):** `xorshift64_*` is public in the port but was private in
-  Rust, which makes it a new API commitment.
+- **Resolved in 2.4.0 (ADR 006):** `xorshift64_*` was public in the port but private
+  in Rust. It is `_fk_xorshift64_*` now.
 
 ### composite, blend, icc, spectral, hwaccel
 
@@ -226,9 +242,9 @@ That is counted as PARITY.
 | --- | --- | --- | --- |
 | `IccProfile::from_bytes` | icc.cyr:451 | PARITY (2.1.2) | Zero tags gave `RG_ERR_ALLOCATION` from 2.0.3 to 2.1.1; it is now InvalidFormat, as in Rust. |
 | `IccLutProfile::from_bytes` | icc.cyr | PARITY (2.2.0) | Grid 1 is accepted (a constant LUT), as in Rust; grid 0 stays rejected. mft2 with 0 entries was fixed in 2.1.2. |
-| `IccProfile`, `IccLutProfile` structs | getters | PARTIAL ×2 | Read-only; there is no way to build a profile. |
-| `ToneCurve` | `TC_*` | PARTIAL | Table entries have no accessor (raw `load64(t+16)` only). |
-| serde on `BlendMode`, `ToneCurve` | — | MISSING ×4 | No codec. BlendMode's wire form is the variant name ("ColorDodge"), not `blend_mode_name`. |
+| `IccProfile`, `IccLutProfile` structs | `icc_profile_new`, `icc_lut_profile_new`, setters, `_clone` | PARITY ×2 (2.4.0) | Were PARTIAL (read-only). A constructor is Rust's struct literal, every pub field has a setter, and Clone is a deep copy. What Rust would panic on later (a null curve, a LUT whose length disagrees with its grid) is refused. The LUT profile keeps a length per input curve, as Rust's three Vecs do. |
+| `ToneCurve` | `TC_*`, `tone_curve_table_at`, setters, `tone_curve_clone` | PARITY (2.4.0) | Was PARTIAL. Table entries and the gamma are readable and writable; Clone is deep. |
+| serde on `BlendMode`, `ToneCurve` | serde.cyr | IMPROVED ×4 (2.4.0) | Were MISSING. BlendMode is the variant name ("ColorDodge"), ToneCurve externally tagged; ADR 008. |
 
 **Also found:**
 - `src/blend.cyr:143` (`one - ganita_f32_min(..)`, whose callee is declared `: i64`) was
@@ -238,9 +254,11 @@ That is counted as PARITY.
   the rest, while Rust uses InvalidFormat throughout. Since 2.2.0 the public parsers
   report INVALID_FORMAT for all of it, and the split survives only in the internal
   `_icc_*_parse` functions, for tests.
-- prakash renamed three of the 20 spectral re-exports, so they are not callable under
-  their Rust names: `CIE_1931_2DEG` → `cie_1931_table()` and `VISIBLE_MIN/MAX_NM` →
-  `spec_visible_min/max_nm()`.
+- prakash renamed three of the 20 spectral re-exports: `CIE_1931_2DEG` →
+  `cie_1931_table()` and `VISIBLE_MIN/MAX_NM` →
+  `spec_visible_min/max_nm()`. Since 2.4.0 `spectral.cyr` also provides the Rust names:
+  `VISIBLE_MIN_NM` and `VISIBLE_MAX_NM` as values, and `CIE_1931_2DEG()` (a function,
+  because prakash builds the table on first use) with `CIE_1931_2DEG_LEN`.
 - ai-hwaccel 2.5.6 picks the first of equal-ranked devices, where Rust's `max_by_key`
   picks the last, and counts shared RAM once. So `hw_probe` can disagree with Rust on
   multi-GPU or unified-memory machines. This is upstream behaviour.

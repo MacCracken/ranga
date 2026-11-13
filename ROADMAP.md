@@ -9,7 +9,7 @@ for porting mistakes, until the port is complete.
 | --- | --- |
 | ~~2.2.x~~ | **Done in 2.2.0.** Bit-exact again: `scripts/oracle` against `rust-old/`, with every CPU divergence fixed or ADR'd |
 | ~~2.3.x~~ | **Done in 2.3.0–2.3.3.** Verification parity: 8 fuzz targets in CI, 31 properties, Rust's integration and edge-case tests, golden vectors from the oracle, the oracle in CI, all 134 benchmarks (GPU on the AMD dev host). Rust's blur and bilateral darkening fixed, not kept (ADR 003, 004). NVIDIA contexts guarded until mabda compiles SPIR-V for SM75, and tested on a GTX 1660 SUPER (ADR 005) |
-| **2.4.x** | CPU surface completion: the serde decision, clone/eq for heap records, `Lut3d::from_cube`, writable records |
+| ~~2.4.x~~ | **Done in 2.4.0.** CPU surface completion: serde as JSON in serde_json's form (ADR 008), `Lut3d::from_cube` with the `.cube` domain honoured (ADR 007), clone/eq and writable fields on every record, ICC constructors, `into_data`, the Rust spectral names, the `rg_bv_` prefix (ADR 006) |
 | **2.5.x** | GPU: the wgpu decision, `GpuChain`, native blur/blend/bilinear, rounding and size fixes |
 | **2.6.x** | Performance: vectorised blur, histogram ops, contrast/saturation, the YUV inverse |
 | **2.7.x** | Docs, examples, security audit, a first Cyrius consumer |

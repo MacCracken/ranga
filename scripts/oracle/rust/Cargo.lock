@@ -59,6 +59,8 @@ name = "ranga-oracle"
 version = "0.1.0"
 dependencies = [
  "ranga",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

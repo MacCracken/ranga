@@ -26,6 +26,9 @@ include "src/filter_point.cyr"
 include "src/filter_kernel.cyr"
 include "src/transform.cyr"
 include "src/blend.cyr"
+include "src/icc.cyr"
+include "src/decimal.cyr"
+include "src/serde.cyr"
 
 # ── buffered output ────────
 var _OB = 0;
@@ -809,6 +812,8 @@ fn g_blend() {
     return 0;
 }
 
+include "scripts/oracle/probe_serde.cyr"
+
 # ── groups by name ────────
 # 1 if `name` was asked for: every group when no names are given.
 fn want(nargs, name) {
@@ -843,5 +848,6 @@ fn run_groups(nargs) {
     if (want(nargs, "perspective") == 1) { g_perspective(); }
     if (want(nargs, "yuv_fwd") == 1) { g_yuv_fwd(); }
     if (want(nargs, "blend") == 1) { g_blend(); }
+    if (want(nargs, "serde") == 1) { g_serde(); }
     return 0;
 }

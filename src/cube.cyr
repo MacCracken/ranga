@@ -1,0 +1,402 @@
+# cube.cyr -- the .cube 3D LUT text parser
+# Ported from rust-old/src/filter.rs (Lut3d::from_cube, line 892). Private prefix: _cb_
+#
+# `lut3d_from_cube(text, len, err_out)` is Rust's `Lut3d::from_cube(&str)`. It
+# returns a Lut3d the caller owns (lut3d_free), or 0 with RG_ERR_OTHER through
+# err_out. Every Rust failure is `RangaError::Other(..)`, so every failure here
+# is RG_ERR_OTHER, and the conditions are Rust's, checked in Rust's order:
+#   * a `LUT_3D_SIZE` whose value is not a usize;
+#   * any `LUT_1D_SIZE` line (1D LUTs are not supported);
+#   * a data line of three or more tokens whose first three are not all f32;
+#   * after the last line: a size below 2, or a data count other than size^3.
+#
+# THE TEXT GRAMMAR IS RUST'S, byte for byte:
+#   * lines are split on '\n'; Rust's `lines()` also drops a trailing '\r',
+#     which the trim below removes anyway;
+#   * `trim` and `split_whitespace` use char::is_whitespace, which is UNICODE
+#     White_Space. That includes NBSP, U+2000-U+200A, U+3000 and five more,
+#     so they are matched as UTF-8 here, not only ASCII space and tab;
+#   * skipped lines: empty, `#...`, anything starting `TITLE`;
+#   * keywords are PREFIX matches, as `starts_with` is: `TITLEFOO` is skipped,
+#     `LUT_3D_SIZEX` is a bad size;
+#   * a data line with fewer than three tokens is ignored, not an error; extra
+#     tokens past the third are ignored too;
+#   * `LUT_3D_SIZE` may appear anywhere, even after the data, and the last one
+#     wins.
+#
+# THE NUMBERS ARE RUST'S TOO. `usize::from_str` accepts an optional '+' and
+# digits only. `f32::from_str` is strict (no trailing junk, no hex, digits on at
+# least one side of the point, an exponent needs digits; inf, infinity and nan in
+# any case, with a sign) and CORRECTLY ROUNDED straight to f32. The stdlib has
+# only an f64 parser, and that one is lenient ("1.5abc" reads 1.5). So the grammar
+# is checked here first, and the value takes two steps:
+#   1. f64_parse_n, which is correctly rounded to f64;
+#   2. f32_from, which rounds that f64 to f32, ties to even.
+# Rounding twice is NOT always rounding once. When step 1 lands exactly on a
+# midpoint between two f32s, step 2 breaks the tie to even, but the decimal itself
+# may lie a hair above or below that midpoint. decimal.cyr's `_dc_narrow` detects
+# that case and settles it with an exact comparison of the decimal digits against
+# the midpoint's own exact decimal expansion.
+#
+# TWO RUST DEFECTS ARE FIXED, not reproduced (ADR 007):
+#   * `DOMAIN_MIN`/`DOMAIN_MAX` were skipped, so a LUT whose domain was not
+#     [0, 1] was applied as if it were. They are parsed here into the Lut3d's
+#     domain (filter_kernel.cyr), which lookup honours.
+#   * Resolve's `LUT_3D_INPUT_RANGE min max` fell through to the data-line rule,
+#     failed to parse as a number and rejected the whole file. It sets the domain
+#     of all three channels.
+# A DOMAIN or INPUT_RANGE line must carry numbers (three, or two for INPUT_RANGE)
+# that parse as f32, and each channel must end with min < max, both finite;
+# otherwise RG_ERR_OTHER. A file with no such line, or the default [0, 1]
+# domain, parses to exactly the LUT Rust built.
+
+# ── text helpers ────────
+
+# The byte length of the Unicode White_Space character starting at p[i] (i < e),
+# or 0. ASCII: U+0009..U+000D and U+0020. UTF-8: U+0085 and U+00A0 (C2 xx),
+# U+1680 (E1 9A 80), U+2000..U+200A, U+2028, U+2029, U+202F (E2 80 xx),
+# U+205F (E2 81 9F) and U+3000 (E3 80 80).
+#must_use
+fn _cb_ws_at(p, i, e) {
+    var c = load8(p + i);
+    if (c == 32) { return 1; }
+    if (c >= 9 && c <= 13) { return 1; }
+    if (c == 0xC2) {
+        if (i + 1 >= e) { return 0; }
+        var c1 = load8(p + i + 1);
+        if (c1 == 0x85 || c1 == 0xA0) { return 2; }
+        return 0;
+    }
+    if (c < 0xE1 || c > 0xE3) { return 0; }
+    if (i + 2 >= e) { return 0; }
+    var d1 = load8(p + i + 1);
+    var d2 = load8(p + i + 2);
+    if (c == 0xE1) {
+        if (d1 == 0x9A && d2 == 0x80) { return 3; }
+        return 0;
+    }
+    if (c == 0xE3) {
+        if (d1 == 0x80 && d2 == 0x80) { return 3; }
+        return 0;
+    }
+    if (d1 == 0x80) {
+        if (d2 >= 0x80 && d2 <= 0x8A) { return 3; }
+        if (d2 == 0xA8 || d2 == 0xA9 || d2 == 0xAF) { return 3; }
+        return 0;
+    }
+    if (d1 == 0x81 && d2 == 0x9F) { return 3; }
+    return 0;
+}
+
+# The byte length of a whitespace character ENDING just before p[j], with the
+# span starting at s, or 0. Unambiguous on UTF-8: a continuation byte is never
+# ASCII and never C2, so at most one of the three widths can match.
+#must_use
+fn _cb_ws_before(p, s, j) {
+    if (j - 1 >= s && _cb_ws_at(p, j - 1, j) == 1) { return 1; }
+    if (j - 2 >= s && _cb_ws_at(p, j - 2, j) == 2) { return 2; }
+    if (j - 3 >= s && _cb_ws_at(p, j - 3, j) == 3) { return 3; }
+    return 0;
+}
+
+# Rust's `str::trim` on the span [s, e): writes the trimmed bounds to out[0] and
+# out[8].
+fn _cb_trim(p, s, e, out) {
+    var a = s;
+    var b = e;
+    while (a < b) {
+        var k = _cb_ws_at(p, a, b);
+        if (k == 0) { break; }
+        a = a + k;
+    }
+    while (b > a) {
+        var k2 = _cb_ws_before(p, a, b);
+        if (k2 == 0) { break; }
+        b = b - k2;
+    }
+    store64(out, a);
+    store64(out + 8, b);
+    return 0;
+}
+
+# Rust's `starts_with(lit)` on the span [s, e). `lit` is a NUL-terminated literal.
+#must_use
+fn _cb_starts(p, s, e, lit) {
+    var i = 0;
+    while (load8(lit + i) != 0) {
+        if (s + i >= e) { return 0; }
+        if (load8(p + s + i) != load8(lit + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Rust's `split_whitespace`, the first `want` tokens of [s, e): writes token k's
+# bounds to toks[k*16] and toks[k*16 + 8] and returns how many tokens the span
+# holds, counting no further than `want + 1` (enough to tell "exactly" from
+# "more").
+#must_use
+fn _cb_tokens(p, s, e, toks, want) {
+    var n = 0;
+    var i = s;
+    while (i < e && n <= want) {
+        var k = _cb_ws_at(p, i, e);
+        if (k > 0) {
+            i = i + k;
+        } else {
+            var t0 = i;
+            while (i < e && _cb_ws_at(p, i, e) == 0) { i = i + 1; }
+            if (n < want) {
+                store64(toks + n * 16, t0);
+                store64(toks + n * 16 + 8, i);
+            }
+            n = n + 1;
+        }
+    }
+    return n;
+}
+
+# 1 if the `n` bytes at `a` equal the lowercase ASCII literal `lit`, ignoring
+# ASCII case, as Rust's float grammar does for inf/infinity/nan.
+#must_use
+fn _cb_ieq(a, lit, n) {
+    var i = 0;
+    while (i < n) {
+        var c = load8(a + i);
+        if (c >= 65 && c <= 90) { c = c + 32; }
+        if (c != load8(lit + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# ── usize ────────
+
+# Rust's `usize::from_str` on [s, e): an optional '+', then one or more ASCII
+# digits and nothing else. Writes the value to `out` and returns 1, or returns 0.
+# A value at or past 2^63 is refused: Rust would accept it as a usize, but no
+# LUT that size can match its own data count, so both end in RG_ERR_OTHER.
+#must_use
+fn _cb_parse_usize(p, s, e, out) {
+    var i = s;
+    if (i < e && load8(p + i) == 43) { i = i + 1; }
+    if (i >= e) { return 0; }
+    var v = 0;
+    while (i < e) {
+        var c = load8(p + i);
+        if (_dc_digit(c) == 0) { return 0; }
+        # v * 10 + d must stay below 2^63.
+        if (v > (0x7FFFFFFFFFFFFFFF - (c - 48)) / 10) { return 0; }
+        v = v * 10 + (c - 48);
+        i = i + 1;
+    }
+    store64(out, v);
+    return 1;
+}
+
+# ── f32 ────────
+
+var _CB_POS_INF = 0x7F800000;
+var _CB_NAN     = 0x7FC00000;
+
+# Rust's `f32::from_str` on the token [s, e). Writes the f32 bit pattern to `out`
+# and returns 1, or returns 0 for anything outside Rust's grammar:
+#   Float  ::= Sign? ( 'inf' | 'infinity' | 'nan' | Number )   (any case)
+#   Number ::= ( Digit+ | Digit+ '.' Digit* | Digit* '.' Digit+ ) Exp?
+#   Exp    ::= ('e' | 'E') Sign? Digit+
+# A signed NaN keeps its sign, as Rust's `-f32::NAN` does.
+#must_use
+fn _cb_parse_f32(p, s, e, out) {
+    var i = s;
+    var neg = 0;
+    if (i < e) {
+        var c0 = load8(p + i);
+        if (c0 == 45) { neg = 1; i = i + 1; }
+        elif (c0 == 43) { i = i + 1; }
+    }
+    var sign = 0;
+    if (neg == 1) { sign = 0x80000000; }
+    var rest = e - i;
+    if (rest == 3 && _cb_ieq(p + i, "inf", 3) == 1) { store64(out, _CB_POS_INF | sign); return 1; }
+    if (rest == 8 && _cb_ieq(p + i, "infinity", 8) == 1) { store64(out, _CB_POS_INF | sign); return 1; }
+    if (rest == 3 && _cb_ieq(p + i, "nan", 3) == 1) { store64(out, _CB_NAN | sign); return 1; }
+
+    var nint = 0;
+    while (i < e && _dc_digit(load8(p + i)) == 1) { i = i + 1; nint = nint + 1; }
+    var nfrac = 0;
+    if (i < e && load8(p + i) == 46) {
+        i = i + 1;
+        while (i < e && _dc_digit(load8(p + i)) == 1) { i = i + 1; nfrac = nfrac + 1; }
+    }
+    if (nint + nfrac == 0) { return 0; }
+    if (i < e && (load8(p + i) == 101 || load8(p + i) == 69)) {
+        i = i + 1;
+        if (i < e && (load8(p + i) == 43 || load8(p + i) == 45)) { i = i + 1; }
+        var nexp = 0;
+        while (i < e && _dc_digit(load8(p + i)) == 1) { i = i + 1; nexp = nexp + 1; }
+        if (nexp == 0) { return 0; }
+    }
+    if (i != e) { return 0; }
+
+    # The grammar is now Rust's, which f64_parse_n's own grammar contains, so
+    # the conversion reads the whole span (decimal.cyr).
+    store64(out, _dc_decimal_to_f32(p, s, e));
+    return 1;
+}
+
+# ── from_cube ────────
+
+# A keyword is followed by whitespace or by the end of the line. `DOMAIN_MINX` is
+# not DOMAIN_MIN, so Rust's prefix-skip still applies to it.
+#must_use
+fn _cb_keyword_end(p, s, e, klen) {
+    if (s + klen == e) { return 1; }
+    if (_cb_ws_at(p, s + klen, e) > 0) { return 1; }
+    return 0;
+}
+
+# Parse `want` f32 tokens from [s, e) into `vals` (4 bytes each). 1 on success; 0
+# if the span holds fewer than `want` tokens or one does not parse.
+#must_use
+fn _cb_floats(p, s, e, toks, want, vals) {
+    var n = _cb_tokens(p, s, e, toks, want);
+    if (n < want) { return 0; }
+    var f = fl_alloc(8);
+    if (f == 0) { return 0; }
+    var k = 0;
+    while (k < want) {
+        if (_cb_parse_f32(p, load64(toks + k * 16), load64(toks + k * 16 + 8), f) == 0) {
+            fl_free(f);
+            return 0;
+        }
+        store32(vals + k * 4, load64(f));
+        k = k + 1;
+    }
+    fl_free(f);
+    return 1;
+}
+
+# Rust's `Lut3d::from_cube`. `text` is `len` bytes of .cube text (UTF-8, as a
+# Rust &str is; no NUL needed, and NUL bytes are not special). Returns a new
+# Lut3d, or 0 with RG_ERR_OTHER (any malformed input) or RG_ERR_ALLOCATION
+# through err_out.
+#must_use
+fn lut3d_from_cube(text, len, err_out) {
+    var sp = fl_alloc(16);
+    var toks = fl_alloc(4 * 16);
+    var vals = fl_alloc(16);
+    var tmp = fl_alloc(8);
+    # Six f32: min r, g, b then max r, g, b, starting at the [0, 1] default.
+    var dom = fl_alloc(24);
+    var data = rg_bv_new(4096);
+    if (sp == 0 || toks == 0 || vals == 0 || tmp == 0 || dom == 0 || data == 0) {
+        fl_free(sp); fl_free(toks); fl_free(vals); fl_free(tmp); fl_free(dom);
+        rg_bv_free(data);
+        store64(err_out, RG_ERR_ALLOCATION);
+        return 0;
+    }
+    var d = 0;
+    while (d < 3) {
+        store32(dom + d * 4, 0);
+        store32(dom + 12 + d * 4, f32_from(F64_ONE));
+        d = d + 1;
+    }
+    var size = 0;
+    var count = 0;
+    var rc = RG_ERR_NONE;
+    var ls = 0;
+    while (ls < len && rc == RG_ERR_NONE) {
+        var le = ls;
+        while (le < len && load8(text + le) != 10) { le = le + 1; }
+        _cb_trim(text, ls, le, sp);
+        var s = load64(sp);
+        var e = load64(sp + 8);
+        var next = le + 1;
+
+        var skip = 0;
+        if (s == e) { skip = 1; }
+        elif (load8(text + s) == 35) { skip = 1; }                     # '#'
+        elif (_cb_starts(text, s, e, "TITLE") == 1) { skip = 1; }
+        if (skip == 0 && (_cb_starts(text, s, e, "DOMAIN_MIN") == 1
+            || _cb_starts(text, s, e, "DOMAIN_MAX") == 1)) {
+            # ADR 007: parsed where Rust skipped. A prefix-only match
+            # (DOMAIN_MINX) is still skipped, as Rust skipped it.
+            skip = 1;
+            if (_cb_keyword_end(text, s, e, 10) == 1) {
+                if (_cb_floats(text, s + 10, e, toks, 3, vals) == 0) { rc = RG_ERR_OTHER; }
+                else {
+                    var doff = 0;
+                    if (load8(text + s + 8) == 65) { doff = 12; }       # DOMAIN_MAX
+                    memcpy(dom + doff, vals, 12);
+                }
+            }
+        }
+        if (skip == 0 && rc == RG_ERR_NONE && _cb_starts(text, s, e, "LUT_3D_SIZE") == 1) {
+            skip = 1;
+            _cb_trim(text, s + 11, e, sp);
+            if (_cb_parse_usize(text, load64(sp), load64(sp + 8), tmp) == 0) { rc = RG_ERR_OTHER; }
+            else { size = load64(tmp); }
+        }
+        if (skip == 0 && rc == RG_ERR_NONE && _cb_starts(text, s, e, "LUT_1D_SIZE") == 1) {
+            rc = RG_ERR_OTHER;
+        }
+        if (skip == 0 && rc == RG_ERR_NONE && _cb_starts(text, s, e, "LUT_3D_INPUT_RANGE") == 1
+            && _cb_keyword_end(text, s, e, 18) == 1) {
+            # ADR 007: Resolve's form, one [min, max] for all three channels.
+            skip = 1;
+            if (_cb_floats(text, s + 18, e, toks, 2, vals) == 0) { rc = RG_ERR_OTHER; }
+            else {
+                d = 0;
+                while (d < 3) {
+                    store32(dom + d * 4, load32(vals));
+                    store32(dom + 12 + d * 4, load32(vals + 4));
+                    d = d + 1;
+                }
+            }
+        }
+        if (skip == 0 && rc == RG_ERR_NONE) {
+            # A data line. Fewer than three tokens is ignored, as in Rust.
+            var nt = _cb_tokens(text, s, e, toks, 3);
+            if (nt >= 3) {
+                if (_cb_floats(text, s, e, toks, 3, vals) == 0) { rc = RG_ERR_OTHER; }
+                else {
+                    var at = rg_bv_len(data);
+                    if (rg_bv_reserve(data, at + 12) != RG_ERR_NONE) { rc = RG_ERR_ALLOCATION; }
+                    else {
+                        memcpy(rg_bv_data(data) + at, vals, 12);
+                        rg_bv_set_len(data, at + 12);
+                        count = count + 1;
+                    }
+                }
+            }
+        }
+        ls = next;
+    }
+
+    var lut = 0;
+    if (rc == RG_ERR_NONE) {
+        # Rust: `size < 2` is an error, then a data count other than size^3. A
+        # size past lut3d_new's cap cannot match any count this text holds.
+        if (size < 2 || size > 916015) { rc = RG_ERR_OTHER; }
+        elif (count != size * size * size) { rc = RG_ERR_OTHER; }
+    }
+    if (rc == RG_ERR_NONE) {
+        lut = lut3d_new(size);
+        if (lut == 0) { rc = RG_ERR_ALLOCATION; }
+    }
+    if (rc == RG_ERR_NONE) {
+        memcpy(lut3d_data(lut), rg_bv_data(data), count * 12);
+        d = 0;
+        while (d < 3 && rc == RG_ERR_NONE) {
+            if (lut3d_set_domain(lut, d, load32(dom + d * 4), load32(dom + 12 + d * 4)) != RG_ERR_NONE) {
+                rc = RG_ERR_OTHER;
+            }
+            d = d + 1;
+        }
+        if (rc != RG_ERR_NONE) { lut3d_free(lut); lut = 0; }
+    }
+    fl_free(sp); fl_free(toks); fl_free(vals); fl_free(tmp); fl_free(dom);
+    rg_bv_free(data);
+    store64(err_out, rc);
+    return lut;
+}

@@ -1,0 +1,1267 @@
+# serde.cyr -- JSON codecs in serde's wire form, for the 14 types Rust derived
+# Serialize and Deserialize on. Private prefix: _sd_
+#
+# Rust 1.0.1 derived serde on the 8 colour structs, PixelFormat, ColorSpace,
+# BlendMode, ToneCurve, Affine and Perspective (ADR 008). serde is format-agnostic;
+# the format Rust's ecosystem reaches for, and the one the Cyrius stdlib's bayan
+# speaks, is JSON. So each type gets two functions, and both follow serde_json
+# 1.0.151 (the version rust-old/Cargo.lock pins) byte for byte and branch for
+# branch:
+#
+#   <type>_to_json(v)                  an rg_bv of compact JSON text (NUL after
+#                                      its length, which excludes it), or 0 if an
+#                                      allocation fails or v is not a valid value.
+#   <type>_from_json(text, len, err)   a new record (or, for the three unit enums,
+#                                      the discriminant), and through err:
+#                                        RG_ERR_NONE           decoded
+#                                        RG_ERR_PARSE          not JSON: serde_json's
+#                                                              Syntax and Eof errors
+#                                        RG_ERR_INVALID_FORMAT JSON, wrong shape:
+#                                                              its Data errors
+#                                      A failed struct decode returns 0, a failed
+#                                      enum decode returns the (negative) code.
+#
+# THE WIRE FORM (serde's derive defaults):
+#   struct      {"r":10,"g":20,"b":30,"a":40}, fields in declaration order.
+#               Decoding also accepts serde's SEQUENCE form, [10,20,30,40].
+#   unit enum   "ColorDodge". Decoding also accepts {"ColorDodge":null}.
+#   ToneCurve   {"Gamma":2.2} and {"Table":[0.0,0.5,1.0]}, externally tagged.
+#   Perspective {"m":[[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]]}.
+#   u8          an integer 0..255.
+#   f32, f64    ryu's shortest round-trip text (decimal.cyr): 0.1f32 is "0.1",
+#               1.0 is "1.0", 1e30f32 is "1e30". NaN and the infinities are
+#               written `null`, as serde_json writes them, and `null` does not
+#               decode into a float, as in serde_json.
+#
+# THE DECODING RULES are serde_json's and serde-derive's, in their order, because
+# the order decides which error a malformed input reports:
+#   * whitespace is JSON's four bytes; anything after the value is an error;
+#   * the 8 colour structs are `deny_unknown_fields`; Affine and Perspective skip
+#     unknown fields, whose values must still be valid JSON (at any depth: the
+#     skip is iterative, as serde_json's ignore_value is);
+#   * a duplicate field is reported at its key, before its value is read; a
+#     missing one after the closing brace;
+#   * a u8 takes an integer literal only: 1.0, 1e0 and -0 are floats (serde_json
+#     reads -0 as the float -0.0), 256 is out of range;
+#   * a float field takes any JSON number; one outside f64's range (1e400) is a
+#     syntax error even where the field is a u8, because serde_json computes the
+#     value before it checks the type;
+#   * a struct or array of the wrong length reports invalid length (Data) when
+#     short and trailing characters (Syntax) when long.
+#
+# ⚠ ONE DELIBERATE DIFFERENCE (ADR 008): numbers decode CORRECTLY ROUNDED.
+# serde_json's default float parser is "best effort" (its float_roundtrip
+# feature is off), and an f32 field reads the f64 and casts it, rounding twice.
+# For every number serde_json itself writes, and for any decimal of up to 15
+# significant digits with a power of ten up to 22, the two agree. Past that,
+# serde_json can be 1 ulp off, and ranga is not. tests/oracle bounds the
+# difference at 1 ulp on long-digit inputs.
+
+# ── kinds ────────
+# One character per field, in field order, so a struct's schema is two strings:
+# names "r g b a" and kinds "uuuu".
+#   u  u8      f  f32      d  f64      m  [[f64; 3]; 3]   (Perspective's m)
+var _SD_U8  = 117;
+var _SD_F32 = 102;
+var _SD_F64 = 100;
+var _SD_M33 = 109;
+
+# ── writer ────────
+# A writer is 16 bytes: +0 the rg_bv, +8 1 once an append has failed.
+
+#must_use
+fn _sd_w_new() {
+    var w = fl_alloc(16);
+    if (w == 0) { return 0; }
+    var bv = rg_bv_new(64);
+    if (bv == 0) { fl_free(w); return 0; }
+    store64(w, bv);
+    store64(w + 8, 0);
+    return w;
+}
+
+fn _sd_w_bytes(w, p, n) {
+    if (load64(w + 8) != 0) { return 0; }
+    var bv = load64(w);
+    var at = rg_bv_len(bv);
+    if (rg_bv_reserve(bv, at + n + 1) != RG_ERR_NONE) { store64(w + 8, 1); return 0; }
+    memcpy(rg_bv_data(bv) + at, p, n);
+    rg_bv_set_len(bv, at + n);
+    return 0;
+}
+
+fn _sd_w_str(w, s) { return _sd_w_bytes(w, s, strlen(s)); }
+
+fn _sd_w_byte(w, c) {
+    var b = fl_alloc(8);
+    if (b == 0) { store64(w + 8, 1); return 0; }
+    store8(b, c);
+    _sd_w_bytes(w, b, 1);
+    fl_free(b);
+    return 0;
+}
+
+fn _sd_w_uint(w, v) {
+    var t = fl_alloc(24);
+    if (t == 0) { store64(w + 8, 1); return 0; }
+    var n = 0;
+    var x = v;
+    if (x == 0) { store8(t, 48); n = 1; }
+    var r = fl_alloc(24);
+    if (r == 0) { fl_free(t); store64(w + 8, 1); return 0; }
+    var m = 0;
+    while (x > 0) { store8(r + m, 48 + x % 10); x = x / 10; m = m + 1; }
+    while (m > 0) { m = m - 1; store8(t + n, load8(r + m)); n = n + 1; }
+    _sd_w_bytes(w, t, n);
+    fl_free(r);
+    fl_free(t);
+    return 0;
+}
+
+# A float, as serde_json writes it: ryu, or `null` when not finite.
+fn _sd_w_float(w, bits, is32) {
+    var expmask = 0x7FF0000000000000;
+    if (is32 == 1) { expmask = 0x7F800000; }
+    if ((bits & expmask) == expmask) { return _sd_w_str(w, "null"); }
+    var b = fl_alloc(_DC_FMT_MAX);
+    if (b == 0) { store64(w + 8, 1); return 0; }
+    var n = _dc_fmt(bits, is32, b, 0);
+    _sd_w_bytes(w, b, n);
+    fl_free(b);
+    return 0;
+}
+
+# The finished text, NUL-terminated past its length, or 0 if any append failed.
+#must_use
+fn _sd_w_done(w) {
+    var bv = load64(w);
+    var failed = load64(w + 8);
+    fl_free(w);
+    if (failed != 0) { rg_bv_free(bv); return 0; }
+    store8(rg_bv_data(bv) + rg_bv_len(bv), 0);
+    return bv;
+}
+
+# Name `i` of a space-separated list, as (pointer, length) into out[0], out[8].
+fn _sd_name(names, i, out) {
+    var p = names;
+    var k = 0;
+    while (k < i) {
+        while (load8(p) != 32) { p = p + 1; }
+        p = p + 1;
+        k = k + 1;
+    }
+    var n = 0;
+    while (load8(p + n) != 0 && load8(p + n) != 32) { n = n + 1; }
+    store64(out, p);
+    store64(out + 8, n);
+    return 0;
+}
+
+# A struct: `vals` holds one 8-byte slot per field (nine for an `m` field).
+#must_use
+fn _sd_en_struct(names, kinds, vals) {
+    var w = _sd_w_new();
+    if (w == 0) { return 0; }
+    var nm = fl_alloc(16);
+    if (nm == 0) { fl_free(load64(w)); fl_free(w); return 0; }
+    _sd_w_byte(w, 123);
+    var nf = strlen(kinds);
+    var slot = 0;
+    var i = 0;
+    while (i < nf) {
+        if (i > 0) { _sd_w_byte(w, 44); }
+        _sd_name(names, i, nm);
+        _sd_w_byte(w, 34);
+        _sd_w_bytes(w, load64(nm), load64(nm + 8));
+        _sd_w_byte(w, 34);
+        _sd_w_byte(w, 58);
+        var k = load8(kinds + i);
+        if (k == _SD_U8) { _sd_w_uint(w, load64(vals + slot * 8) & 255); slot = slot + 1; }
+        elif (k == _SD_F32) { _sd_w_float(w, load64(vals + slot * 8) & 0xFFFFFFFF, 1); slot = slot + 1; }
+        elif (k == _SD_F64) { _sd_w_float(w, load64(vals + slot * 8), 0); slot = slot + 1; }
+        else {
+            _sd_w_byte(w, 91);
+            var r = 0;
+            while (r < 3) {
+                if (r > 0) { _sd_w_byte(w, 44); }
+                _sd_w_byte(w, 91);
+                var c = 0;
+                while (c < 3) {
+                    if (c > 0) { _sd_w_byte(w, 44); }
+                    _sd_w_float(w, load64(vals + (slot + r * 3 + c) * 8), 0);
+                    c = c + 1;
+                }
+                _sd_w_byte(w, 93);
+                r = r + 1;
+            }
+            _sd_w_byte(w, 93);
+            slot = slot + 9;
+        }
+        i = i + 1;
+    }
+    _sd_w_byte(w, 125);
+    fl_free(nm);
+    return _sd_w_done(w);
+}
+
+# A unit variant: "Name".
+#must_use
+fn _sd_en_variant(name) {
+    if (name == 0) { return 0; }
+    var w = _sd_w_new();
+    if (w == 0) { return 0; }
+    _sd_w_byte(w, 34);
+    _sd_w_str(w, name);
+    _sd_w_byte(w, 34);
+    return _sd_w_done(w);
+}
+
+# ── reader ────────
+# State, 32 bytes: +0 text  +8 len  +16 pos  +24 scratch rg_bv (decoded strings).
+
+#must_use
+fn _sd_r_new(text, len) {
+    var ps = fl_alloc(32);
+    if (ps == 0) { return 0; }
+    var sc = rg_bv_new(64);
+    if (sc == 0) { fl_free(ps); return 0; }
+    store64(ps, text);
+    store64(ps + 8, len);
+    if (text == 0) { store64(ps + 8, 0); }
+    store64(ps + 16, 0);
+    store64(ps + 24, sc);
+    return ps;
+}
+
+fn _sd_r_free(ps) {
+    if (ps == 0) { return 0; }
+    rg_bv_free(load64(ps + 24));
+    fl_free(ps);
+    return 0;
+}
+
+#must_use
+fn _sd_peek(ps) {
+    var pos = load64(ps + 16);
+    if (pos >= load64(ps + 8)) { return 0 - 1; }
+    return load8(load64(ps) + pos);
+}
+
+fn _sd_eat(ps) { store64(ps + 16, load64(ps + 16) + 1); return 0; }
+
+# serde_json's parse_whitespace: skip JSON's four whitespace bytes and peek.
+# -1 at the end of the text.
+#must_use
+fn _sd_ws(ps) {
+    while (1 == 1) {
+        var c = _sd_peek(ps);
+        if (c == 32 || c == 9 || c == 10 || c == 13) { _sd_eat(ps); }
+        else { return c; }
+    }
+    return 0 - 1;
+}
+
+# The rest of a literal after its first byte (already eaten): "ull", "rue", "alse".
+#must_use
+fn _sd_ident(ps, rest) {
+    var i = 0;
+    while (load8(rest + i) != 0) {
+        var c = _sd_peek(ps);
+        if (c < 0) { return RG_ERR_PARSE; }
+        if (c != load8(rest + i)) { return RG_ERR_PARSE; }
+        _sd_eat(ps);
+        i = i + 1;
+    }
+    return RG_ERR_NONE;
+}
+
+#must_use
+fn _sd_isdigit(c) {
+    if (c >= 48 && c <= 57) { return 1; }
+    return 0;
+}
+
+#must_use
+fn _sd_hexval(c) {
+    if (c >= 48 && c <= 57) { return c - 48; }
+    if (c >= 97 && c <= 102) { return c - 87; }
+    if (c >= 65 && c <= 70) { return c - 55; }
+    return 0 - 1;
+}
+
+# A JSON number, at '-' or a digit: serde_json's grammar
+#   -?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?
+# Writes sp: +0 start, +8 end, +16 class (0 a u64 integer, 1 a negative i64
+# integer, 2 a float), +24 the integer's magnitude for classes 0 and 1. A float
+# is anything with a point or an exponent, -0, a negative integer past i64, and
+# an integer past u64, which is serde_json's own split.
+#
+# `check_range`: serde_json computes a float's value as it parses it and refuses
+# one outside f64's range (NumberOutOfRange, a syntax error); its ignore_value
+# path checks the grammar only. 1 for the first, 0 for the second.
+#must_use
+fn _sd_number(ps, sp, check_range) {
+    var start = load64(ps + 16);
+    var neg = 0;
+    if (_sd_peek(ps) == 45) { neg = 1; _sd_eat(ps); }
+    var c = _sd_peek(ps);
+    if (c < 0) { return RG_ERR_PARSE; }
+    if (_sd_isdigit(c) == 0) { return RG_ERR_PARSE; }
+    var sig = 0;
+    var big = 0;                         # past u64
+    _sd_eat(ps);
+    if (c == 48) {
+        if (_sd_isdigit(_sd_peek(ps)) == 1) { return RG_ERR_PARSE; }   # 01
+    } else {
+        sig = c - 48;
+        while (_sd_isdigit(_sd_peek(ps)) == 1) {
+            var d = _sd_peek(ps) - 48;
+            # u64 overflow, compared unsigned: sig * 10 + d > 2^64 - 1.
+            if (big == 0) {
+                if (sig > 1844674407370955161 || (sig < 0)
+                    || (sig == 1844674407370955161 && d > 5)) { big = 1; }
+                else { sig = sig * 10 + d; }
+            }
+            _sd_eat(ps);
+        }
+    }
+    var isfloat = big;
+    if (_sd_peek(ps) == 46) {
+        _sd_eat(ps);
+        if (_sd_isdigit(_sd_peek(ps)) == 0) { return RG_ERR_PARSE; }
+        while (_sd_isdigit(_sd_peek(ps)) == 1) { _sd_eat(ps); }
+        isfloat = 1;
+    }
+    c = _sd_peek(ps);
+    if (c == 101 || c == 69) {
+        _sd_eat(ps);
+        c = _sd_peek(ps);
+        if (c == 43 || c == 45) { _sd_eat(ps); }
+        if (_sd_isdigit(_sd_peek(ps)) == 0) { return RG_ERR_PARSE; }
+        while (_sd_isdigit(_sd_peek(ps)) == 1) { _sd_eat(ps); }
+        isfloat = 1;
+    }
+    var cls = 0;
+    if (isfloat == 1) { cls = 2; }
+    elif (neg == 1) {
+        # serde_json negates as i64: -0 and anything past -2^63 become floats.
+        # `sig` holds a u64 bit pattern; unsigned above 2^63 reads negative here.
+        if (sig == 0) { cls = 2; }
+        elif (sig < 0 && sig != 0x8000000000000000) { cls = 2; }
+        else { cls = 1; }
+    }
+    var end = load64(ps + 16);
+    store64(sp, start);
+    store64(sp + 8, end);
+    store64(sp + 16, cls);
+    store64(sp + 24, sig);
+    if (cls == 2 && check_range == 1) {
+        var v = f64_parse_n(load64(ps) + start, end - start);
+        if ((v & 0x7FF0000000000000) == 0x7FF0000000000000) { return RG_ERR_PARSE; }
+    }
+    return RG_ERR_NONE;
+}
+
+# The bytes of one UTF-8 character starting at `c` (already read), checked as
+# Rust's from_utf8 checks them: no overlong forms, no surrogates, nothing past
+# U+10FFFF. Returns the count of continuation bytes consumed, or -1.
+#must_use
+fn _sd_utf8_tail(ps, c) {
+    var need = 0;
+    var lo = 128;
+    var hi = 191;
+    if (c >= 0xC2 && c <= 0xDF) { need = 1; }
+    elif (c == 0xE0) { need = 2; lo = 0xA0; }
+    elif (c >= 0xE1 && c <= 0xEC) { need = 2; }
+    elif (c == 0xED) { need = 2; hi = 0x9F; }
+    elif (c >= 0xEE && c <= 0xEF) { need = 2; }
+    elif (c == 0xF0) { need = 3; lo = 0x90; }
+    elif (c >= 0xF1 && c <= 0xF3) { need = 3; }
+    elif (c == 0xF4) { need = 3; hi = 0x8F; }
+    else { return 0 - 1; }
+    var i = 0;
+    while (i < need) {
+        var b = _sd_peek(ps);
+        if (b < 0) { return 0 - 1; }
+        if (i == 0) { if (b < lo || b > hi) { return 0 - 1; } }
+        elif (b < 128 || b > 191) { return 0 - 1; }
+        _sd_eat(ps);
+        i = i + 1;
+    }
+    return need;
+}
+
+# Append the UTF-8 encoding of code point `cp` to the scratch.
+fn _sd_push_cp(sc, cp) {
+    var b = fl_alloc(8);
+    if (b == 0) { return 0; }
+    var n = 0;
+    if (cp < 0x80) { store8(b, cp); n = 1; }
+    elif (cp < 0x800) { store8(b, 0xC0 | (cp >> 6)); store8(b + 1, 0x80 | (cp & 63)); n = 2; }
+    elif (cp < 0x10000) {
+        store8(b, 0xE0 | (cp >> 12)); store8(b + 1, 0x80 | ((cp >> 6) & 63));
+        store8(b + 2, 0x80 | (cp & 63)); n = 3;
+    } else {
+        store8(b, 0xF0 | (cp >> 18)); store8(b + 1, 0x80 | ((cp >> 12) & 63));
+        store8(b + 2, 0x80 | ((cp >> 6) & 63)); store8(b + 3, 0x80 | (cp & 63)); n = 4;
+    }
+    var at = rg_bv_len(sc);
+    if (rg_bv_reserve(sc, at + n) == RG_ERR_NONE) {
+        memcpy(rg_bv_data(sc) + at, b, n);
+        rg_bv_set_len(sc, at + n);
+    }
+    fl_free(b);
+    return 0;
+}
+
+# Four hex digits of a \u escape. -1 on a bad or missing digit.
+#must_use
+fn _sd_hex4(ps) {
+    var v = 0;
+    var i = 0;
+    while (i < 4) {
+        var c = _sd_peek(ps);
+        if (c < 0) { return 0 - 1; }
+        var h = _sd_hexval(c);
+        if (h < 0) { return 0 - 1; }
+        v = v * 16 + h;
+        _sd_eat(ps);
+        i = i + 1;
+    }
+    return v;
+}
+
+# A string, after its opening quote, decoded into the scratch (whose length is
+# the result). serde_json's rules: a raw control byte, a bad escape, an unpaired
+# surrogate or invalid UTF-8 is a syntax error.
+#must_use
+fn _sd_string(ps) {
+    var sc = load64(ps + 24);
+    rg_bv_set_len(sc, 0);
+    while (1 == 1) {
+        var c = _sd_peek(ps);
+        if (c < 0) { return RG_ERR_PARSE; }
+        _sd_eat(ps);
+        if (c == 34) { return RG_ERR_NONE; }
+        if (c < 32) { return RG_ERR_PARSE; }
+        if (c == 92) {
+            var e = _sd_peek(ps);
+            if (e < 0) { return RG_ERR_PARSE; }
+            _sd_eat(ps);
+            var cp = 0 - 1;
+            if (e == 34) { cp = 34; }
+            elif (e == 92) { cp = 92; }
+            elif (e == 47) { cp = 47; }
+            elif (e == 98) { cp = 8; }
+            elif (e == 102) { cp = 12; }
+            elif (e == 110) { cp = 10; }
+            elif (e == 114) { cp = 13; }
+            elif (e == 116) { cp = 9; }
+            elif (e == 117) {
+                cp = _sd_hex4(ps);
+                if (cp < 0) { return RG_ERR_PARSE; }
+                if (cp >= 0xDC00 && cp <= 0xDFFF) { return RG_ERR_PARSE; }   # lone trailing
+                if (cp >= 0xD800 && cp <= 0xDBFF) {
+                    if (_sd_peek(ps) != 92) { return RG_ERR_PARSE; }
+                    _sd_eat(ps);
+                    if (_sd_peek(ps) != 117) { return RG_ERR_PARSE; }
+                    _sd_eat(ps);
+                    var lo = _sd_hex4(ps);
+                    if (lo < 0xDC00 || lo > 0xDFFF) { return RG_ERR_PARSE; }
+                    cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                }
+            }
+            if (cp < 0) { return RG_ERR_PARSE; }
+            _sd_push_cp(sc, cp);
+        } elif (c >= 128) {
+            var at = load64(ps + 16) - 1;
+            var t = _sd_utf8_tail(ps, c);
+            if (t < 0) { return RG_ERR_PARSE; }
+            var n = rg_bv_len(sc);
+            if (rg_bv_reserve(sc, n + t + 1) == RG_ERR_NONE) {
+                memcpy(rg_bv_data(sc) + n, load64(ps) + at, t + 1);
+                rg_bv_set_len(sc, n + t + 1);
+            }
+        } else {
+            var n2 = rg_bv_len(sc);
+            if (rg_bv_reserve(sc, n2 + 1) == RG_ERR_NONE) {
+                store8(rg_bv_data(sc) + n2, c);
+                rg_bv_set_len(sc, n2 + 1);
+            }
+        }
+    }
+    return RG_ERR_PARSE;
+}
+
+# 1 if the scratch holds exactly the `n` bytes at `p`.
+#must_use
+fn _sd_scratch_is(ps, p, n) {
+    var sc = load64(ps + 24);
+    if (rg_bv_len(sc) != n) { return 0; }
+    var i = 0;
+    while (i < n) {
+        if (load8(rg_bv_data(sc) + i) != load8(p + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# serde_json's peek_invalid_type: the next value is of the wrong type. A literal
+# or a string is still read, and a syntax error inside it wins; an array or an
+# object is not read at all. Anything that cannot start a value is a syntax error.
+#must_use
+fn _sd_invalid_type(ps) {
+    var c = _sd_peek(ps);
+    var lit = 0;
+    if (c == 110) { lit = "ull"; }
+    if (c == 116) { lit = "rue"; }
+    if (c == 102) { lit = "alse"; }
+    if (lit != 0) {
+        _sd_eat(ps);
+        if (_sd_ident(ps, lit) != RG_ERR_NONE) { return RG_ERR_PARSE; }
+        return RG_ERR_INVALID_FORMAT;
+    }
+    if (c == 45 || _sd_isdigit(c) == 1) {
+        var sp = fl_alloc(32);
+        if (sp == 0) { return RG_ERR_ALLOCATION; }
+        var rc = _sd_number(ps, sp, 1);
+        fl_free(sp);
+        if (rc != RG_ERR_NONE) { return rc; }
+        return RG_ERR_INVALID_FORMAT;
+    }
+    if (c == 34) {
+        _sd_eat(ps);
+        if (_sd_string(ps) != RG_ERR_NONE) { return RG_ERR_PARSE; }
+        return RG_ERR_INVALID_FORMAT;
+    }
+    if (c == 91 || c == 123) { return RG_ERR_INVALID_FORMAT; }
+    return RG_ERR_PARSE;
+}
+
+# serde_json's ignore_value: skip one value of any shape, checking it is JSON.
+# Iterative, with an explicit list of open brackets, so nesting depth is not
+# bounded by the call stack.
+#must_use
+fn _sd_skip(ps) {
+    var frames = rg_bv_new(16);
+    if (frames == 0) { return RG_ERR_ALLOCATION; }
+    var sp = fl_alloc(32);
+    if (sp == 0) { rg_bv_free(frames); return RG_ERR_ALLOCATION; }
+    var rc = RG_ERR_NONE;
+    var done = 0;
+    while (done == 0 && rc == RG_ERR_NONE) {
+        var c = _sd_ws(ps);
+        var opened = 0;
+        if (c < 0) { rc = RG_ERR_PARSE; }
+        elif (c == 110) { _sd_eat(ps); rc = _sd_ident(ps, "ull"); }
+        elif (c == 116) { _sd_eat(ps); rc = _sd_ident(ps, "rue"); }
+        elif (c == 102) { _sd_eat(ps); rc = _sd_ident(ps, "alse"); }
+        elif (c == 45 || _sd_isdigit(c) == 1) {
+            # ignore_integer checks the grammar only: no range check here.
+            rc = _sd_number(ps, sp, 0);
+        }
+        elif (c == 34) { _sd_eat(ps); rc = _sd_string(ps); }
+        elif (c == 91 || c == 123) {
+            _sd_eat(ps);
+            var at = rg_bv_len(frames);
+            if (rg_bv_reserve(frames, at + 1) != RG_ERR_NONE) { rc = RG_ERR_ALLOCATION; }
+            else { store8(rg_bv_data(frames) + at, c); rg_bv_set_len(frames, at + 1); }
+            opened = 1;
+        }
+        else { rc = RG_ERR_PARSE; }
+        if (rc != RG_ERR_NONE) { break; }
+        # After a value (or an opening bracket), close what can be closed, then
+        # expect either a comma before the next element or the next element.
+        var accept_comma = 1;
+        if (opened == 1) { accept_comma = 0; }
+        var next = 0;
+        while (next == 0 && rc == RG_ERR_NONE) {
+            var depth = rg_bv_len(frames);
+            if (depth == 0) { done = 1; next = 1; }
+            else {
+                var fr = load8(rg_bv_data(frames) + depth - 1);
+                var p = _sd_ws(ps);
+                if (p < 0) { rc = RG_ERR_PARSE; }
+                elif (p == 44 && accept_comma == 1) { _sd_eat(ps); next = 1; }
+                elif ((p == 93 && fr == 91) || (p == 125 && fr == 123)) {
+                    _sd_eat(ps);
+                    rg_bv_set_len(frames, depth - 1);
+                    accept_comma = 1;
+                } elif (accept_comma == 1) { rc = RG_ERR_PARSE; }
+                else { next = 1; }
+                if (next == 1 && done == 0 && fr == 123) {
+                    # Inside an object the next element is "key":
+                    if (_sd_ws(ps) != 34) { rc = RG_ERR_PARSE; }
+                    else {
+                        _sd_eat(ps);
+                        rc = _sd_string(ps);
+                        if (rc == RG_ERR_NONE) {
+                            if (_sd_ws(ps) != 58) { rc = RG_ERR_PARSE; }
+                            else { _sd_eat(ps); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    fl_free(sp);
+    rg_bv_free(frames);
+    return rc;
+}
+
+# One scalar field: u8, f32 or f64 (serde_json's deserialize_number, then the
+# type's visitor). Writes the value's bits to `out`.
+#must_use
+fn _sd_de_scalar(ps, kind, out) {
+    var c = _sd_ws(ps);
+    if (c < 0) { return RG_ERR_PARSE; }
+    if (c != 45 && _sd_isdigit(c) == 0) { return _sd_invalid_type(ps); }
+    var sp = fl_alloc(32);
+    if (sp == 0) { return RG_ERR_ALLOCATION; }
+    var rc = _sd_number(ps, sp, 1);
+    if (rc != RG_ERR_NONE) { fl_free(sp); return rc; }
+    var s = load64(sp);
+    var e = load64(sp + 8);
+    var cls = load64(sp + 16);
+    var text = load64(ps);
+    if (kind == _SD_U8) {
+        # visit_u64 in range, or invalid value / invalid type.
+        rc = RG_ERR_INVALID_FORMAT;
+        if (cls == 0 && load64(sp + 24) >= 0 && load64(sp + 24) <= 255) {
+            store64(out, load64(sp + 24));
+            rc = RG_ERR_NONE;
+        }
+    } elif (kind == _SD_F32) {
+        store64(out, _dc_decimal_to_f32(text, s, e));
+    } else {
+        store64(out, f64_parse_n(text + s, e - s));
+    }
+    fl_free(sp);
+    return rc;
+}
+
+# serde's [T; 3] (deserialize_tuple, i.e. a JSON array): three elements of
+# `kind`, f64 or a row of three f64. Writes 3 (or 9) slots.
+#must_use
+fn _sd_de_arr3(ps, kind, out) {
+    var c = _sd_ws(ps);
+    if (c < 0) { return RG_ERR_PARSE; }
+    if (c != 91) { return _sd_invalid_type(ps); }
+    _sd_eat(ps);
+    var per = 1;
+    if (kind == _SD_M33) { per = 3; }
+    var rc = RG_ERR_NONE;
+    var i = 0;
+    while (i < 3 && rc == RG_ERR_NONE) {
+        rc = _sd_next_element(ps, i);
+        if (rc == RG_ERR_NONE) {
+            if (kind == _SD_M33) { rc = _sd_de_arr3(ps, _SD_F64, out + i * 24); }
+            else { rc = _sd_de_scalar(ps, _SD_F64, out + i * 8); }
+        }
+        i = i + 1;
+    }
+    var rc2 = _sd_end_seq(ps);
+    if (rc != RG_ERR_NONE) { return rc; }
+    return rc2;
+}
+
+# serde_json's SeqAccess::next_element, positioned before element `i`:
+# RG_ERR_NONE when an element follows (the reader is at it), else the error. An
+# early ']' is serde's invalid_length, a Data error.
+#must_use
+fn _sd_next_element(ps, i) {
+    var c = _sd_ws(ps);
+    if (c < 0) { return RG_ERR_PARSE; }
+    if (c == 93) { return RG_ERR_INVALID_FORMAT; }
+    if (i > 0) {
+        if (c != 44) { return RG_ERR_PARSE; }
+        _sd_eat(ps);
+        c = _sd_ws(ps);
+        if (c < 0) { return RG_ERR_PARSE; }
+        if (c == 93) { return RG_ERR_PARSE; }                 # trailing comma
+    }
+    return RG_ERR_NONE;
+}
+
+# serde_json's end_seq: the closing ']' after the last element a visitor read.
+# Anything else is a syntax error (trailing comma or trailing characters).
+#must_use
+fn _sd_end_seq(ps) {
+    var c = _sd_ws(ps);
+    if (c == 93) { _sd_eat(ps); return RG_ERR_NONE; }
+    return RG_ERR_PARSE;
+}
+
+# serde_json's MapAccess::next_key, then the key itself: RG_ERR_NONE with the
+# decoded key in the scratch, or 1 at the closing brace (not consumed), or an
+# error.
+#must_use
+fn _sd_next_key(ps, first) {
+    var c = _sd_ws(ps);
+    if (c < 0) { return RG_ERR_PARSE; }
+    if (c == 125) { return 1; }
+    if (first == 0) {
+        if (c != 44) { return RG_ERR_PARSE; }
+        _sd_eat(ps);
+        c = _sd_ws(ps);
+        if (c < 0) { return RG_ERR_PARSE; }
+        if (c == 125) { return RG_ERR_PARSE; }                # trailing comma
+    }
+    if (c != 34) { return RG_ERR_PARSE; }                     # key must be a string
+    _sd_eat(ps);
+    return _sd_string(ps);
+}
+
+# serde_json's parse_object_colon.
+#must_use
+fn _sd_colon(ps) {
+    if (_sd_ws(ps) != 58) { return RG_ERR_PARSE; }
+    _sd_eat(ps);
+    return RG_ERR_NONE;
+}
+
+# Slots a field of `kind` takes.
+#must_use
+fn _sd_slots(kind) {
+    if (kind == _SD_M33) { return 9; }
+    return 1;
+}
+
+# One field's value.
+#must_use
+fn _sd_de_field(ps, kind, out) {
+    if (kind == _SD_M33) { return _sd_de_arr3(ps, _SD_M33, out); }
+    return _sd_de_scalar(ps, kind, out);
+}
+
+# A derived struct (serde_json's deserialize_struct): `names`/`kinds` are its
+# schema, `deny` its deny_unknown_fields, and `vals` receives the slots.
+#must_use
+fn _sd_de_struct(ps, names, kinds, deny, vals) {
+    var nf = strlen(kinds);
+    var c = _sd_ws(ps);
+    if (c < 0) { return RG_ERR_PARSE; }
+    if (c != 91 && c != 123) { return _sd_invalid_type(ps); }
+    _sd_eat(ps);
+    var rc = RG_ERR_NONE;
+    var i = 0;
+    var slot = 0;
+    if (c == 91) {
+        # Sequence form: the fields in order.
+        while (i < nf && rc == RG_ERR_NONE) {
+            rc = _sd_next_element(ps, i);
+            if (rc == RG_ERR_NONE) { rc = _sd_de_field(ps, load8(kinds + i), vals + slot * 8); }
+            slot = slot + _sd_slots(load8(kinds + i));
+            i = i + 1;
+        }
+        var rcs = _sd_end_seq(ps);
+        if (rc != RG_ERR_NONE) { return rc; }
+        return rcs;
+    }
+    # Map form.
+    var seen = fl_calloc(nf * 8 + 8);
+    var nm = fl_alloc(16);
+    if (seen == 0 || nm == 0) { fl_free(seen); fl_free(nm); return RG_ERR_ALLOCATION; }
+    var first = 1;
+    var fin = 0;
+    while (fin == 0 && rc == RG_ERR_NONE) {
+        var k = _sd_next_key(ps, first);
+        first = 0;
+        if (k == 1) { fin = 1; }
+        elif (k != RG_ERR_NONE) { rc = k; }
+        else {
+            # Which field? Slot offset found by walking the kinds.
+            var fi = 0 - 1;
+            var fslot = 0;
+            var j = 0;
+            var so = 0;
+            while (j < nf && fi < 0) {
+                _sd_name(names, j, nm);
+                if (_sd_scratch_is(ps, load64(nm), load64(nm + 8)) == 1) { fi = j; fslot = so; }
+                so = so + _sd_slots(load8(kinds + j));
+                j = j + 1;
+            }
+            if (fi < 0) {
+                if (deny == 1) { rc = RG_ERR_INVALID_FORMAT; }        # unknown field
+                else {
+                    rc = _sd_colon(ps);
+                    if (rc == RG_ERR_NONE) { rc = _sd_skip(ps); }
+                }
+            } elif (load64(seen + fi * 8) == 1) {
+                rc = RG_ERR_INVALID_FORMAT;                            # duplicate field
+            } else {
+                rc = _sd_colon(ps);
+                if (rc == RG_ERR_NONE) { rc = _sd_de_field(ps, load8(kinds + fi), vals + fslot * 8); }
+                store64(seen + fi * 8, 1);
+            }
+        }
+    }
+    if (rc == RG_ERR_NONE) {
+        i = 0;
+        while (i < nf) {
+            if (load64(seen + i * 8) == 0) { rc = RG_ERR_INVALID_FORMAT; }   # missing field
+            i = i + 1;
+        }
+    }
+    fl_free(nm);
+    fl_free(seen);
+    if (rc != RG_ERR_NONE) { return rc; }
+    # serde_json's end_map, after a visit that reached the closing brace.
+    if (_sd_ws(ps) != 125) { return RG_ERR_PARSE; }
+    _sd_eat(ps);
+    return RG_ERR_NONE;
+}
+
+# serde_json's Deserializer::end: only whitespace may follow the value.
+#must_use
+fn _sd_end(ps) {
+    if (_sd_ws(ps) >= 0) { return RG_ERR_PARSE; }
+    return RG_ERR_NONE;
+}
+
+# Decode a whole document as a struct into `vals`.
+#must_use
+fn _sd_decode_struct(text, len, names, kinds, deny, vals) {
+    var ps = _sd_r_new(text, len);
+    if (ps == 0) { return RG_ERR_ALLOCATION; }
+    var rc = _sd_de_struct(ps, names, kinds, deny, vals);
+    if (rc == RG_ERR_NONE) { rc = _sd_end(ps); }
+    _sd_r_free(ps);
+    return rc;
+}
+
+# The variant named by the scratch, as its index in the space-separated
+# `variants`, or -1.
+#must_use
+fn _sd_variant_index(ps, variants) {
+    var nm = fl_alloc(16);
+    if (nm == 0) { return 0 - 1; }
+    var nv = 1;
+    var p = variants;
+    while (load8(p) != 0) { if (load8(p) == 32) { nv = nv + 1; } p = p + 1; }
+    var r = 0 - 1;
+    var i = 0;
+    while (i < nv && r < 0) {
+        _sd_name(variants, i, nm);
+        if (_sd_scratch_is(ps, load64(nm), load64(nm + 8)) == 1) { r = i; }
+        i = i + 1;
+    }
+    fl_free(nm);
+    return r;
+}
+
+# serde_json's deserialize_identifier for a variant name: a string naming one of
+# `variants`. Returns the index, or a negative code.
+#must_use
+fn _sd_de_variant_name(ps, variants) {
+    var c = _sd_ws(ps);
+    if (c < 0) { return RG_ERR_PARSE; }
+    if (c != 34) { return _sd_invalid_type(ps); }
+    _sd_eat(ps);
+    var rc = _sd_string(ps);
+    if (rc != RG_ERR_NONE) { return rc; }
+    var vi = _sd_variant_index(ps, variants);
+    if (vi < 0) { return RG_ERR_INVALID_FORMAT; }             # unknown variant
+    return vi;
+}
+
+# A unit-only enum (serde_json's deserialize_enum with unit variants): "Name", or
+# {"Name":null}. Returns the variant index, or a negative code.
+#must_use
+fn _sd_decode_unit_enum(text, len, variants) {
+    var ps = _sd_r_new(text, len);
+    if (ps == 0) { return RG_ERR_ALLOCATION; }
+    var r = 0;
+    var c = _sd_ws(ps);
+    if (c < 0) { r = RG_ERR_PARSE; }
+    elif (c == 34) {
+        r = _sd_de_variant_name(ps, variants);
+    } elif (c == 123) {
+        _sd_eat(ps);
+        r = _sd_de_variant_name(ps, variants);
+        if (r >= 0) {
+            var rc = _sd_colon(ps);
+            # unit_variant deserializes (): `null`, anything else invalid type.
+            if (rc == RG_ERR_NONE) {
+                var u = _sd_ws(ps);
+                if (u < 0) { rc = RG_ERR_PARSE; }
+                elif (u == 110) { _sd_eat(ps); rc = _sd_ident(ps, "ull"); }
+                else { rc = _sd_invalid_type(ps); }
+            }
+            if (rc == RG_ERR_NONE) {
+                var cl = _sd_ws(ps);
+                if (cl == 125) { _sd_eat(ps); }
+                else { rc = RG_ERR_PARSE; }
+            }
+            if (rc != RG_ERR_NONE) { r = rc; }
+        }
+    } else {
+        r = RG_ERR_PARSE;                                     # expected some value
+    }
+    if (r >= 0) {
+        var re = _sd_end(ps);
+        if (re != RG_ERR_NONE) { r = re; }
+    }
+    _sd_r_free(ps);
+    return r;
+}
+
+# ── the three unit enums ────────
+# Variant names are Rust's, in Rust's declaration order, which is also the
+# discriminant order of PF_*, CS_* and BM_*.
+
+var _SD_PF_VARIANTS = "Rgba8 Argb8 Rgb8 Yuv420p Nv12 RgbaF32";
+# CieLab and Oklab are ranga's two ColorSpace additions (color.cyr); they have
+# no Rust variant, so their names continue Rust's spelling.
+var _SD_CS_VARIANTS = "Srgb LinearRgb DisplayP3 Bt601 Bt709 Bt2020 CieXyz CieLab Oklab";
+var _SD_BM_VARIANTS =
+  "Normal Multiply Screen Overlay Darken Lighten ColorDodge ColorBurn SoftLight HardLight Difference Exclusion";
+
+# The name of variant `i` of `variants` as a fresh NUL-terminated string, or 0.
+#must_use
+fn _sd_variant_name(variants, i, nvariants) {
+    if (i < 0 || i >= nvariants) { return 0; }
+    var nm = fl_alloc(16);
+    if (nm == 0) { return 0; }
+    _sd_name(variants, i, nm);
+    var n = load64(nm + 8);
+    var s = fl_alloc(n + 1);
+    if (s != 0) { memcpy(s, load64(nm), n); store8(s + n, 0); }
+    fl_free(nm);
+    return s;
+}
+
+#must_use
+fn _sd_unit_to_json(variants, nv, v) {
+    var s = _sd_variant_name(variants, v, nv);
+    if (s == 0) { return 0; }
+    var r = _sd_en_variant(s);
+    fl_free(s);
+    return r;
+}
+
+#must_use
+fn _sd_unit_from_json(text, len, variants, err_out) {
+    var r = _sd_decode_unit_enum(text, len, variants);
+    if (r < 0) { store64(err_out, r); return r; }
+    store64(err_out, RG_ERR_NONE);
+    return r;
+}
+
+#must_use
+fn pixel_format_to_json(f) { return _sd_unit_to_json(_SD_PF_VARIANTS, 6, f); }
+#must_use
+fn pixel_format_from_json(text, len, err_out) { return _sd_unit_from_json(text, len, _SD_PF_VARIANTS, err_out); }
+#must_use
+fn color_space_to_json(s) { return _sd_unit_to_json(_SD_CS_VARIANTS, 9, s); }
+#must_use
+fn color_space_from_json(text, len, err_out) { return _sd_unit_from_json(text, len, _SD_CS_VARIANTS, err_out); }
+#must_use
+fn blend_mode_to_json(m) { return _sd_unit_to_json(_SD_BM_VARIANTS, 12, m); }
+#must_use
+fn blend_mode_from_json(text, len, err_out) { return _sd_unit_from_json(text, len, _SD_BM_VARIANTS, err_out); }
+
+# ── structs ────────
+# Each to_json gathers the fields into slots; each from_json decodes into slots
+# and builds the record with its own constructor.
+
+#must_use
+fn _sd_slots_new(n) { return fl_calloc(n * 8); }
+
+#must_use
+fn srgba_to_json(c) {
+    if (c == 0) { return 0; }
+    var v = _sd_slots_new(4);
+    if (v == 0) { return 0; }
+    store64(v, srgba_r(c)); store64(v + 8, srgba_g(c)); store64(v + 16, srgba_b(c)); store64(v + 24, srgba_a(c));
+    var r = _sd_en_struct("r g b a", "uuuu", v);
+    fl_free(v);
+    return r;
+}
+
+#must_use
+fn srgba_from_json(text, len, err_out) {
+    var v = _sd_slots_new(4);
+    if (v == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    var rc = _sd_decode_struct(text, len, "r g b a", "uuuu", 1, v);
+    var c = 0;
+    if (rc == RG_ERR_NONE) {
+        c = srgba_new(load64(v), load64(v + 8), load64(v + 16), load64(v + 24));
+        if (c == 0) { rc = RG_ERR_ALLOCATION; }
+    }
+    fl_free(v);
+    store64(err_out, rc);
+    return c;
+}
+
+# The f32 four-field structs share one shape: LinRgba and Cmyk.
+#must_use
+fn _sd_f4_to_json(c, names) {
+    if (c == 0) { return 0; }
+    var v = _sd_slots_new(4);
+    if (v == 0) { return 0; }
+    var i = 0;
+    while (i < 4) { store64(v + i * 8, load32(c + i * 4)); i = i + 1; }
+    var r = _sd_en_struct(names, "ffff", v);
+    fl_free(v);
+    return r;
+}
+
+# The f32 three-field structs: Hsl, Oklab, Oklch.
+#must_use
+fn _sd_f3_to_json(c, names) {
+    if (c == 0) { return 0; }
+    var v = _sd_slots_new(3);
+    if (v == 0) { return 0; }
+    var i = 0;
+    while (i < 3) { store64(v + i * 8, load32(c + i * 4)); i = i + 1; }
+    var r = _sd_en_struct(names, "fff", v);
+    fl_free(v);
+    return r;
+}
+
+# The f64 three-field structs: CieXyz, CieLab.
+#must_use
+fn _sd_d3_to_json(c, names) {
+    if (c == 0) { return 0; }
+    return _sd_en_struct(names, "ddd", c);
+}
+
+#must_use
+fn lin_rgba_to_json(c) { return _sd_f4_to_json(c, "r g b a"); }
+#must_use
+fn cmyk_to_json(c) { return _sd_f4_to_json(c, "c m y k"); }
+#must_use
+fn hsl_to_json(c) { return _sd_f3_to_json(c, "h s l"); }
+#must_use
+fn oklab_to_json(c) { return _sd_f3_to_json(c, "l a b"); }
+#must_use
+fn oklch_to_json(c) { return _sd_f3_to_json(c, "l c h"); }
+#must_use
+fn cie_xyz_to_json(c) { return _sd_d3_to_json(c, "x y z"); }
+#must_use
+fn cie_lab_to_json(c) { return _sd_d3_to_json(c, "l a b"); }
+
+# Decode an all-float struct of `n` fields into slots; 0 slots on failure.
+#must_use
+fn _sd_floats_from_json(text, len, names, kinds, n, err_out) {
+    var v = _sd_slots_new(n);
+    if (v == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    var rc = _sd_decode_struct(text, len, names, kinds, 1, v);
+    store64(err_out, rc);
+    if (rc != RG_ERR_NONE) { fl_free(v); return 0; }
+    return v;
+}
+
+# Finish a from_json: free the slots and report allocation failure.
+#must_use
+fn _sd_built(v, rec, err_out) {
+    fl_free(v);
+    if (rec == 0) { store64(err_out, RG_ERR_ALLOCATION); }
+    return rec;
+}
+
+#must_use
+fn lin_rgba_from_json(text, len, err_out) {
+    var v = _sd_floats_from_json(text, len, "r g b a", "ffff", 4, err_out);
+    if (v == 0) { return 0; }
+    return _sd_built(v, lin_rgba_new(load64(v), load64(v + 8), load64(v + 16), load64(v + 24)), err_out);
+}
+#must_use
+fn cmyk_from_json(text, len, err_out) {
+    var v = _sd_floats_from_json(text, len, "c m y k", "ffff", 4, err_out);
+    if (v == 0) { return 0; }
+    return _sd_built(v, cmyk_new(load64(v), load64(v + 8), load64(v + 16), load64(v + 24)), err_out);
+}
+#must_use
+fn hsl_from_json(text, len, err_out) {
+    var v = _sd_floats_from_json(text, len, "h s l", "fff", 3, err_out);
+    if (v == 0) { return 0; }
+    return _sd_built(v, hsl_new(load64(v), load64(v + 8), load64(v + 16)), err_out);
+}
+#must_use
+fn oklab_from_json(text, len, err_out) {
+    var v = _sd_floats_from_json(text, len, "l a b", "fff", 3, err_out);
+    if (v == 0) { return 0; }
+    return _sd_built(v, oklab_new(load64(v), load64(v + 8), load64(v + 16)), err_out);
+}
+#must_use
+fn oklch_from_json(text, len, err_out) {
+    var v = _sd_floats_from_json(text, len, "l c h", "fff", 3, err_out);
+    if (v == 0) { return 0; }
+    return _sd_built(v, oklch_new(load64(v), load64(v + 8), load64(v + 16)), err_out);
+}
+#must_use
+fn cie_xyz_from_json(text, len, err_out) {
+    var v = _sd_floats_from_json(text, len, "x y z", "ddd", 3, err_out);
+    if (v == 0) { return 0; }
+    return _sd_built(v, cie_xyz_new(load64(v), load64(v + 8), load64(v + 16)), err_out);
+}
+#must_use
+fn cie_lab_from_json(text, len, err_out) {
+    var v = _sd_floats_from_json(text, len, "l a b", "ddd", 3, err_out);
+    if (v == 0) { return 0; }
+    return _sd_built(v, cie_lab_new(load64(v), load64(v + 8), load64(v + 16)), err_out);
+}
+
+# Affine and Perspective do NOT deny unknown fields: Rust did not ask for it.
+#must_use
+fn affine_to_json(m) {
+    if (m == 0) { return 0; }
+    return _sd_en_struct("a b c d tx ty", "dddddd", m);
+}
+
+#must_use
+fn affine_from_json(text, len, err_out) {
+    var v = _sd_slots_new(6);
+    if (v == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    var rc = _sd_decode_struct(text, len, "a b c d tx ty", "dddddd", 0, v);
+    store64(err_out, rc);
+    if (rc != RG_ERR_NONE) { fl_free(v); return 0; }
+    return _sd_built(v, affine_new(load64(v), load64(v + 8), load64(v + 16), load64(v + 24),
+      load64(v + 32), load64(v + 40)), err_out);
+}
+
+# Perspective's one field is `m`, the row-major 3x3, which is also its layout.
+#must_use
+fn perspective_to_json(p) {
+    if (p == 0) { return 0; }
+    return _sd_en_struct("m", "m", p);
+}
+
+#must_use
+fn perspective_from_json(text, len, err_out) {
+    var v = _sd_slots_new(9);
+    if (v == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    var rc = _sd_decode_struct(text, len, "m", "m", 0, v);
+    store64(err_out, rc);
+    if (rc != RG_ERR_NONE) { fl_free(v); return 0; }
+    return _sd_built(v, perspective_new(load64(v), load64(v + 8), load64(v + 16), load64(v + 24),
+      load64(v + 32), load64(v + 40), load64(v + 48), load64(v + 56), load64(v + 64)), err_out);
+}
+
+# ── ToneCurve: externally tagged newtype variants ────────
+
+#must_use
+fn tone_curve_to_json(t) {
+    if (t == 0) { return 0; }
+    var w = _sd_w_new();
+    if (w == 0) { return 0; }
+    if (tone_curve_kind(t) == TC_GAMMA) {
+        _sd_w_str(w, "{\"Gamma\":");
+        _sd_w_float(w, tone_curve_gamma_value(t), 0);
+    } else {
+        _sd_w_str(w, "{\"Table\":[");
+        var n = tone_curve_len(t);
+        var i = 0;
+        while (i < n) {
+            if (i > 0) { _sd_w_byte(w, 44); }
+            _sd_w_float(w, tone_curve_table_at(t, i), 0);
+            i = i + 1;
+        }
+        _sd_w_byte(w, 93);
+    }
+    _sd_w_byte(w, 125);
+    return _sd_w_done(w);
+}
+
+# serde's Vec<f64> (deserialize_seq): a JSON array of any length. Returns the
+# table (fl_alloc'd, n f64) through tab_out and n through n_out.
+#must_use
+fn _sd_de_vec_f64(ps, tab_out, n_out) {
+    var c = _sd_ws(ps);
+    if (c < 0) { return RG_ERR_PARSE; }
+    if (c != 91) { return _sd_invalid_type(ps); }
+    _sd_eat(ps);
+    var acc = rg_bv_new(64);
+    if (acc == 0) { return RG_ERR_ALLOCATION; }
+    var slot = fl_alloc(8);
+    if (slot == 0) { rg_bv_free(acc); return RG_ERR_ALLOCATION; }
+    var rc = RG_ERR_NONE;
+    var i = 0;
+    var fin = 0;
+    while (fin == 0 && rc == RG_ERR_NONE) {
+        var r = _sd_next_element(ps, i);
+        if (r == RG_ERR_INVALID_FORMAT) { fin = 1; }          # ']' ends a Vec cleanly
+        elif (r != RG_ERR_NONE) { rc = r; }
+        else {
+            rc = _sd_de_scalar(ps, _SD_F64, slot);
+            if (rc == RG_ERR_NONE) {
+                var at = rg_bv_len(acc);
+                if (rg_bv_reserve(acc, at + 8) != RG_ERR_NONE) { rc = RG_ERR_ALLOCATION; }
+                else { store64(rg_bv_data(acc) + at, load64(slot)); rg_bv_set_len(acc, at + 8); }
+            }
+            i = i + 1;
+        }
+    }
+    fl_free(slot);
+    if (rc == RG_ERR_NONE) { rc = _sd_end_seq(ps); }
+    if (rc != RG_ERR_NONE) { rg_bv_free(acc); return rc; }
+    var n = i;
+    var tab = 0;
+    if (n > 0) {
+        tab = fl_alloc(n * 8);
+        if (tab == 0) { rg_bv_free(acc); return RG_ERR_ALLOCATION; }
+        memcpy(tab, rg_bv_data(acc), n * 8);
+    }
+    rg_bv_free(acc);
+    store64(tab_out, tab);
+    store64(n_out, n);
+    return RG_ERR_NONE;
+}
+
+#must_use
+fn tone_curve_from_json(text, len, err_out) {
+    var ps = _sd_r_new(text, len);
+    if (ps == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    var out = 0;
+    var rc = RG_ERR_NONE;
+    var c = _sd_ws(ps);
+    if (c < 0) { rc = RG_ERR_PARSE; }
+    elif (c == 34) {
+        # "Gamma" or "Table" alone: a unit variant where a newtype is required.
+        var vi = _sd_de_variant_name(ps, "Gamma Table");
+        if (vi < 0) { rc = vi; } else { rc = RG_ERR_INVALID_FORMAT; }
+    } elif (c == 123) {
+        _sd_eat(ps);
+        var vj = _sd_de_variant_name(ps, "Gamma Table");
+        if (vj < 0) { rc = vj; }
+        else { rc = _sd_colon(ps); }
+        if (rc == RG_ERR_NONE) {
+            if (vj == 0) {
+                var g = fl_alloc(8);
+                if (g == 0) { rc = RG_ERR_ALLOCATION; }
+                else {
+                    rc = _sd_de_scalar(ps, _SD_F64, g);
+                    if (rc == RG_ERR_NONE) {
+                        out = tone_curve_gamma(load64(g));
+                        if (out == 0) { rc = RG_ERR_ALLOCATION; }
+                    }
+                    fl_free(g);
+                }
+            } else {
+                var tp = fl_alloc(16);
+                if (tp == 0) { rc = RG_ERR_ALLOCATION; }
+                else {
+                    rc = _sd_de_vec_f64(ps, tp, tp + 8);
+                    if (rc == RG_ERR_NONE) {
+                        out = tone_curve_table(load64(tp), load64(tp + 8));
+                        if (out == 0) { fl_free(load64(tp)); rc = RG_ERR_ALLOCATION; }
+                    }
+                    fl_free(tp);
+                }
+            }
+        }
+        if (rc == RG_ERR_NONE) {
+            if (_sd_ws(ps) == 125) { _sd_eat(ps); } else { rc = RG_ERR_PARSE; }
+        }
+    } else {
+        rc = RG_ERR_PARSE;
+    }
+    if (rc == RG_ERR_NONE) { rc = _sd_end(ps); }
+    if (rc != RG_ERR_NONE && out != 0) { tone_curve_free(out); out = 0; }
+    _sd_r_free(ps);
+    store64(err_out, rc);
+    return out;
+}

@@ -81,7 +81,7 @@ fn hist_new(n) {
 fn hist_len(h) { return load64(h); }
 
 # f64 bit pattern at `idx`, or +0.0 (all-zero bits) out of range. Mirrors
-# bv_get's out-of-range 0 rather than trapping.
+# rg_bv_get's out-of-range 0 rather than trapping.
 #must_use
 fn hist_get(h, idx) {
     if (idx < 0) { return 0; }

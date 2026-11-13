@@ -1,0 +1,486 @@
+# decimal.cyr -- exact conversion between decimal text and binary floats
+# No Rust counterpart: this is what Rust's core::num (f32::from_str) and the ryu
+# crate (serde_json's float formatting) gave the Rust line for free.
+# Private prefix: _dc_
+#
+# Two users, both needing the answer Rust gives bit for bit:
+#   * cube.cyr parses .cube text with Rust's `f32::from_str`, which is correctly
+#     rounded straight to f32;
+#   * serde.cyr writes floats as serde_json 1.0.151 does (its formatter, zmij:
+#     the SHORTEST decimal that reads back to the same float, the closest such
+#     when several are shortest) and reads JSON numbers into f32 and f64 fields,
+#     correctly rounded.
+#
+# What the stdlib gives: `f64_parse_n`, correctly rounded to f64, and `f32_from`,
+# which rounds an f64 to f32 ties-to-even (subnormals and overflow included). What
+# it does not give, and this module adds:
+#
+#   _dc_decimal_to_f32(p, s, e)   a decimal's correctly rounded f32. Through f64
+#                                 then f32 is right except when the f64 lands
+#                                 exactly on an f32 midpoint; then the decimal
+#                                 digits are compared exactly with the midpoint.
+#   _dc_digits(av, out, xout)     the EXACT decimal expansion of a positive finite
+#                                 f64 (subnormals too), as 0.d1..dn x 10^x.
+#   _dc_shortest(bits, is32, ..)  the shortest round-trip digits (ryu's and
+#                                 zmij's, which agree).
+#   _dc_fmt                       those digits in serde_json's notation.
+#
+# Exactness comes from integer arithmetic: a float is M * 2^E, and its decimal
+# digits are those of the integer M << E (E >= 0) or M * 5^-E (E < 0), built in
+# 32-bit limbs. The largest case, the smallest f64 subnormal, is 5^1074: 80 limbs
+# and 751 digits.
+
+#must_use
+fn _dc_digit(c) {
+    if (c >= 48 && c <= 57) { return 1; }
+    return 0;
+}
+
+# ── big integers: little-endian 32-bit limbs, one per i64 slot ────────
+
+# b = b * k, 0 < k < 2^31. Returns the new limb count. Each step stays below
+# 2^32 * 2^31 + 2^31 < 2^63.
+#must_use
+fn _dc_bn_mul(b, n, k) {
+    var carry = 0;
+    var i = 0;
+    while (i < n) {
+        var t = load64(b + i * 8) * k + carry;
+        store64(b + i * 8, t & 0xFFFFFFFF);
+        carry = t >> 32;
+        i = i + 1;
+    }
+    if (carry != 0) {
+        store64(b + n * 8, carry);
+        n = n + 1;
+    }
+    return n;
+}
+
+# b = b / 10^9, writing the remainder to `rem`. Returns the new limb count. The
+# running value stays below 10^9 * 2^32 < 2^63, so signed division is exact.
+#must_use
+fn _dc_bn_divmod_1e9(b, n, rem) {
+    var r = 0;
+    var i = n - 1;
+    while (i >= 0) {
+        var cur = (r << 32) | load64(b + i * 8);
+        var q = cur / 1000000000;
+        r = cur - q * 1000000000;
+        store64(b + i * 8, q);
+        i = i - 1;
+    }
+    while (n > 0 && load64(b + (n - 1) * 8) == 0) { n = n - 1; }
+    store64(rem, r);
+    return n;
+}
+
+# ── exact digits ────────
+
+# Capacity, in digits, that _dc_digits may write: 767 is the most any f64 needs
+# (2^52 * 5^1074 has 767), plus the scratch rounding of the last 9-digit group.
+var _DC_DIGITS_CAP = 800;
+
+# The exact decimal expansion of the positive finite f64 `av` (bits): writes
+# d1..dn (values 0..9, no leading or trailing zeros) to `out` (at least
+# _DC_DIGITS_CAP bytes) and x to `xout`, so that av = 0.d1..dn x 10^x. Returns n,
+# or 0 if an allocation fails (av itself is never 0 here).
+#must_use
+fn _dc_digits(av, out, xout) {
+    var ef = (av >> 52) & 0x7FF;
+    var m = av & 0x000FFFFFFFFFFFFF;
+    var ex = 0 - 1074;
+    if (ef != 0) {
+        m = m | 0x0010000000000000;
+        ex = ef - 1075;
+    }
+    while ((m & 1) == 0) { m = m >> 1; ex = ex + 1; }
+    var bn = fl_calloc(96 * 8);
+    if (bn == 0) { store64(xout, 0); return 0; }
+    store64(bn, m & 0xFFFFFFFF);
+    store64(bn + 8, m >> 32);
+    var nl = 2;
+    if (load64(bn + 8) == 0) { nl = 1; }
+    if (ex >= 0) {
+        var sh = ex;
+        while (sh >= 30) { nl = _dc_bn_mul(bn, nl, 1073741824); sh = sh - 30; }
+        if (sh > 0) { nl = _dc_bn_mul(bn, nl, 1 << sh); }
+    } else {
+        var fv = 0 - ex;
+        while (fv >= 13) { nl = _dc_bn_mul(bn, nl, 1220703125); fv = fv - 13; }   # 5^13
+        var pw = 1;
+        while (fv > 0) { pw = pw * 5; fv = fv - 1; }
+        if (pw > 1) { nl = _dc_bn_mul(bn, nl, pw); }
+    }
+    # Nine digits at a time, least significant first.
+    var tmp = fl_alloc(_DC_DIGITS_CAP + 16);
+    var rem = fl_alloc(8);
+    if (tmp == 0 || rem == 0) {
+        fl_free(tmp); fl_free(rem); fl_free(bn);
+        store64(xout, 0);
+        return 0;
+    }
+    var nt = 0;
+    while (nl > 0) {
+        nl = _dc_bn_divmod_1e9(bn, nl, rem);
+        var r = load64(rem);
+        var j = 0;
+        while (j < 9) {
+            store8(tmp + nt, r % 10);
+            r = r / 10;
+            nt = nt + 1;
+            j = j + 1;
+        }
+    }
+    while (nt > 0 && load8(tmp + nt - 1) == 0) { nt = nt - 1; }      # leading zeros
+    var n = 0;
+    while (n < nt) { store8(out + n, load8(tmp + nt - 1 - n)); n = n + 1; }
+    var x = nt;
+    if (ex < 0) { x = nt + ex; }
+    while (n > 0 && load8(out + n - 1) == 0) { n = n - 1; }          # trailing zeros
+    fl_free(rem);
+    fl_free(tmp);
+    fl_free(bn);
+    store64(xout, x);
+    return n;
+}
+
+# ── decimal text to f32 ────────
+
+var _DC_POS_INF = 0x7F800000;
+# 2^128 as an f64: one f32 ulp past FLT_MAX, standing in for +inf's "value" when
+# the f32 neighbour of a rounding is infinity.
+var _DC_TWO_128 = 0x47F0000000000000;
+
+# The sign of |decimal [s, e)| - av: -1, 0 or 1. The span is a decimal number
+# (optional sign, digits with at most one point, optional exponent) that has
+# already passed a grammar check; av is a positive finite f64.
+#
+# Both sides are put in the form 0.d1..dn x 10^x (d1 != 0, dn != 0) and compared
+# by exponent, then digit by digit.
+#must_use
+fn _dc_cmp_decimal(p, s, e, av) {
+    var dg = fl_alloc(e - s + 1);
+    if (dg == 0) { return 0; }
+    var nd = 0;
+    var nint = 0;
+    var lead = 1;
+    var skipped = 0;
+    var i = s;
+    if (load8(p + i) == 43 || load8(p + i) == 45) { i = i + 1; }
+    var infrac = 0;
+    while (i < e) {
+        var c = load8(p + i);
+        if (c == 46) { infrac = 1; i = i + 1; continue; }
+        if (_dc_digit(c) == 0) { break; }
+        if (infrac == 0) { nint = nint + 1; }
+        if (lead == 1 && c == 48) { skipped = skipped + 1; }
+        else {
+            lead = 0;
+            store8(dg + nd, c - 48);
+            nd = nd + 1;
+        }
+        i = i + 1;
+    }
+    var xe = 0;
+    if (i < e) {
+        i = i + 1;                                    # 'e' or 'E'
+        var eneg = 0;
+        if (load8(p + i) == 45) { eneg = 1; i = i + 1; }
+        elif (load8(p + i) == 43) { i = i + 1; }
+        while (i < e) {
+            # Saturate: past 10^8 the value is far outside f32 and never a tie.
+            if (xe < 100000000) { xe = xe * 10 + (load8(p + i) - 48); }
+            i = i + 1;
+        }
+        if (eneg == 1) { xe = 0 - xe; }
+    }
+    if (nd == 0) { fl_free(dg); return 0 - 1; }       # the decimal is zero, av is not
+    while (nd > 0 && load8(dg + nd - 1) == 0) { nd = nd - 1; }
+    var dexp = nint - skipped + xe;
+
+    var gd = fl_alloc(_DC_DIGITS_CAP);
+    var gx = fl_alloc(8);
+    if (gd == 0 || gx == 0) { fl_free(gd); fl_free(gx); fl_free(dg); return 0; }
+    var ng = _dc_digits(av, gd, gx);
+    var gexp = load64(gx);
+    fl_free(gx);
+
+    var r = 0;
+    if (dexp != gexp) {
+        r = 1;
+        if (dexp < gexp) { r = 0 - 1; }
+    } else {
+        var k = 0;
+        while (k < nd && k < ng && r == 0) {
+            var a = load8(dg + k);
+            var b = load8(gd + k);
+            if (a > b) { r = 1; }
+            if (a < b) { r = 0 - 1; }
+            k = k + 1;
+        }
+        if (r == 0) {
+            if (nd > ng) { r = 1; }
+            if (nd < ng) { r = 0 - 1; }
+        }
+    }
+    fl_free(gd);
+    fl_free(dg);
+    return r;
+}
+
+# Round the correctly rounded f64 `v` of the decimal [s, e) to the f32 that the
+# decimal itself rounds to (ties to even).
+#
+# ⚠ ROUNDING TWICE IS NOT ROUNDING ONCE. f32_from(v) is right unless v is EXACTLY
+# a midpoint between two adjacent f32s: there it breaks the tie to even, but the
+# decimal may lie a hair above or below that midpoint (within half an f64 ulp of
+# it, which is how v came to equal it). Only then are the decimal's own digits
+# compared with the midpoint's exact expansion.
+#must_use
+fn _dc_narrow(v, p, s, e) {
+    var f = f32_from(v) & 0xFFFFFFFF;
+    var sign = f & 0x80000000;
+    var av = v & 0x7FFFFFFFFFFFFFFF;
+    var af = f & 0x7FFFFFFF;
+    if (av == 0) { return f; }
+    # af's value as an f64, with +inf read as 2^128.
+    var afd = _DC_TWO_128;
+    if (af != _DC_POS_INF) { afd = f32_to(af); }
+    if (afd == av) { return f; }                      # exactly an f32 (or 2^128 itself)
+    if (af == _DC_POS_INF && f64_ge(av, _DC_TWO_128) == 1) { return f; }
+    # The f32 on the far side of av from af: together they bracket av.
+    var ag = af + 1;
+    if (f64_gt(afd, av) == 1) { ag = af - 1; }
+    var agd = _DC_TWO_128;
+    if (ag != _DC_POS_INF) { agd = f32_to(ag); }
+    # af and ag are adjacent f32s, so both sums are exact in f64, and av is their
+    # midpoint exactly when they agree.
+    if (f64_add(afd, agd) != f64_add(av, av)) { return f; }
+    var cmp = _dc_cmp_decimal(p, s, e, av);
+    if (cmp == 0) { return f; }                       # a true tie: f32_from's even choice
+    var lo = af;
+    var hi = ag;
+    if (ag < af) { lo = ag; hi = af; }
+    if (cmp > 0) { return hi | sign; }
+    return lo | sign;
+}
+
+# The correctly rounded f32 of the decimal number [s, e), which must already be a
+# well-formed decimal (sign, digits, point, exponent; no inf/nan).
+#must_use
+fn _dc_decimal_to_f32(p, s, e) {
+    return _dc_narrow(f64_parse_n(p + s, e - s), p, s, e);
+}
+
+# ── shortest round-trip digits (ryu) ────────
+
+# Write the decimal 0.d1..dn x 10^x as text "[-]0.<digits>e<x>" into `buf`, for
+# reading back. Returns the length.
+#must_use
+fn _dc_sci_text(neg, dg, n, x, buf) {
+    var k = 0;
+    if (neg == 1) { store8(buf, 45); k = 1; }
+    store8(buf + k, 48);
+    store8(buf + k + 1, 46);
+    k = k + 2;
+    var i = 0;
+    while (i < n) { store8(buf + k, 48 + load8(dg + i)); k = k + 1; i = i + 1; }
+    store8(buf + k, 101);
+    k = k + 1;
+    var xx = x;
+    if (xx < 0) { store8(buf + k, 45); k = k + 1; xx = 0 - xx; }
+    var t = fl_alloc(24);
+    var nt = 0;
+    if (xx == 0) { store8(t, 0); nt = 1; }
+    while (xx > 0) { store8(t + nt, xx % 10); xx = xx / 10; nt = nt + 1; }
+    while (nt > 0) { nt = nt - 1; store8(buf + k, 48 + load8(t + nt)); k = k + 1; }
+    fl_free(t);
+    return k;
+}
+
+# 1 if the decimal 0.d1..dn x 10^x reads back to `bits` (an f32 when is32 is 1,
+# else an f64). Reading back is exactly the test "inside the float's rounding
+# interval", with its ties-to-even boundary rule, which is ryu's acceptance test.
+#must_use
+fn _dc_reads_back(bits, is32, dg, n, x, buf) {
+    var len = _dc_sci_text(0, dg, n, x, buf);
+    if (is32 == 1) {
+        if (_dc_decimal_to_f32(buf, 0, len) == (bits & 0x7FFFFFFF)) { return 1; }
+        return 0;
+    }
+    if (f64_parse_n(buf, len) == (bits & 0x7FFFFFFFFFFFFFFF)) { return 1; }
+    return 0;
+}
+
+# ryu's digits for the positive finite nonzero float `bits` (f32 when is32): the
+# shortest decimal that reads back to it, and of the shortest, the one closest
+# to its exact value, ties to an even last digit. Writes the digits (0..9, no
+# trailing zeros) to `out` and x to `xout`, as 0.d1..dn x 10^x. Returns n.
+#
+# For each length k from 1 up, only two k-digit decimals can lie inside the
+# interval: the exact value rounded DOWN and rounded UP at k digits (anything
+# further out is outside if these are). The closer of the two (ties to an even
+# last digit) is tried first, then the other. The first k with a hit is the
+# shortest, and the order picks ryu's choice.
+#must_use
+fn _dc_shortest(bits, is32, out, xout) {
+    var av = 0;
+    if (is32 == 1) { av = f32_to(bits & 0x7FFFFFFF); }
+    else { av = bits & 0x7FFFFFFFFFFFFFFF; }
+    var ex = fl_alloc(_DC_DIGITS_CAP);
+    var exx = fl_alloc(8);
+    var cand = fl_alloc(_DC_DIGITS_CAP);
+    var buf = fl_alloc(_DC_DIGITS_CAP + 32);
+    if (ex == 0 || exx == 0 || cand == 0 || buf == 0) {
+        fl_free(ex); fl_free(exx); fl_free(cand); fl_free(buf);
+        store64(xout, 0);
+        return 0;
+    }
+    var ne = _dc_digits(av, ex, exx);
+    var x0 = load64(exx);
+    var result = 0;
+    var k = 1;
+    while (k <= ne && result == 0) {
+        # DOWN: the first k digits. UP: DOWN plus one unit in digit k, carried.
+        # When the exact value has exactly k digits, DOWN is the value itself.
+        var i = 0;
+        while (i < k) { store8(cand + i, load8(ex + i)); i = i + 1; }
+        var exact = 0;
+        if (k == ne) { exact = 1; }
+        var up_first = 0;
+        if (exact == 0) {
+            var d = load8(ex + k);
+            if (d > 5) { up_first = 1; }
+            if (d == 5) {
+                if (k + 1 < ne) { up_first = 1; }           # more digits after the 5
+                elif ((load8(ex + k - 1) & 1) == 1) { up_first = 1; }   # a tie: to even
+            }
+        }
+        var tries = 2;
+        if (exact == 1) { tries = 1; }
+        var t = 0;
+        while (t < tries && result == 0) {
+            var want_up = up_first;
+            if (t == 1) { want_up = 1 - up_first; }
+            # Build the candidate in `out`: DOWN, or DOWN + 1 at digit k.
+            var j = 0;
+            while (j < k) { store8(out + j, load8(cand + j)); j = j + 1; }
+            var cx = x0;
+            var cn = k;
+            if (want_up == 1) {
+                var q = k - 1;
+                var carry = 1;
+                while (q >= 0 && carry == 1) {
+                    var dv = load8(out + q) + 1;
+                    if (dv == 10) { store8(out + q, 0); q = q - 1; }
+                    else { store8(out + q, dv); carry = 0; }
+                }
+                if (carry == 1) {                        # 99..9 + 1 = 100..0
+                    store8(out, 1);
+                    cn = 1;
+                    cx = cx + 1;
+                }
+            }
+            while (cn > 0 && load8(out + cn - 1) == 0) { cn = cn - 1; }
+            if (cn > 0 && _dc_reads_back(bits, is32, out, cn, cx, buf) == 1) {
+                result = cn;
+                store64(xout, cx);
+            }
+            t = t + 1;
+        }
+        k = k + 1;
+    }
+    fl_free(ex); fl_free(exx); fl_free(cand); fl_free(buf);
+    return result;
+}
+
+# ── serde_json's notation ────────
+
+# Append the float `bits` as serde_json 1.0.151 writes it to `buf` at `at`;
+# returns the new length. serde_json formats with the zmij crate (zmij 1.0.23,
+# FloatTraits::FIXED_DEC_EXP and write()). Its fixed-notation windows equal
+# ryu's (pretty::format32/format64): with the digits as an integer of `len`
+# digits times 10^k and kk = len + k,
+#   0 <= k and kk <= 13 (16)  -> integer with ".0"      1234e7  -> 12340000000.0
+#   0 < kk <= 13 (16)         -> point inside           1234e-2 -> 12.34
+#   -6 (-5) < kk <= 0         -> leading "0.000"        1234e-6 -> 0.001234
+#   one digit                 -> "1e+30"
+#   otherwise                 -> "1.234e+33"
+# ⚠ THE ONE DIFFERENCE FROM RYU is the exponent's sign: zmij always writes it
+# ("e+38", "e-7"), where ryu writes "e38". Neither pads with zeros. Up to
+# serde_json 1.0.140 or so the formatter was ryu; the oracle checks this against
+# the version rust-old/Cargo.lock pins. Zero is "0.0" (or "-0.0"). The caller
+# handles non-finite values.
+#must_use
+fn _dc_fmt(bits, is32, buf, at) {
+    var k = at;
+    var neg = 0;
+    var mag = 0;
+    if (is32 == 1) {
+        if ((bits & 0x80000000) != 0) { neg = 1; }
+        mag = bits & 0x7FFFFFFF;
+    } else {
+        if ((bits >> 63) != 0) { neg = 1; }
+        mag = bits & 0x7FFFFFFFFFFFFFFF;
+    }
+    if (neg == 1) { store8(buf + k, 45); k = k + 1; }
+    if (mag == 0) {
+        store8(buf + k, 48); store8(buf + k + 1, 46); store8(buf + k + 2, 48);
+        return k + 3;
+    }
+    var dg = fl_alloc(_DC_DIGITS_CAP);
+    var xo = fl_alloc(8);
+    var n = _dc_shortest(mag, is32, dg, xo);
+    var kk = load64(xo);            # 0.d1..dn x 10^kk == d1..dn x 10^(kk - n)
+    var ke = kk - n;
+    var lim = 16;
+    var low = 0 - 5;
+    if (is32 == 1) { lim = 13; low = 0 - 6; }
+    var i = 0;
+    if (ke >= 0 && kk <= lim) {
+        while (i < n) { store8(buf + k, 48 + load8(dg + i)); k = k + 1; i = i + 1; }
+        while (i < kk) { store8(buf + k, 48); k = k + 1; i = i + 1; }
+        store8(buf + k, 46); store8(buf + k + 1, 48);
+        k = k + 2;
+    } elif (kk > 0 && kk <= lim) {
+        while (i < n) {
+            if (i == kk) { store8(buf + k, 46); k = k + 1; }
+            store8(buf + k, 48 + load8(dg + i));
+            k = k + 1;
+            i = i + 1;
+        }
+    } elif (kk > low && kk <= 0) {
+        store8(buf + k, 48); store8(buf + k + 1, 46);
+        k = k + 2;
+        var z = 0;
+        while (z < 0 - kk) { store8(buf + k, 48); k = k + 1; z = z + 1; }
+        while (i < n) { store8(buf + k, 48 + load8(dg + i)); k = k + 1; i = i + 1; }
+    } else {
+        store8(buf + k, 48 + load8(dg));
+        k = k + 1;
+        if (n > 1) {
+            store8(buf + k, 46);
+            k = k + 1;
+            i = 1;
+            while (i < n) { store8(buf + k, 48 + load8(dg + i)); k = k + 1; i = i + 1; }
+        }
+        store8(buf + k, 101);
+        k = k + 1;
+        var e10 = kk - 1;
+        if (e10 < 0) { store8(buf + k, 45); k = k + 1; e10 = 0 - e10; }
+        else { store8(buf + k, 43); k = k + 1; }
+        if (e10 >= 100) { store8(buf + k, 48 + e10 / 100); k = k + 1; e10 = e10 % 100;
+            store8(buf + k, 48 + e10 / 10); k = k + 1; e10 = e10 % 10; }
+        elif (e10 >= 10) { store8(buf + k, 48 + e10 / 10); k = k + 1; e10 = e10 % 10; }
+        store8(buf + k, 48 + e10);
+        k = k + 1;
+    }
+    fl_free(xo);
+    fl_free(dg);
+    return k;
+}
+
+# Room `_dc_fmt` may need: a sign, up to 17 digits, a point, the zeros of
+# integer notation up to kk = 16, and an exponent.
+var _DC_FMT_MAX = 40;

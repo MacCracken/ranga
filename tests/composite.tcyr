@@ -327,7 +327,7 @@ test_group("wipe");
 # Doctest: 8x1, a white, b black, progress 0.5.
 var wa = mkbuf(8, 1, PF_RGBA8);
 var wb = mkbuf(8, 1, PF_RGBA8);
-bv_fill(pixel_buffer_bv(wa), 255);
+rg_bv_fill(pixel_buffer_bv(wa), 255);
 var wr = wipe(wa, wb, f32c(0.5), err);
 assert_eq(load64(err), RG_ERR_NONE, "wipe succeeds");
 assert_eq(pxb(wr, 0), 0, "wipe left half comes from b (doctest)");
@@ -342,7 +342,7 @@ pixel_buffer_free(wr);
 # wipe_half on 4x4, which is the shape the Rust unit test uses.
 var wa4 = mkbuf(4, 4, PF_RGBA8);
 var wb4 = mkbuf(4, 4, PF_RGBA8);
-bv_fill(pixel_buffer_bv(wa4), 255);
+rg_bv_fill(pixel_buffer_bv(wa4), 255);
 var wr4 = wipe(wa4, wb4, f32c(0.5), err);
 assert_eq(pxb(wr4, 0), 0, "4x4 wipe: left half is b");
 assert_eq(pxb(wr4, 3 * 4), 255, "4x4 wipe: right half is a");
@@ -769,7 +769,7 @@ assert_eq(px4(nc_dst, 0, 1, 2, 3, 4), 1, "composite_at with NaN opacity paints n
 # NaN check is what reproduces Rust. Marker-filled for the same reason as the
 # degenerate case above: writing zeros would otherwise look like doing nothing.
 var nang = mkbuf(4, 4, PF_RGBA8);
-bv_fill(pixel_buffer_bv(nang), 9);
+rg_bv_fill(pixel_buffer_bv(nang), 9);
 gradient_linear_angled(nang, C_RED, C_BLUE, qnan);
 assert_eq(px4(nang, 0, 9, 9, 9, 9), 1, "a NaN angle leaves the buffer untouched");
 assert_eq(px4(nang, 15, 9, 9, 9, 9), 1, "a NaN angle leaves the last pixel untouched too");

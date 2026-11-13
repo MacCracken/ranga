@@ -11,9 +11,12 @@ use ranga::color::*;
 use ranga::convert;
 use ranga::filter;
 use ranga::pixel::{PixelBuffer, PixelFormat};
+use ranga::icc::ToneCurve;
 use ranga::transform::{self, Affine, Perspective, ScaleFilter};
 use ranga::RangaError;
 use std::io::{BufWriter, Write};
+
+mod serde_inputs;
 
 struct Out(BufWriter<std::io::Stdout>);
 impl Out {
@@ -112,6 +115,145 @@ const MODES: [BlendMode; 12] = [
     BlendMode::Darken, BlendMode::Lighten, BlendMode::ColorDodge, BlendMode::ColorBurn,
     BlendMode::SoftLight, BlendMode::HardLight, BlendMode::Difference, BlendMode::Exclusion,
 ];
+
+
+// ---- serde: src/serde.cyr's JSON codecs against serde_json 1.0.151 ----
+
+fn jcode(e: &serde_json::Error) -> i32 {
+    use serde_json::error::Category;
+    match e.classify() {
+        Category::Data => -1,
+        Category::Syntax | Category::Eof => -7,
+        Category::Io => -99,
+    }
+}
+
+fn enc<T: serde::Serialize>(o: &mut Out, k: &str, v: &T) {
+    o.line("serde_enc", k, "json", &serde_json::to_string(v).unwrap());
+}
+
+fn unhex(h: &str) -> Vec<u8> {
+    (0..h.len() / 2).map(|i| u8::from_str_radix(&h[2 * i..2 * i + 2], 16).unwrap()).collect()
+}
+
+const PIXEL_FORMATS: [PixelFormat; 6] = [PixelFormat::Rgba8, PixelFormat::Argb8, PixelFormat::Rgb8,
+    PixelFormat::Yuv420p, PixelFormat::Nv12, PixelFormat::RgbaF32];
+const COLOR_SPACES: [ColorSpace; 7] = [ColorSpace::Srgb, ColorSpace::LinearRgb, ColorSpace::DisplayP3,
+    ColorSpace::Bt601, ColorSpace::Bt709, ColorSpace::Bt2020, ColorSpace::CieXyz];
+
+/// The f32 edge set the encode group starts from, then random bit patterns.
+const E32: [u32; 16] = [0, 0x80000000, 0x3F800000, 0x3DCCCCCD, 0x00000001, 0x007FFFFF, 0x00800000,
+    0x7F7FFFFF, 0x7F800000, 0xFF800000, 0x7FC00000, 0x4B189680, 0x5368D4A5, 0x358637BD,
+    0x3A83126F, 0xC2F6E979];
+const E64: [u64; 12] = [0, 0x8000000000000000, 0x3FF0000000000000, 0x3FB999999999999A, 1,
+    0x7FEFFFFFFFFFFFFF, 0x7FF0000000000000, 0x7FF8000000000000, 0x4341C37937E08000,
+    0x44B52D02C7E14AF6, 0x3EB0C6F7A0B5ED8D, 0xC08F400000000000];
+
+fn g_serde(o: &mut Out) {
+    // Encode: edges, then random bit patterns of every class.
+    let mut rn = Rng(0x5E4D_E000_0000_0001);
+    let r32 = |i: usize, rn: &mut Rng| -> f32 {
+        if i < E32.len() { fb(E32[i]) } else { fb((rn.next() >> 32) as u32) }
+    };
+    for i in 0..300 {
+        let k = i.to_string();
+        let (a, b, c, d) = (r32(i, &mut rn), r32((i + 5) % 300, &mut rn), r32((i + 9) % 300, &mut rn), r32((i + 3) % 300, &mut rn));
+        enc(o, &format!("LinRgba.{k}"), &LinRgba { r: a, g: b, b: c, a: d });
+        enc(o, &format!("Hsl.{k}"), &Hsl { h: a, s: b, l: c });
+        enc(o, &format!("Cmyk.{k}"), &Cmyk { c: a, m: b, y: c, k: d });
+        enc(o, &format!("Oklab.{k}"), &Oklab { l: a, a: b, b: c });
+        enc(o, &format!("Oklch.{k}"), &Oklch { l: a, c: b, h: c });
+    }
+    let r64 = |i: usize, rn: &mut Rng| -> f64 {
+        if i < E64.len() { f64::from_bits(E64[i]) } else { f64::from_bits(rn.next()) }
+    };
+    for i in 0..300 {
+        let k = i.to_string();
+        let v: Vec<f64> = (0..9).map(|j| r64((i + j * 7) % 300, &mut rn)).collect();
+        enc(o, &format!("CieXyz.{k}"), &CieXyz { x: v[0], y: v[1], z: v[2] });
+        enc(o, &format!("CieLab.{k}"), &CieLab { l: v[3], a: v[4], b: v[5] });
+        enc(o, &format!("Affine.{k}"), &Affine { a: v[0], b: v[1], c: v[2], d: v[3], tx: v[4], ty: v[5] });
+        enc(o, &format!("Perspective.{k}"), &Perspective { m: [[v[0], v[1], v[2]], [v[3], v[4], v[5]], [v[6], v[7], v[8]]] });
+        enc(o, &format!("ToneCurve.g{k}"), &ToneCurve::Gamma(v[8]));
+        let n = (rn.next() % 6) as usize;
+        enc(o, &format!("ToneCurve.t{k}"), &ToneCurve::Table(v[..n].to_vec()));
+    }
+    for i in 0..200 {
+        let s = Srgba { r: rn.byte(), g: rn.byte(), b: rn.byte(), a: rn.byte() };
+        enc(o, &format!("Srgba.{i}"), &s);
+    }
+    for (i, v) in PIXEL_FORMATS.iter().enumerate() { enc(o, &format!("PixelFormat.{i}"), v); }
+    for (i, v) in COLOR_SPACES.iter().enumerate() { enc(o, &format!("ColorSpace.{i}"), v); }
+    for (i, v) in MODES.iter().enumerate() { enc(o, &format!("BlendMode.{i}"), v); }
+
+    // Decode: the shared input list.
+    let g = "serde_dec";
+    for (i, (t, h)) in serde_inputs::SERDE_INPUTS.iter().enumerate() {
+        let b = unhex(h);
+        let k = format!("{t}.{i}");
+        let ok = |o: &mut Out| o.line(g, &k, "code", "0");
+        let bad = |o: &mut Out, e: serde_json::Error| o.line(g, &k, "code", &jcode(&e).to_string());
+        macro_rules! f32s { ($v:expr, $($f:ident),*) => { $( o.f32(g, &format!("{k}.{}", stringify!($f)), $v.$f); )* } }
+        // f64 values go to their own group: serde_json's default float parser is best
+        // effort and src/serde.cyr's is correctly rounded (ADR 008), so they may
+        // differ by an ulp. Codes, u8s and f32s stay in the exact group.
+        let g64 = "serde_dec.f64";
+        macro_rules! f64s { ($v:expr, $($f:ident),*) => { $( o.f64(g64, &format!("{k}.{}", stringify!($f)), $v.$f); )* } }
+        match *t {
+            "Srgba" => match serde_json::from_slice::<Srgba>(&b) {
+                Ok(v) => { ok(o); o.u8s(g, &format!("{k}.v"), &[v.r, v.g, v.b, v.a]); }
+                Err(e) => bad(o, e) },
+            "LinRgba" => match serde_json::from_slice::<LinRgba>(&b) { Ok(v) => { ok(o); f32s!(v, r, g, b, a); } Err(e) => bad(o, e) },
+            "Hsl" => match serde_json::from_slice::<Hsl>(&b) { Ok(v) => { ok(o); f32s!(v, h, s, l); } Err(e) => bad(o, e) },
+            "Cmyk" => match serde_json::from_slice::<Cmyk>(&b) { Ok(v) => { ok(o); f32s!(v, c, m, y, k); } Err(e) => bad(o, e) },
+            "Oklab" => match serde_json::from_slice::<Oklab>(&b) { Ok(v) => { ok(o); f32s!(v, l, a, b); } Err(e) => bad(o, e) },
+            "Oklch" => match serde_json::from_slice::<Oklch>(&b) { Ok(v) => { ok(o); f32s!(v, l, c, h); } Err(e) => bad(o, e) },
+            "CieXyz" => match serde_json::from_slice::<CieXyz>(&b) { Ok(v) => { ok(o); f64s!(v, x, y, z); } Err(e) => bad(o, e) },
+            "CieLab" => match serde_json::from_slice::<CieLab>(&b) { Ok(v) => { ok(o); f64s!(v, l, a, b); } Err(e) => bad(o, e) },
+            "Affine" => match serde_json::from_slice::<Affine>(&b) { Ok(v) => { ok(o); f64s!(v, a, b, c, d, tx, ty); } Err(e) => bad(o, e) },
+            "Perspective" => match serde_json::from_slice::<Perspective>(&b) {
+                Ok(v) => { ok(o); for r in 0..3 { for c in 0..3 { o.f64(g64, &format!("{k}.m{r}{c}"), v.m[r][c]); } } }
+                Err(e) => bad(o, e) },
+            "ToneCurve" => match serde_json::from_slice::<ToneCurve>(&b) {
+                Ok(ToneCurve::Gamma(x)) => { ok(o); o.line(g, &format!("{k}.kind"), "code", "0"); o.f64(g64, &format!("{k}.g"), x); }
+                Ok(ToneCurve::Table(t)) => {
+                    ok(o);
+                    o.line(g, &format!("{k}.kind"), "code", "1");
+                    o.line(g, &format!("{k}.n"), "code", &t.len().to_string());
+                    for (j, x) in t.iter().enumerate() { o.f64(g64, &format!("{k}.t{j}"), *x); }
+                }
+                Ok(_) => { ok(o); o.line(g, &format!("{k}.kind"), "code", "-99"); }
+                Err(e) => bad(o, e) },
+            "PixelFormat" => match serde_json::from_slice::<PixelFormat>(&b) {
+                Ok(v) => { ok(o); o.u8s(g, &format!("{k}.v"), &[PIXEL_FORMATS.iter().position(|x| *x == v).unwrap() as u8]); }
+                Err(e) => bad(o, e) },
+            "ColorSpace" => match serde_json::from_slice::<ColorSpace>(&b) {
+                Ok(v) => { ok(o); o.u8s(g, &format!("{k}.v"), &[COLOR_SPACES.iter().position(|x| *x == v).unwrap() as u8]); }
+                Err(e) => bad(o, e) },
+            "BlendMode" => match serde_json::from_slice::<BlendMode>(&b) {
+                Ok(v) => { ok(o); o.u8s(g, &format!("{k}.v"), &[MODES.iter().position(|x| *x == v).unwrap() as u8]); }
+                Err(e) => bad(o, e) },
+            _ => unreachable!(),
+        }
+    }
+
+    // Long decimals: 17-25 significant digits, where serde_json's default
+    // (best-effort) float parser can be 1 ulp off and ranga is correctly rounded.
+    let mut rl = Rng(0x10E6_D161_7500_0003);
+    for i in 0..4000 {
+        let nd = 17 + (rl.byte() % 9) as usize;
+        let mut s = String::new();
+        s.push((b'1' + rl.byte() % 9) as char);
+        s.push('.');
+        for _ in 1..nd { s.push((b'0' + rl.byte() % 10) as char); }
+        let e = (rl.byte() % 80) as i32 - 40;
+        s.push_str(&format!("e{e}"));
+        let x: CieXyz = serde_json::from_str(&format!("{{\"x\":{s},\"y\":0,\"z\":0}}")).unwrap();
+        o.f64("serde_long.f64", &i.to_string(), x.x);
+        let l: LinRgba = serde_json::from_str(&format!("{{\"r\":{s},\"g\":0,\"b\":0,\"a\":0}}")).unwrap();
+        o.f32("serde_long.f32", &i.to_string(), l.r);
+    }
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -406,5 +548,6 @@ fn main() {
             }
         }
     }
+    if want("serde") { g_serde(&mut o); }
     o.0.flush().unwrap();
 }

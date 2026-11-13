@@ -378,7 +378,7 @@ fn fill_solid(buf, color) {
     var b = load8(color + 2);
     var a = load8(color + 3);
     if (r == g && g == b && b == a) {
-        return bv_fill(pixel_buffer_bv(buf), r);
+        return rg_bv_fill(pixel_buffer_bv(buf), r);
     }
     var word = _pack_color(color);
     var p = pixel_buffer_data(buf);

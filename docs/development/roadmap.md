@@ -8,13 +8,14 @@
 
 ## Where things stand
 
-The port shipped as **2.0.0** and is at **2.3.3** on cyrius 6.7.18. The 2026-11-02 review
-of all 303 public Rust items, updated for 2.1.2 and 2.2.0, found:
+The port shipped as **2.0.0** and is at **2.4.0** on cyrius 6.7.18. The 2026-11-02 review
+of all 303 public Rust items, updated through 2.4.0, finds:
 
-- 207 at parity;
-- 9 improved on Rust (the three blurs since 2.3.1, `bilateral` since 2.3.2);
-- 29 that diverge on purpose, with the reason written down;
-- 19 partial and 33 missing;
+- 225 at parity;
+- 21 improved on Rust: the three blurs (2.3.1), `bilateral` (2.3.2), `from_cube` and
+  the 11 serde items (2.4.0);
+- 28 that diverge on purpose, with the reason written down;
+- 9 partial and 14 missing, all GPU;
 - **6 that compute something different from Rust without a documented reason**. All
   six are GPU and are scheduled in 2.5.x.
 
@@ -120,37 +121,37 @@ SM75) on nouveau and NVK, which is exactly what mabda's NVIDIA backend targets:
 
 ## 2.4.x — Surface completion (CPU)
 
-- [ ] **(M–L) Decide serde first.** Rust derives Serialize/Deserialize on 14 types:
-      the 8 colour structs, `PixelFormat`, `ColorSpace`, `BlendMode`, `ToneCurve`,
-      `Affine` and `Perspective`. Either write the codecs (the wire form is serde's,
-      i.e. variant names such as "ColorDodge"), or write an ADR that puts serde out
-      of scope.
-      - At 6.7.18, `#derive(Serialize)` on an enum works and emits exactly that
-        variant name. It was checked for 2.1.2, so the four enums can be derived.
-      - The structs are hand-rolled byte layouts, so their codecs would be
-        hand-written, on bayan.
-- [ ] **(S) Clone and equality for heap records:**
-      - `affine_clone`/`_eq`, `perspective_clone`/`_eq` and `lut3d_clone`;
-      - a clone for the colour structs.
-- [ ] **(S) Writable records:**
-      - setters for the colour structs, with the Hsl and Cmyk layouts added to the
-        `color.cyr` header;
-      - a Table accessor for `ToneCurve`;
-      - `pixel_buffer_into_bv` (Rust's `into_data`).
-- [ ] **(S–M) ICC constructors:** a way to build `IccProfile` / `IccLutProfile` from
-      a matrix and curves, as Rust's pub fields allowed.
-- [ ] **(M) `Lut3d::from_cube`:** port the `.cube` parser, or write an ADR. Either way,
-      fix `docs/guides/features/filters.md` and `migration-guide.md`, which advertise
-      it.
-- [ ] **(S) Spectral names:** decide whether to provide the Rust names for prakash's
-      three renamed re-exports (`CIE_1931_2DEG`, `VISIBLE_MIN_NM` and
-      `VISIBLE_MAX_NM`). `spectral.cyr` has documented the renames since 2.1.2.
-- [ ] **(S) Namespace decisions:** whether `xorshift64_*` stays public (it was
-      private in Rust), and whether `bytevec`'s unprefixed `bv_*` functions need a
-      prefix to avoid colliding with consumers.
+**Closed by 2.4.0.** Outside the GPU layer, every MISSING item in the parity doc is
+ported, and so is every PARTIAL one.
+
+- [x] **(M–L) serde:** JSON codecs for all 14 types
+      ([ADR 008](../adr/008-serde-codecs-are-json-in-serde-json-form.md),
+      `src/serde.cyr`), in serde-derive's wire form as serde_json 1.0.151 writes and
+      reads it. The oracle's serde groups check them against serde_json itself. Encoding
+      and every decode decision match exactly. Decoded numbers are correctly rounded,
+      where serde_json's default parser is best effort (accepted within 1 to 2 ulp).
+- [x] **(S) Clone and equality for heap records:** `_clone` and `_eq` on all 8 colour
+      structs, `srgba_hash`, `affine_*`/`perspective_*` clone and eq, and deep clones of
+      `Lut3d`, `ToneCurve`, `IccProfile` and `IccLutProfile`.
+- [x] **(S) Writable records:**
+      - setters for every colour-struct field, with all eight layouts in the header;
+      - Affine/Perspective setters;
+      - ToneCurve table and gamma accessors;
+      - `pixel_buffer_into_bv`.
+- [x] **(S–M) ICC constructors:** `icc_profile_new` and `icc_lut_profile_new`, each with
+      setters for every field. The LUT profile now keeps a length per input curve.
+- [x] **(M) `Lut3d::from_cube`:** `lut3d_from_cube` (`src/cube.cyr`), with Rust's
+      grammar and correctly rounded f32s (exact decimal machinery in `src/decimal.cyr`).
+      It honours the `.cube` domain, which Rust ignored
+      ([ADR 007](../adr/007-cube-domain-is-honoured.md)). `filters.md` and
+      `migration-guide.md` give the Cyrius call.
+- [x] **(S) Spectral names:** `VISIBLE_MIN_NM`, `VISIBLE_MAX_NM` and `CIE_1931_2DEG()`
+      are provided beside prakash's names.
+- [x] **(S) Namespace:** `bv_*` → `rg_bv_*`, and `xorshift64_*` is private
+      ([ADR 006](../adr/006-bytevec-is-rg-bv-and-xorshift-is-private.md)).
 
 **Done when:** outside the GPU layer, every MISSING item in the parity doc is either
-ported or given an ADR.
+ported or given an ADR. **Met in 2.4.0.**
 
 ## 2.5.x — GPU
 

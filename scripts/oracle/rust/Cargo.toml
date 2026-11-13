@@ -8,6 +8,11 @@ publish = false
 
 [dependencies]
 ranga = { path = "../../../rust-old" }
+# The serde group (src/serde.cyr's codecs against serde_json). Exact pins, matching
+# the versions rust-old/Cargo.lock already resolves, so no new crate enters the
+# build and it stays offline.
+serde = "=1.0.229"
+serde_json = "=1.0.151"
 
 [profile.release]
 debug = false

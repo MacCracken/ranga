@@ -406,7 +406,7 @@ pixel_buffer_free(argbb);
 # values one level down; these make sure each public entry point uses its kernel.
 var w44 = mk(4, 4, PF_RGBA8);
 var k44 = mk(4, 4, PF_RGBA8);
-bv_fill(pixel_buffer_bv(w44), 255);
+rg_bv_fill(pixel_buffer_bv(w44), 255);
 var yw = rgba_to_yuv420p(w44, err);
 assert_gt(at(yw, 0), 250, "rgba_to_yuv_white: Y > 250");
 var yk = rgba_to_yuv420p(k44, err);

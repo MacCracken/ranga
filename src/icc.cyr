@@ -16,6 +16,14 @@
 #   IccProfile 56 bytes  +0 major +8 minor +16..19 colour space
 #                        +24 matrix(9 f64 ptr) +32 rTRC +40 gTRC +48 bTRC
 #
+# RECORD SURFACE. Rust's IccProfile, IccLutProfile and ToneCurve have `pub`
+# fields (ToneCurve's are its variants' payloads) and derive Clone, so each has
+# a constructor that is Rust's struct literal, a setter per field, and a deep
+# `_clone`. Rust can build a profile it could never parse; so can ranga, but the
+# constructors check what Rust would otherwise panic on later (a null curve, a
+# LUT whose length disagrees with its grid) and refuse it with
+# RG_ERR_INVALID_PARAMETER.
+#
 # The matrix is COLUMN-major, matching Rust: row i holds the XYZ of primary i,
 # so `apply` reads m[0][0], m[1][0], m[2][0] to build X.
 
@@ -76,6 +84,52 @@ fn tone_curve_kind(t) { return load64(t); }
 fn tone_curve_gamma_value(t) { return load64(t + 8); }
 #must_use
 fn tone_curve_len(t) { return load64(t + 24); }
+
+# Entry `i` of a Table curve: Rust's `ToneCurve::Table(v) => v[i]`. 0 for a
+# Gamma curve or an index outside [0, len); Rust would panic on the index.
+#must_use
+fn tone_curve_table_at(t, i) {
+    if (load64(t) != TC_TABLE) { return 0; }
+    if (i < 0 || i >= load64(t + 24)) { return 0; }
+    return load64(load64(t + 16) + i * 8);
+}
+
+# Write entry `i` of a Table curve, Rust's `v[i] = x` through `ToneCurve::Table(
+# ref mut v)`. RG_ERR_INVALID_PARAMETER for a Gamma curve or an index out of
+# range, with nothing written.
+fn tone_curve_set_table_at(t, i, v) {
+    if (load64(t) != TC_TABLE) { return RG_ERR_INVALID_PARAMETER; }
+    if (i < 0 || i >= load64(t + 24)) { return RG_ERR_INVALID_PARAMETER; }
+    store64(load64(t + 16) + i * 8, v);
+    return RG_ERR_NONE;
+}
+
+# Write a Gamma curve's exponent. RG_ERR_INVALID_PARAMETER for a Table curve.
+fn tone_curve_set_gamma_value(t, g) {
+    if (load64(t) != TC_GAMMA) { return RG_ERR_INVALID_PARAMETER; }
+    store64(t + 8, g);
+    return RG_ERR_NONE;
+}
+
+# Rust's `#[derive(Clone)]`: a deep copy, table included, owned by the caller.
+# 0 if `t` is 0 or an allocation fails.
+#must_use
+fn tone_curve_clone(t) {
+    if (t == 0) { return 0; }
+    if (load64(t) == TC_GAMMA) { return tone_curve_gamma(load64(t + 8)); }
+    var n = load64(t + 24);
+    var tab = 0;
+    # fl_alloc(0) returns 0 since cyrius 6.6.7, so an empty table stays null,
+    # exactly as the parser leaves a zero-entry `curv`.
+    if (n > 0) {
+        tab = fl_alloc(n * 8);
+        if (tab == 0) { return 0; }
+        memcpy(tab, load64(t + 16), n * 8);
+    }
+    var c = tone_curve_table(tab, n);
+    if (c == 0 && tab != 0) { fl_free(tab); }
+    return c;
+}
 
 fn tone_curve_free(t) {
     if (t == 0) { return RG_ERR_NONE; }
@@ -451,6 +505,95 @@ fn icc_profile_free(p) {
     return RG_ERR_NONE;
 }
 
+# Build a matrix/TRC profile from its parts: Rust's
+#   IccProfile { version: (major, minor), color_space, matrix, red_trc, .. }
+#
+#   cs      pointer to the 4 colour-space bytes (e.g. the literal "RGB ")
+#   matrix  pointer to 9 f64 in Rust's [[f64; 3]; 3] order, element (i, j) at
+#           (i*3 + j)*8. Copied: Rust's array is Copy.
+#   *trc    three ToneCurves. TAKEN on success (Rust moves them in), and still
+#           the caller's on failure.
+#
+# major and minor are Rust's u8s, masked to a byte as srgba_new masks its
+# channels. A null cs, matrix or curve is RG_ERR_INVALID_PARAMETER: Rust's
+# types cannot express one.
+#must_use
+fn icc_profile_new(major, minor, cs, matrix, rtrc, gtrc, btrc, err_out) {
+    if (cs == 0 || matrix == 0) { store64(err_out, RG_ERR_INVALID_PARAMETER); return 0; }
+    if (rtrc == 0 || gtrc == 0 || btrc == 0) {
+        store64(err_out, RG_ERR_INVALID_PARAMETER);
+        return 0;
+    }
+    var m = fl_alloc(9 * 8);
+    if (m == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    memcpy(m, matrix, 9 * 8);
+    var p = fl_calloc(_ICC_PROFILE_SIZE);
+    if (p == 0) { fl_free(m); store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    store64(p, major & 255);
+    store64(p + 8, minor & 255);
+    memcpy(p + 16, cs, 4);
+    store64(p + 24, m);
+    store64(p + 32, rtrc);
+    store64(p + 40, gtrc);
+    store64(p + 48, btrc);
+    store64(err_out, RG_ERR_NONE);
+    return p;
+}
+
+# Rust's `profile.version = (major, minor)`, masked to bytes.
+fn icc_profile_set_version(p, major, minor) {
+    store64(p, major & 255);
+    store64(p + 8, minor & 255);
+    return RG_ERR_NONE;
+}
+
+# Rust's `profile.color_space = *cs`: copies 4 bytes from `cs`.
+fn icc_profile_set_color_space(p, cs) {
+    if (cs == 0) { return RG_ERR_INVALID_PARAMETER; }
+    memcpy(p + 16, cs, 4);
+    return RG_ERR_NONE;
+}
+
+# Rust's `profile.matrix[i][j] = v`. RG_ERR_INVALID_PARAMETER outside 0..3.
+fn icc_profile_set_matrix(p, i, j, v) {
+    if (i < 0 || i > 2 || j < 0 || j > 2) { return RG_ERR_INVALID_PARAMETER; }
+    store64(load64(p + 24) + (i * 3 + j) * 8, v);
+    return RG_ERR_NONE;
+}
+
+# Rust's `profile.red_trc = t`: the old curve is dropped (freed) and `t` is
+# taken. A null `t` is refused and the old curve kept.
+fn _icc_profile_set_trc(p, off, t) {
+    if (t == 0) { return RG_ERR_INVALID_PARAMETER; }
+    var old = load64(p + off);
+    if (old != t) { tone_curve_free(old); }
+    store64(p + off, t);
+    return RG_ERR_NONE;
+}
+fn icc_profile_set_red_trc(p, t) { return _icc_profile_set_trc(p, 32, t); }
+fn icc_profile_set_green_trc(p, t) { return _icc_profile_set_trc(p, 40, t); }
+fn icc_profile_set_blue_trc(p, t) { return _icc_profile_set_trc(p, 48, t); }
+
+# Rust's `#[derive(Clone)]`: matrix and all three curves copied. The caller owns
+# the result. 0 if `p` is 0 or an allocation fails.
+#must_use
+fn icc_profile_clone(p) {
+    if (p == 0) { return 0; }
+    var r = tone_curve_clone(load64(p + 32));
+    var g = tone_curve_clone(load64(p + 40));
+    var b = tone_curve_clone(load64(p + 48));
+    if (r == 0 || g == 0 || b == 0) {
+        tone_curve_free(r); tone_curve_free(g); tone_curve_free(b);
+        return 0;
+    }
+    var e = fl_alloc(8);
+    if (e == 0) { tone_curve_free(r); tone_curve_free(g); tone_curve_free(b); return 0; }
+    var c = icc_profile_new(load64(p), load64(p + 8), p + 16, load64(p + 24), r, g, b, e);
+    fl_free(e);
+    if (c == 0) { tone_curve_free(r); tone_curve_free(g); tone_curve_free(b); }
+    return c;
+}
+
 # Parse a full ICC profile from `data` (`len` bytes). Returns 0 with a code
 # through err_out on any malformed input.
 #
@@ -652,9 +795,9 @@ fn srgb_v2_profile(len_out) {
     var b_trc_off = g_trc_off + _icc_align4(curv_size);
     var total = b_trc_off + _icc_align4(curv_size);
 
-    var bv = bv_zeroed(total);
+    var bv = rg_bv_zeroed(total);
     if (bv == 0) { return 0; }
-    var buf = bv_data(bv);
+    var buf = rg_bv_data(bv);
     store64(len_out, total);
 
     # Header: size, version 2.4, RGB colour space, mntr device class, acsp.
@@ -726,17 +869,24 @@ fn srgb_v2_profile(len_out) {
 # interpolation. The two share the header and tag-table parsing and nothing
 # else. A profile is one form or the other; the caller picks the parser.
 #
-#   IccLutProfile 80 bytes
+#   IccLutProfile 96 bytes
 #     +0  major        +8  minor       +16..19 colour space
 #     +24 grid_size    +32 lut ptr     +40 lut len (grid^3 * 3 f64)
 #     +48 curve R ptr  +56 curve G ptr +64 curve B ptr
-#     +72 curve len (entries per channel — all three are equal by construction)
+#     +72 curve R len  +80 curve G len +88 curve B len
+#
+# ⚠ THREE CURVE LENGTHS, not one. Rust's `input_curves` is `[Vec<f64>; 3]`, and
+# each Vec has its own length. A parsed profile always gives all three the same
+# length, which is why the layout up to 2.3.3 stored one. But a profile built
+# from its parts (icc_lut_profile_new, Rust's struct literal) can differ per
+# channel, and `apply` must then sample each curve over its own length, as
+# Rust's `apply_curve(&self.input_curves[ch], ..)` does.
 #
 # GRID CAP. grid_size is a single untrusted byte and the LUT is grid^3 * 3
 # f64s, so an unchecked 255 would ask for 397 MB. Rust caps it at 64 (8 MB);
 # the cap is preserved rather than widened.
 
-var _ILP_SIZE = 80;
+var _ILP_SIZE = 96;
 var _ICC_MAX_GRID = 64;
 
 #must_use
@@ -751,8 +901,10 @@ fn icc_lut_profile_grid_size(p) { return load64(p + 24); }
 fn icc_lut_profile_lut_len(p) { return load64(p + 40); }
 #must_use
 fn icc_lut_profile_lut_at(p, i) { return load64(load64(p + 32) + i * 8); }
+# Entries in input curve `ch` (0 R, 1 G, 2 B). Up to 2.3.3 this took no channel
+# and returned the single shared length.
 #must_use
-fn icc_lut_profile_curve_len(p) { return load64(p + 72); }
+fn icc_lut_profile_curve_len(p, ch) { return load64(p + 72 + ch * 8); }
 #must_use
 fn icc_lut_profile_curve_at(p, ch, i) { return load64(load64(p + 48 + ch * 8) + i * 8); }
 
@@ -768,6 +920,121 @@ fn icc_lut_profile_free(p) {
     }
     fl_free(p);
     return RG_ERR_NONE;
+}
+
+# Build a LUT profile from its parts: Rust's
+#   IccLutProfile { version, color_space, grid_size, lut, input_curves }
+#
+#   cs            pointer to the 4 colour-space bytes
+#   grid, lut     grid points per axis, and grid^3 * 3 f64 (`lut_len` of them),
+#                 laid out as the parser lays them out (see icc_lut_profile_apply)
+#   cr/cg/cb, nr/ng/nb   the three input curves and their lengths. A curve of
+#                 length 0 is null and acts as identity, as Rust's empty Vec does.
+#
+# `lut` and the three curves are TAKEN on success (Rust moves the Vecs in), and
+# are still the caller's on failure.
+#
+# ⚠ CHECKED HERE, where Rust panics LATER. A struct literal in Rust can carry
+# grid_size 0 (apply underflows `grid_size - 1`) or a lut shorter than grid^3*3
+# (apply indexes out of bounds). Both panic in Rust and would read out of bounds
+# here, so both are refused with RG_ERR_INVALID_PARAMETER: grid < 1,
+# lut_len != grid^3 * 3, a null lut, a negative length, or a null curve with a
+# non-zero length. There is no upper cap on the grid: the parser's cap of 64 is
+# for untrusted bytes, and this input is the caller's own.
+#must_use
+fn icc_lut_profile_new(major, minor, cs, grid, lut, lut_len, cr, nr, cg, ng, cb, nb,
+  err_out) {
+    if (cs == 0 || lut == 0 || grid < 1) {
+        store64(err_out, RG_ERR_INVALID_PARAMETER);
+        return 0;
+    }
+    # grid^3 * 3 * 8 must not wrap: 1,027 is the largest grid whose byte count
+    # fits in i64 with the factor of 24 to spare.
+    if (grid > 1027) { store64(err_out, RG_ERR_INVALID_PARAMETER); return 0; }
+    if (lut_len != grid * grid * grid * 3) {
+        store64(err_out, RG_ERR_INVALID_PARAMETER);
+        return 0;
+    }
+    if (nr < 0 || ng < 0 || nb < 0) { store64(err_out, RG_ERR_INVALID_PARAMETER); return 0; }
+    if ((cr == 0 && nr > 0) || (cg == 0 && ng > 0) || (cb == 0 && nb > 0)) {
+        store64(err_out, RG_ERR_INVALID_PARAMETER);
+        return 0;
+    }
+    var p = fl_calloc(_ILP_SIZE);
+    if (p == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    store64(p, major & 255);
+    store64(p + 8, minor & 255);
+    memcpy(p + 16, cs, 4);
+    store64(p + 24, grid);
+    store64(p + 32, lut);
+    store64(p + 40, lut_len);
+    # A zero-length curve is stored null whatever was passed, so free() never
+    # frees a pointer the caller still owns.
+    if (nr > 0) { store64(p + 48, cr); }
+    if (ng > 0) { store64(p + 56, cg); }
+    if (nb > 0) { store64(p + 64, cb); }
+    store64(p + 72, nr);
+    store64(p + 80, ng);
+    store64(p + 88, nb);
+    store64(err_out, RG_ERR_NONE);
+    return p;
+}
+
+fn icc_lut_profile_set_version(p, major, minor) {
+    store64(p, major & 255);
+    store64(p + 8, minor & 255);
+    return RG_ERR_NONE;
+}
+
+fn icc_lut_profile_set_color_space(p, cs) {
+    if (cs == 0) { return RG_ERR_INVALID_PARAMETER; }
+    memcpy(p + 16, cs, 4);
+    return RG_ERR_NONE;
+}
+
+# Rust's `profile.lut[i] = v`. RG_ERR_INVALID_PARAMETER outside [0, lut_len).
+fn icc_lut_profile_set_lut_at(p, i, v) {
+    if (i < 0 || i >= load64(p + 40)) { return RG_ERR_INVALID_PARAMETER; }
+    store64(load64(p + 32) + i * 8, v);
+    return RG_ERR_NONE;
+}
+
+# Rust's `profile.input_curves[ch][i] = v`. RG_ERR_INVALID_PARAMETER for a
+# channel outside 0..3 or an index outside that curve's length.
+fn icc_lut_profile_set_curve_at(p, ch, i, v) {
+    if (ch < 0 || ch > 2) { return RG_ERR_INVALID_PARAMETER; }
+    if (i < 0 || i >= load64(p + 72 + ch * 8)) { return RG_ERR_INVALID_PARAMETER; }
+    store64(load64(p + 48 + ch * 8) + i * 8, v);
+    return RG_ERR_NONE;
+}
+
+# Rust's `#[derive(Clone)]`: the LUT and all three curves copied. The caller
+# owns the result. 0 if `p` is 0 or an allocation fails.
+#must_use
+fn icc_lut_profile_clone(p) {
+    if (p == 0) { return 0; }
+    var c = fl_calloc(_ILP_SIZE);
+    if (c == 0) { return 0; }
+    memcpy(c, p, 32);
+    var n = load64(p + 40);
+    var lut = fl_alloc(n * 8);
+    if (lut == 0) { fl_free(c); return 0; }
+    memcpy(lut, load64(p + 32), n * 8);
+    store64(c + 32, lut);
+    store64(c + 40, n);
+    var ch = 0;
+    while (ch < 3) {
+        var len = load64(p + 72 + ch * 8);
+        store64(c + 72 + ch * 8, len);
+        if (len > 0) {
+            var cur = fl_alloc(len * 8);
+            if (cur == 0) { icc_lut_profile_free(c); return 0; }
+            memcpy(cur, load64(p + 48 + ch * 8), len * 8);
+            store64(c + 48 + ch * 8, cur);
+        }
+        ch = ch + 1;
+    }
+    return c;
 }
 
 # Sample one of the input curves. This is rust-old's free `apply_curve`, which
@@ -807,6 +1074,8 @@ fn _icc_lut_build(data, len, major, minor, cs_off, grid, in_start, in_entries,
     store8(p + 19, load8(data + cs_off + 3));
     store64(p + 24, grid);
     store64(p + 72, in_entries);
+    store64(p + 80, in_entries);
+    store64(p + 88, in_entries);
 
     var width = 1;
     if (scale16 == 1) { width = 2; }
@@ -1023,11 +1292,10 @@ fn _icc_lut_profile_parse(data, len, err_out) {
 fn icc_lut_profile_apply(p, r, g, b, x_out, y_out, z_out) {
     var gs = load64(p + 24);
     var lut = load64(p + 32);
-    var cl = load64(p + 72);
 
-    var ri = _icc_apply_curve(load64(p + 48), cl, f64_clamp(r, 0, F64_ONE));
-    var gi = _icc_apply_curve(load64(p + 56), cl, f64_clamp(g, 0, F64_ONE));
-    var bi = _icc_apply_curve(load64(p + 64), cl, f64_clamp(b, 0, F64_ONE));
+    var ri = _icc_apply_curve(load64(p + 48), load64(p + 72), f64_clamp(r, 0, F64_ONE));
+    var gi = _icc_apply_curve(load64(p + 56), load64(p + 80), f64_clamp(g, 0, F64_ONE));
+    var bi = _icc_apply_curve(load64(p + 64), load64(p + 88), f64_clamp(b, 0, F64_ONE));
 
     var s = f64_from(gs - 1);
     var rf = f64_clamp(f64_mul(ri, s), 0, s);

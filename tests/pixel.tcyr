@@ -14,56 +14,56 @@ var err = fl_alloc(8);
 # ================================================================
 test_group("bytevec");
 
-var v = bv_zeroed(16);
-assert_eq(bv_len(v), 16, "bv_zeroed sets len, not just capacity");
-assert_eq(bv_cap(v), 16, "bv_zeroed capacity");
-assert_eq(bv_get(v, 0), 0, "bv_zeroed is zero-filled");
-assert_eq(bv_get(v, 15), 0, "bv_zeroed zero-filled to the end");
+var v = rg_bv_zeroed(16);
+assert_eq(rg_bv_len(v), 16, "rg_bv_zeroed sets len, not just capacity");
+assert_eq(rg_bv_cap(v), 16, "rg_bv_zeroed capacity");
+assert_eq(rg_bv_get(v, 0), 0, "rg_bv_zeroed is zero-filled");
+assert_eq(rg_bv_get(v, 15), 0, "rg_bv_zeroed zero-filled to the end");
 
-assert_eq(bv_set(v, 0, 255), 1, "bv_set in range returns 1");
+assert_eq(rg_bv_set(v, 0, 255), 1, "rg_bv_set in range returns 1");
 # load8 zero-extends: 0xFF must read back 255, not -1. A sign-extending read
 # here would silently corrupt every saturated channel in the library.
-assert_eq(bv_get(v, 0), 255, "0xFF reads back as 255, not -1");
-assert_eq(bv_set(v, 16, 1), 0, "bv_set past len returns 0");
-assert_eq(bv_set(v, (0 - 1), 1), 0, "bv_set negative index returns 0");
-assert_eq(bv_get(v, 16), 0, "bv_get past len returns 0");
+assert_eq(rg_bv_get(v, 0), 255, "0xFF reads back as 255, not -1");
+assert_eq(rg_bv_set(v, 16, 1), 0, "rg_bv_set past len returns 0");
+assert_eq(rg_bv_set(v, (0 - 1), 1), 0, "rg_bv_set negative index returns 0");
+assert_eq(rg_bv_get(v, 16), 0, "rg_bv_get past len returns 0");
 
 # Masking, not truncation-by-accident: a caller passing 256 gets 0.
-assert_eq(bv_set(v, 1, 256), 1, "bv_set accepts an out-of-byte value");
-assert_eq(bv_get(v, 1), 0, "256 masks to 0");
-assert_eq(bv_set(v, 1, 257), 1, "bv_set 257");
-assert_eq(bv_get(v, 1), 1, "257 masks to 1");
+assert_eq(rg_bv_set(v, 1, 256), 1, "rg_bv_set accepts an out-of-byte value");
+assert_eq(rg_bv_get(v, 1), 0, "256 masks to 0");
+assert_eq(rg_bv_set(v, 1, 257), 1, "rg_bv_set 257");
+assert_eq(rg_bv_get(v, 1), 1, "257 masks to 1");
 
-bv_fill(v, 7);
-assert_eq(bv_get(v, 0), 7, "bv_fill writes the whole buffer");
-assert_eq(bv_get(v, 15), 7, "bv_fill reaches the last byte");
+rg_bv_fill(v, 7);
+assert_eq(rg_bv_get(v, 0), 7, "rg_bv_fill writes the whole buffer");
+assert_eq(rg_bv_get(v, 15), 7, "rg_bv_fill reaches the last byte");
 
-var c = bv_clone(v);
-assert_eq(bv_len(c), 16, "clone length matches");
-assert_eq(bv_get(c, 15), 7, "clone copies contents");
-assert_eq(bv_set(c, 0, 99), 1, "clone is writable");
-assert_eq(bv_get(v, 0), 7, "clone is a deep copy — original unchanged");
-bv_free(c);
+var c = rg_bv_clone(v);
+assert_eq(rg_bv_len(c), 16, "clone length matches");
+assert_eq(rg_bv_get(c, 15), 7, "clone copies contents");
+assert_eq(rg_bv_set(c, 0, 99), 1, "clone is writable");
+assert_eq(rg_bv_get(v, 0), 7, "clone is a deep copy — original unchanged");
+rg_bv_free(c);
 
 # Growth preserves contents.
-var g = bv_new(2);
-assert_eq(bv_len(g), 0, "bv_new starts empty");
-bv_push(g, 10);
-bv_push(g, 20);
-bv_push(g, 30);
-assert_eq(bv_len(g), 3, "push grows length past initial capacity");
-assert_eq(bv_get(g, 0), 10, "push preserves byte 0 across a realloc");
-assert_eq(bv_get(g, 2), 30, "push stores the newest byte");
+var g = rg_bv_new(2);
+assert_eq(rg_bv_len(g), 0, "rg_bv_new starts empty");
+rg_bv_push(g, 10);
+rg_bv_push(g, 20);
+rg_bv_push(g, 30);
+assert_eq(rg_bv_len(g), 3, "push grows length past initial capacity");
+assert_eq(rg_bv_get(g, 0), 10, "push preserves byte 0 across a realloc");
+assert_eq(rg_bv_get(g, 2), 30, "push stores the newest byte");
 
-bv_clear(g);
-assert_eq(bv_len(g), 0, "clear resets length");
-assert_eq(bv_cap(g) >= 3, 1, "clear keeps the allocation for reuse");
+rg_bv_clear(g);
+assert_eq(rg_bv_len(g), 0, "clear resets length");
+assert_eq(rg_bv_cap(g) >= 3, 1, "clear keeps the allocation for reuse");
 
-bv_resize_zero(g, 5);
-assert_eq(bv_len(g), 5, "resize_zero sets length");
-assert_eq(bv_get(g, 4), 0, "resize_zero zeroes newly exposed bytes");
-bv_free(g);
-bv_free(v);
+rg_bv_resize_zero(g, 5);
+assert_eq(rg_bv_len(g), 5, "resize_zero sets length");
+assert_eq(rg_bv_get(g, 4), 0, "resize_zero zeroes newly exposed bytes");
+rg_bv_free(g);
+rg_bv_free(v);
 
 # ================================================================
 # PixelFormat — doctest parity with rust-old/src/pixel.rs
@@ -108,10 +108,10 @@ assert_eq(ranga_is_err(pixel_format_checked_buffer_size(99, 10, 10)), 1, "unknow
 # in Rust, so the port's pixel_buffer_new reports RG_ERR_BUFFER_TOO_SMALL. Up to
 # 2.1.2 it passed the checked size's RG_ERR_ALLOCATION through, which PD:140 had
 # flagged since M7 as a divergence needing an ADR. Matching Rust needs no ADR.
-var ovbv = bv_new(4);
+var ovbv = rg_bv_new(4);
 assert_eq(pixel_buffer_new(ovbv, 4294967295, 4294967295, PF_RGBA8, err), 0, "an overflowing PixelBuffer is rejected");
 assert_eq(load64(err), RG_ERR_BUFFER_TOO_SMALL, "as BUFFER_TOO_SMALL, as Rust's PixelBuffer::new does");
-bv_free(ovbv);
+rg_bv_free(ovbv);
 
 assert_eq(pixel_format_bytes_per_pixel(PF_RGBA8), 4, "Rgba8 is 4 bpp");
 assert_eq(pixel_format_bytes_per_pixel(PF_RGB8), 3, "Rgb8 is 3 bpp");
@@ -167,13 +167,13 @@ assert_eq(pixel_buffer_get_rgba(yuv, 0, 0, got), 0, "get_rgba rejects non-Rgba8"
 pixel_buffer_free(yuv);
 
 # new() validates length against the format.
-var short = bv_zeroed(4 * 4 * 4 - 1);
+var short = rg_bv_zeroed(4 * 4 * 4 - 1);
 var bad = pixel_buffer_new(short, 4, 4, PF_RGBA8, err);
 assert_eq(bad, 0, "new rejects a short buffer");
 assert_eq(load64(err), RG_ERR_DIMENSION_MISMATCH, "short buffer is a dimension mismatch");
-bv_free(short);
+rg_bv_free(short);
 
-var exact = bv_zeroed(4 * 4 * 4);
+var exact = rg_bv_zeroed(4 * 4 * 4);
 var ok = pixel_buffer_new(exact, 4, 4, PF_RGBA8, err);
 assert_eq(load64(err), RG_ERR_NONE, "new accepts an exact-length buffer");
 assert_eq(pixel_buffer_len(ok), 64, "new keeps the buffer");
@@ -213,27 +213,27 @@ pixel_view_free(view);
 # A view's buffer must be EXACTLY the right size. Rust's PixelView::new and
 # PixelViewMut::new both test `data.len() != expected` and return
 # DimensionMismatch, so too-large is an error there just as much as too-small.
-var small = bv_zeroed(8);
-var badview = pixel_view_new(bv_data(small), bv_len(small), 4, 4, PF_RGBA8, err);
+var small = rg_bv_zeroed(8);
+var badview = pixel_view_new(rg_bv_data(small), rg_bv_len(small), 4, 4, PF_RGBA8, err);
 assert_eq(badview, 0, "view rejects an undersized buffer");
 assert_eq(load64(err), RG_ERR_DIMENSION_MISMATCH, "and reports DimensionMismatch, as Rust does");
-bv_free(small);
+rg_bv_free(small);
 
 # ⚠ AND an OVERSIZED buffer is rejected too. An earlier version of this port
 # tested `len < want`, which silently widened the contract: a caller passing a
 # whole frame where a tile was meant got a view that read the wrong rows
 # instead of a diagnostic. Found by the M7 parity audit against rust-old.
-var big = bv_zeroed(4 * 4 * 4 + 64);
-var bigview = pixel_view_new(bv_data(big), bv_len(big), 4, 4, PF_RGBA8, err);
+var big = rg_bv_zeroed(4 * 4 * 4 + 64);
+var bigview = pixel_view_new(rg_bv_data(big), rg_bv_len(big), 4, 4, PF_RGBA8, err);
 assert_eq(bigview, 0, "view rejects an OVERSIZED buffer, as Rust does");
 assert_eq(load64(err), RG_ERR_DIMENSION_MISMATCH, "also DimensionMismatch");
 # The exact size still works, so the check is equality and not a blanket reject.
-var view_exact = bv_zeroed(4 * 4 * 4);
-var okview = pixel_view_new(bv_data(view_exact), bv_len(view_exact), 4, 4, PF_RGBA8, err);
+var view_exact = rg_bv_zeroed(4 * 4 * 4);
+var okview = pixel_view_new(rg_bv_data(view_exact), rg_bv_len(view_exact), 4, 4, PF_RGBA8, err);
 assert_eq(okview != 0, 1, "an exactly-sized buffer is accepted");
 assert_eq(load64(err), RG_ERR_NONE, "with no error");
 pixel_view_free(okview);
-bv_free(view_exact);
+rg_bv_free(view_exact);
 
 # pixel_view_mut_modifies_original: a mutable view writes through to its buffer.
 var wt = pixel_buffer_zeroed(4, 4, PF_RGBA8, err);
@@ -242,7 +242,7 @@ store8(pixel_view_data(wtv), 42);
 pixel_view_free(wtv);
 assert_eq(load8(pixel_buffer_data(wt)), 42, "a write through as_view_mut reaches the buffer");
 pixel_buffer_free(wt);
-bv_free(big);
+rg_bv_free(big);
 
 pixel_buffer_free(buf);
 
@@ -256,8 +256,8 @@ assert_eq(buffer_pool_len(pool), 0, "new pool is empty");
 assert_eq(buffer_pool_is_empty(pool), 1, "is_empty on a new pool");
 
 var b1 = buffer_pool_acquire(pool, 100);
-assert_eq(bv_len(b1), 100, "acquire returns the requested length");
-assert_eq(bv_get(b1, 0), 0, "acquired buffer is zeroed");
+assert_eq(rg_bv_len(b1), 100, "acquire returns the requested length");
+assert_eq(rg_bv_get(b1, 0), 0, "acquired buffer is zeroed");
 assert_eq(buffer_pool_is_empty(pool), 1, "acquire from an empty pool allocates fresh");
 
 buffer_pool_release(pool, b1);
@@ -265,28 +265,28 @@ assert_eq(buffer_pool_len(pool), 1, "release pools the buffer");
 assert_eq(buffer_pool_is_empty(pool), 0, "pool is no longer empty");
 
 var b2 = buffer_pool_acquire(pool, 50);
-assert_eq(bv_len(b2), 50, "reused buffer is resized to the request");
+assert_eq(rg_bv_len(b2), 50, "reused buffer is resized to the request");
 assert_eq(buffer_pool_len(pool), 0, "acquire removes it from the pool");
 
 # BEST-FIT. Pool a large and a small buffer, then ask for a size only the small
 # one comfortably fits: first-fit would hand back whichever it saw first and
 # strand the large one. 1.0.0 changed this deliberately.
-var pool_big = bv_zeroed(10000);
-var small2 = bv_zeroed(200);
+var pool_big = rg_bv_zeroed(10000);
+var small2 = rg_bv_zeroed(200);
 buffer_pool_release(pool, pool_big);
 buffer_pool_release(pool, small2);
 assert_eq(buffer_pool_len(pool), 2, "two buffers pooled");
 
 var fit = buffer_pool_acquire(pool, 150);
-assert_eq(bv_cap(fit) >= 150, 1, "acquired buffer is large enough");
-assert_eq(bv_cap(fit) < 10000, 1, "best-fit chose the 200-byte buffer, not the 10000-byte one");
+assert_eq(rg_bv_cap(fit) >= 150, 1, "acquired buffer is large enough");
+assert_eq(rg_bv_cap(fit) < 10000, 1, "best-fit chose the 200-byte buffer, not the 10000-byte one");
 buffer_pool_release(pool, fit);
 
 # Over-capacity release frees rather than leaking or growing without bound.
 var p2 = buffer_pool_new(1);
-buffer_pool_release(p2, bv_zeroed(10));
+buffer_pool_release(p2, rg_bv_zeroed(10));
 assert_eq(buffer_pool_len(p2), 1, "first release is pooled");
-buffer_pool_release(p2, bv_zeroed(10));
+buffer_pool_release(p2, rg_bv_zeroed(10));
 assert_eq(buffer_pool_len(p2), 1, "release past max_buffers does not grow the pool");
 buffer_pool_free(p2);
 
@@ -300,12 +300,12 @@ buffer_pool_free(pool);
 var hp = buffer_pool_new(1 << 40);
 assert_eq(hp != 0, 1, "a pool with a huge max_buffers is created, as in Rust");
 if (hp != 0) {
-    buffer_pool_release(hp, bv_zeroed(64));
+    buffer_pool_release(hp, rg_bv_zeroed(64));
     assert_eq(buffer_pool_len(hp), 1, "and holds a released buffer");
     var hb = buffer_pool_acquire(hp, 32);
-    assert_eq(bv_len(hb), 32, "and hands it back resized");
+    assert_eq(rg_bv_len(hb), 32, "and hands it back resized");
     assert_eq(buffer_pool_len(hp), 0, "leaving the pool empty");
-    bv_free(hb);
+    rg_bv_free(hb);
     buffer_pool_free(hp);
 }
 
@@ -313,7 +313,7 @@ if (hp != 0) {
 # as in Rust: the last buffer moves into the freed position. Capacities 100, 50,
 # 50, 200: acquire(40) takes the first 50 (index 1), and 200 moves into index 1.
 var sp = buffer_pool_new(8);
-var c100 = bv_zeroed(100); var c50a = bv_zeroed(50); var c50b = bv_zeroed(50); var c200 = bv_zeroed(200);
+var c100 = rg_bv_zeroed(100); var c50a = rg_bv_zeroed(50); var c50b = rg_bv_zeroed(50); var c200 = rg_bv_zeroed(200);
 buffer_pool_release(sp, c100); buffer_pool_release(sp, c50a);
 buffer_pool_release(sp, c50b); buffer_pool_release(sp, c200);
 var sp1 = buffer_pool_acquire(sp, 40);
@@ -323,22 +323,22 @@ assert_eq(got2, c50b, "then the other 50");
 var got3 = buffer_pool_acquire(sp, 150);
 assert_eq(got3, c200, "a larger request finds the 200 wherever swap_remove moved it");
 assert_eq(buffer_pool_len(sp), 1, "one buffer left");
-bv_free(sp1); bv_free(got2); bv_free(got3);
+rg_bv_free(sp1); rg_bv_free(got2); rg_bv_free(got3);
 buffer_pool_free(sp);
 
 # buffer_pool_zero_filled: a buffer dirtied, released and acquired again comes
 # back zeroed, at the full length of the earlier use.
 var zp = buffer_pool_new(4);
 var zb = buffer_pool_acquire(zp, 16);
-bv_fill(zb, 255);
+rg_bv_fill(zb, 255);
 buffer_pool_release(zp, zb);
 var zb2 = buffer_pool_acquire(zp, 16);
 assert_eq(zb2, zb, "the pooled buffer is the one reused");
 var zero_ok = 1;
 var zi = 0;
-while (zi < 16) { if (bv_get(zb2, zi) != 0) { zero_ok = 0; } zi = zi + 1; }
+while (zi < 16) { if (rg_bv_get(zb2, zi) != 0) { zero_ok = 0; } zi = zi + 1; }
 assert_eq(zero_ok, 1, "a reused buffer is zeroed");
-bv_free(zb2);
+rg_bv_free(zb2);
 buffer_pool_free(zp);
 
 # A negative size has no Rust counterpart (usize). It is refused rather than
@@ -346,7 +346,28 @@ buffer_pool_free(zp);
 var np = buffer_pool_new(2);
 assert_eq(buffer_pool_acquire(np, (0 - 1)), 0, "a negative size is refused");
 buffer_pool_free(np);
-bv_free(b2);
+rg_bv_free(b2);
+
+# ================================================================
+# pixel_buffer_into_bv (2.4.0)
+# ================================================================
+test_group("into_bv");
+
+# Rust's PixelBuffer::into_data: consume the buffer, keep the bytes. The bytevec
+# that comes back is the buffer's own (no copy), and the caller now frees it.
+var ib_err = fl_alloc(8);
+var ib = pixel_buffer_zeroed(2, 1, PF_RGBA8, ib_err);
+store32(pixel_buffer_data(ib), 0x11223344);
+store32(pixel_buffer_data(ib) + 4, 0x55667788);
+var ib_bv_before = pixel_buffer_bv(ib);
+var ib_bv = pixel_buffer_into_bv(ib);
+assert_eq(ib_bv, ib_bv_before, "into_bv hands back the buffer's own bytevec, not a copy");
+assert_eq(rg_bv_len(ib_bv), 8, "with every pixel byte");
+assert_eq(load32(rg_bv_data(ib_bv)), 0x11223344, "first pixel intact");
+assert_eq(load32(rg_bv_data(ib_bv) + 4), 0x55667788, "second pixel intact");
+assert_eq(pixel_buffer_into_bv(0), 0, "a null buffer gives a null bytevec");
+rg_bv_free(ib_bv);
+fl_free(ib_err);
 
 var exit_code = assert_summary();
 if (exit_code > 0) { exit_code = 1; }

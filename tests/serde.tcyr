@@ -1,0 +1,237 @@
+# serde.tcyr — JSON codecs in serde's wire form (src/serde.cyr, ADR 008)
+#
+# The oracle's serde group checks these codecs against serde_json 1.0.151 itself
+# (scripts/oracle, golden digests in tests/oracle_golden.tcyr): 3,525 encodings
+# byte for byte and 435 decode inputs, every accept/reject and error category.
+# This suite holds what the oracle cannot:
+#   * the round trip, decode(encode(v)) == v, over thousands of random values;
+#   * the two ColorSpace variants ranga added (CieLab, Oklab), which Rust lacks;
+#   * ownership and null handling of the API;
+#   * a readable pin of each type's wire form, so a reader sees the format here.
+
+include "src/error.cyr"
+include "src/bytevec.cyr"
+include "src/pixel.cyr"
+include "src/color.cyr"
+include "src/transform.cyr"
+include "src/icc.cyr"
+include "src/decimal.cyr"
+include "src/serde.cyr"
+
+alloc_init();
+
+var err = fl_alloc(8);
+
+# 1 if the rg_bv `bv` holds exactly the cstring `want`; frees bv.
+fn json_is(bv, want) {
+    if (bv == 0) { return 0; }
+    var n = strlen(want);
+    var ok = 1;
+    if (rg_bv_len(bv) != n) { ok = 0; }
+    var i = 0;
+    while (ok == 1 && i < n) {
+        if (load8(rg_bv_data(bv) + i) != load8(want + i)) { ok = 0; }
+        i = i + 1;
+    }
+    if (load8(rg_bv_data(bv) + rg_bv_len(bv)) != 0) { ok = 0; }   # NUL past the length
+    rg_bv_free(bv);
+    return ok;
+}
+
+# ================================================================
+test_group("wire form");
+
+assert_eq(json_is(srgba_to_json(srgba_new(10, 20, 30, 40)), "{\"r\":10,\"g\":20,\"b\":30,\"a\":40}"),
+  1, "Srgba: an object of u8 fields in declaration order");
+assert_eq(json_is(lin_rgba_to_json(lin_rgba_new(f32_from(0.1), f32_from(F64_ONE), 0x7FC00000, 0x80000000)),
+  "{\"r\":0.1,\"g\":1.0,\"b\":null,\"a\":-0.0}"), 1,
+  "LinRgba: the f32 shortest text (0.1, not 0.10000000149011612), 1.0, NaN as null, -0.0");
+assert_eq(json_is(hsl_to_json(hsl_new(f32_from(120.0), f32_from(0.5), f32_from(0.25))),
+  "{\"h\":120.0,\"s\":0.5,\"l\":0.25}"), 1, "Hsl");
+assert_eq(json_is(cmyk_to_json(cmyk_new(0, f32_from(0.5), f32_from(F64_ONE), 0x7F800000)),
+  "{\"c\":0.0,\"m\":0.5,\"y\":1.0,\"k\":null}"), 1, "Cmyk, with +inf written null");
+assert_eq(json_is(oklab_to_json(oklab_new(f32_from(0.5), f32_from(-0.125), f32_from(0.0625))),
+  "{\"l\":0.5,\"a\":-0.125,\"b\":0.0625}"), 1, "Oklab");
+assert_eq(json_is(oklch_to_json(oklch_new(f32_from(0.5), f32_from(0.125), f32_from(270.0))),
+  "{\"l\":0.5,\"c\":0.125,\"h\":270.0}"), 1, "Oklch");
+assert_eq(json_is(cie_xyz_to_json(cie_xyz_d65_white()), "{\"x\":0.95047,\"y\":1.0,\"z\":1.08883}"), 1,
+  "CieXyz: the f64 shortest text");
+# 0x46293E5939A08CEA is 1e30.
+assert_eq(json_is(cie_lab_to_json(cie_lab_new(50.0, -20.5, 0x46293E5939A08CEA)),
+  "{\"l\":50.0,\"a\":-20.5,\"b\":1e+30}"), 1,
+  "CieLab, with serde_json's signed exponent");
+assert_eq(json_is(affine_to_json(affine_translate(5.0, -6.0)),
+  "{\"a\":1.0,\"b\":0.0,\"c\":0.0,\"d\":1.0,\"tx\":5.0,\"ty\":-6.0}"), 1, "Affine");
+assert_eq(json_is(perspective_to_json(perspective_identity()),
+  "{\"m\":[[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]]}"), 1, "Perspective: m as rows");
+assert_eq(json_is(tone_curve_to_json(tone_curve_gamma(2.2)), "{\"Gamma\":2.2}"), 1,
+  "ToneCurve::Gamma, externally tagged");
+var tt3 = fl_alloc(24);
+store64(tt3, 0); store64(tt3 + 8, 0.5); store64(tt3 + 16, F64_ONE);
+var tc3 = tone_curve_table(tt3, 3);
+assert_eq(json_is(tone_curve_to_json(tc3), "{\"Table\":[0.0,0.5,1.0]}"), 1, "ToneCurve::Table");
+var tc0 = tone_curve_table(0, 0);
+assert_eq(json_is(tone_curve_to_json(tc0), "{\"Table\":[]}"), 1, "an empty Table");
+assert_eq(json_is(pixel_format_to_json(PF_YUV420P), "\"Yuv420p\""), 1, "PixelFormat: the variant name");
+assert_eq(json_is(color_space_to_json(CS_DISPLAY_P3), "\"DisplayP3\""), 1, "ColorSpace");
+assert_eq(json_is(blend_mode_to_json(6), "\"ColorDodge\""), 1,
+  "BlendMode: the variant name, not blend_mode_name's \"Color Dodge\"");
+
+test_group("ranga's ColorSpace additions");
+# CieLab and Oklab have no Rust variant. Their names continue Rust's spelling, and
+# they round-trip like the seven Rust ones.
+assert_eq(json_is(color_space_to_json(CS_CIE_LAB), "\"CieLab\""), 1, "CS_CIE_LAB is \"CieLab\"");
+assert_eq(json_is(color_space_to_json(CS_OKLAB), "\"Oklab\""), 1, "CS_OKLAB is \"Oklab\"");
+assert_eq(color_space_from_json("\"CieLab\"", 8, err), CS_CIE_LAB, "and decodes back");
+assert_eq(color_space_from_json("\"Oklab\"", 7, err), CS_OKLAB, "both");
+assert_eq(color_space_to_json(9), 0, "an out-of-range discriminant has no encoding");
+assert_eq(pixel_format_to_json(0 - 1), 0, "nor does a negative one");
+
+# ================================================================
+test_group("round trip");
+
+# decode(encode(v)) == v, bit for bit, for every finite value: serde's own
+# guarantee for shortest-text floats. Values are random bit patterns, so every
+# exponent and subnormal is exercised.
+var _S = 0x9E3779B97F4A7C15;
+fn rnd() {
+    _S = _S ^ (_S << 13);
+    _S = _S ^ (_S >> 7);
+    _S = _S ^ (_S << 17);
+    return _S;
+}
+fn rnd32() {
+    var b = (rnd() >> 32) & 0xFFFFFFFF;
+    if ((b & 0x7F800000) == 0x7F800000) { b = b & 0xFF7FFFFF; }    # finite only
+    return b;
+}
+fn rnd64() {
+    var b = rnd();
+    if ((b & 0x7FF0000000000000) == 0x7FF0000000000000) { b = b & 0xFFEFFFFFFFFFFFFF; }
+    return b;
+}
+
+var bad32 = 0;
+var bad64 = 0;
+var badu8 = 0;
+var k = 0;
+while (k < 2000) {
+    var a = lin_rgba_new(rnd32(), rnd32(), rnd32(), rnd32());
+    var j = lin_rgba_to_json(a);
+    var b = lin_rgba_from_json(rg_bv_data(j), rg_bv_len(j), err);
+    if (load64(err) != RG_ERR_NONE) { bad32 = bad32 + 1; }
+    elif (load32(a) != load32(b) || load32(a + 4) != load32(b + 4) || load32(a + 8) != load32(b + 8)
+          || load32(a + 12) != load32(b + 12)) { bad32 = bad32 + 1; }
+    rg_bv_free(j); lin_rgba_free(a); lin_rgba_free(b);
+
+    var x = cie_xyz_new(rnd64(), rnd64(), rnd64());
+    var jx = cie_xyz_to_json(x);
+    var y = cie_xyz_from_json(rg_bv_data(jx), rg_bv_len(jx), err);
+    if (load64(err) != RG_ERR_NONE) { bad64 = bad64 + 1; }
+    elif (load64(x) != load64(y) || load64(x + 8) != load64(y + 8) || load64(x + 16) != load64(y + 16)) {
+        bad64 = bad64 + 1;
+    }
+    rg_bv_free(jx); cie_xyz_free(x); cie_xyz_free(y);
+
+    var s = srgba_new(rnd() & 255, rnd() & 255, rnd() & 255, rnd() & 255);
+    var js = srgba_to_json(s);
+    var s2 = srgba_from_json(rg_bv_data(js), rg_bv_len(js), err);
+    if (load64(err) != RG_ERR_NONE || srgba_eq(s, s2) == 0) { badu8 = badu8 + 1; }
+    rg_bv_free(js); srgba_free(s); srgba_free(s2);
+    k = k + 1;
+}
+assert_eq(bad32, 0, "2,000 random LinRgba (8,000 f32) round-trip bit for bit");
+assert_eq(bad64, 0, "2,000 random CieXyz (6,000 f64) round-trip bit for bit");
+assert_eq(badu8, 0, "2,000 random Srgba round-trip");
+
+# The remaining types, once each through a non-trivial value. (BM_* lives in
+# blend.cyr, which this suite does not include, so modes are their discriminants.)
+# 3e-300 and 5e300 as bit patterns: Cyrius float literals have no exponent form.
+var p0 = perspective_new(1.5, -2.0, 0x01C01297D23AB683, 4.0, 0x7E5DDD4BAA009303, 6.0, 0.1, 8.0, 9.0);
+var pj = perspective_to_json(p0);
+var p1 = perspective_from_json(rg_bv_data(pj), rg_bv_len(pj), err);
+assert_eq(load64(err), RG_ERR_NONE, "a Perspective decodes");
+assert_eq(perspective_eq(p0, p1), 1, "to an equal Perspective");
+rg_bv_free(pj); perspective_free(p0); perspective_free(p1);
+var a0 = affine_rotate(0.7);
+var aj = affine_to_json(a0);
+var a1 = affine_from_json(rg_bv_data(aj), rg_bv_len(aj), err);
+assert_eq(affine_eq(a0, a1), 1, "an Affine round-trips");
+rg_bv_free(aj); affine_free(a0); affine_free(a1);
+var cj = tone_curve_to_json(tc3);
+var c1 = tone_curve_from_json(rg_bv_data(cj), rg_bv_len(cj), err);
+assert_eq(tone_curve_kind(c1), TC_TABLE, "a Table ToneCurve round-trips as a Table");
+assert_eq(tone_curve_len(c1), 3, "of three entries");
+assert_eq(tone_curve_table_at(c1, 1), 0.5, "with its values");
+rg_bv_free(cj); tone_curve_free(c1);
+var ce = tone_curve_to_json(tc0);
+var c2 = tone_curve_from_json(rg_bv_data(ce), rg_bv_len(ce), err);
+assert_eq(load64(err), RG_ERR_NONE, "an empty Table decodes");
+assert_eq(tone_curve_len(c2), 0, "to an empty Table");
+rg_bv_free(ce); tone_curve_free(c2);
+var m = 0;
+var mbad = 0;
+while (m < 12) {
+    var bj = blend_mode_to_json(m);
+    if (blend_mode_from_json(rg_bv_data(bj), rg_bv_len(bj), err) != m) { mbad = mbad + 1; }
+    rg_bv_free(bj);
+    m = m + 1;
+}
+assert_eq(mbad, 0, "all 12 BlendModes round-trip");
+var f = 0;
+var fbad = 0;
+while (f < 6) {
+    var fj = pixel_format_to_json(f);
+    if (pixel_format_from_json(rg_bv_data(fj), rg_bv_len(fj), err) != f) { fbad = fbad + 1; }
+    rg_bv_free(fj);
+    f = f + 1;
+}
+assert_eq(fbad, 0, "all 6 PixelFormats round-trip");
+
+# ================================================================
+test_group("what does not round-trip");
+
+# serde_json writes a non-finite float as null and refuses null for a float, so
+# a NaN does not survive, here as there. The error is Data (invalid type).
+var nn = lin_rgba_new(0x7FC00000, 0, 0, 0);
+var nj = lin_rgba_to_json(nn);
+assert_eq(lin_rgba_from_json(rg_bv_data(nj), rg_bv_len(nj), err), 0, "a NaN field's null does not decode");
+assert_eq(load64(err), RG_ERR_INVALID_FORMAT, "and it is a shape error, not a syntax one");
+rg_bv_free(nj); lin_rgba_free(nn);
+# -0.0 does survive: "-0.0" is a float literal.
+var nz = cie_xyz_new(0x8000000000000000, 0, 0);
+var zj = cie_xyz_to_json(nz);
+var z1 = cie_xyz_from_json(rg_bv_data(zj), rg_bv_len(zj), err);
+assert_eq(cie_xyz_x(z1), 0x8000000000000000, "-0.0 keeps its sign through JSON");
+rg_bv_free(zj); cie_xyz_free(nz); cie_xyz_free(z1);
+
+# ================================================================
+test_group("errors and the API");
+
+# The three codes: NONE, PARSE (serde_json's Syntax and Eof), INVALID_FORMAT
+# (its Data). The oracle pins all 435 cases against serde_json; these are the
+# readable few.
+assert_eq(srgba_from_json("{\"r\":1,\"g\":2,\"b\":3,\"a\":4", 24, err), 0, "an unclosed object");
+assert_eq(load64(err), RG_ERR_PARSE, "is PARSE");
+assert_eq(srgba_from_json("{\"r\":1,\"g\":2,\"b\":3}", 21, err), 0, "a missing field");
+assert_eq(load64(err), RG_ERR_INVALID_FORMAT, "is INVALID_FORMAT");
+assert_eq(srgba_from_json("{\"r\":256,\"g\":2,\"b\":3,\"a\":4}", 28, err), 0, "a u8 of 256");
+assert_eq(load64(err), RG_ERR_INVALID_FORMAT, "is INVALID_FORMAT");
+assert_eq(blend_mode_from_json("\"Nope\"", 6, err), RG_ERR_INVALID_FORMAT,
+  "an enum decode returns the negative code itself");
+assert_eq(load64(err), RG_ERR_INVALID_FORMAT, "and reports it through err_out too");
+assert_eq(blend_mode_from_json("\"Normal\"", 8, err), 0, "variant 0 (Normal) decodes to 0");
+assert_eq(load64(err), RG_ERR_NONE, "which err_out tells apart from a failure");
+assert_eq(srgba_from_json(0, 0, err), 0, "null text decodes nothing");
+assert_eq(load64(err), RG_ERR_PARSE, "as an empty document");
+# The length is honoured: the bytes past it are never read.
+assert_eq(blend_mode_from_json("\"Screen\" garbage", 8, err), 2, "only `len` bytes are read (Screen is 2)");
+assert_eq(srgba_to_json(0), 0, "encoding a null record gives 0");
+assert_eq(tone_curve_to_json(0), 0, "for every type");
+
+tone_curve_free(tc0);
+tone_curve_free(tc3);
+
+var exit_code = assert_summary();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

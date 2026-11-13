@@ -365,11 +365,11 @@ The lesson generalises: when a ported function is dramatically slower than its
 Rust original and the arithmetic looks equivalent, measure the primitives it
 sits on before rewriting the function.
 
-⚠ The consumer-side workaround (`bv_uninit`) has a hazard that **cannot be
+⚠ The consumer-side workaround (`rg_bv_uninit`) has a hazard that **cannot be
 tested**: large allocations come from fresh mmap, so an incorrect use still
 reads as zero in every test and only breaks once the allocator recycles. A
 mutation swapping `affine_transform` to the uninitialised path SURVIVED the full
-suite for exactly that reason. The comment on `bv_uninit` is the only guard —
+suite for exactly that reason. The comment on `rg_bv_uninit` is the only guard —
 treat it as review discipline, not a tested invariant.
 
 ### Prove a vector path actually runs

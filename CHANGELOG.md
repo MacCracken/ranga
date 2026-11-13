@@ -2,6 +2,175 @@
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-11-13
+
+Milestone 2.4.x, "surface completion". Outside the GPU layer, every MISSING and
+PARTIAL item in the parity review is now ported:
+- the serde surface, as JSON in serde_json's exact form;
+- `Lut3d::from_cube`;
+- Clone and PartialEq on every record that derived them;
+- writable fields and constructors for every struct with pub fields;
+- `into_data`;
+- the Rust spectral names.
+
+The parity totals move from 207 / 9 / 29 / 19 / 33 / 6 to **225 parity, 21 improved,
+28 divergent, 9 partial, 14 missing, 6 suspect**. Every one of the 14 MISSING items
+left is GPU.
+
+**Breaking:** `bv_*` is renamed `rg_bv_*`, and `xorshift64_*` is now private
+(ADR 006). `icc_lut_profile_curve_len` takes a channel. There are no known
+consumers.
+
+### Added
+
+- **JSON codecs for the 14 types Rust derived serde on**
+  ([ADR 008](docs/adr/008-serde-codecs-are-json-in-serde-json-form.md),
+  `src/serde.cyr`):
+  - the types: the 8 colour structs, `PixelFormat`, `ColorSpace`, `BlendMode`,
+    `ToneCurve`, `Affine` and `Perspective`;
+  - the API: `<type>_to_json(v)` returns an `rg_bv` of compact JSON.
+    `<type>_from_json(text, len, err_out)` returns the record, or for the three enums
+    the discriminant;
+  - the error codes: `RG_ERR_PARSE` for serde_json's Syntax and Eof errors,
+    `RG_ERR_INVALID_FORMAT` for its Data errors;
+  - the wire form is serde-derive's, as serde_json 1.0.151 (the version rust-old
+    pins) writes and reads it:
+    - structs are objects in field order, and also decode from serde's array form;
+    - unit enums are their variant name, and also decode from `{"Name":null}`;
+    - ToneCurve is externally tagged;
+    - the colour structs `deny_unknown_fields`; Affine and Perspective skip unknown
+      fields at any depth;
+    - floats use the shortest round-trip text, in serde_json's notation (`0.1`,
+      `1.0`, `1e+30`), and NaN and ±inf are `null`;
+    - a u8 takes integer literals only (`-0`, `1.0` and `256` are refused), and
+      `1e400` is a syntax error;
+  - **checked against serde_json itself** by a new oracle group:
+    - encoding: 3,525 encodings are byte-identical;
+    - decoding: all 435 hand-written inputs get the same accept or reject and
+      error category, and every u8, f32 and enum value is identical;
+    - long decimals: 4,000 f32 decimals of 17 to 25 digits are identical;
+  - **the one difference is that decoded numbers are correctly rounded.**
+    serde_json's default float parser is best effort. Against Python's `float`,
+    ranga is right on 4,000 of 4,000 long f64 decimals, and serde_json on 2,782. The
+    oracle accepts f64 decode values within 1 ulp (2 for the long decimals).
+- **`lut3d_from_cube(text, len, err_out)`**, Rust's `Lut3d::from_cube` (`src/cube.cyr`).
+  Rust's text grammar, in Rust's order:
+  - `lines()`, with `trim` and `split_whitespace` on Unicode White_Space (NBSP,
+    U+2000..U+200A, U+3000 and the rest, as UTF-8);
+  - prefix-matched keywords, where the last `LUT_3D_SIZE` wins;
+  - data lines of fewer than three tokens are ignored;
+  - every failure is `RG_ERR_OTHER`, as Rust's are all `RangaError::Other`.
+
+  Numbers follow Rust's `usize::from_str` and its strict `f32::from_str`, correctly
+  rounded straight to f32. That takes an exact tie-break wherever rounding to f64
+  first lands on an f32 midpoint. `tests/cube.tcyr` checks 124 values against an
+  exact rational oracle, 46 of them double-rounding traps that a naive f64-then-f32
+  parse gets wrong.
+- **`.cube` domains** ([ADR 007](docs/adr/007-cube-domain-is-honoured.md)). Rust skipped
+  `DOMAIN_MIN`/`DOMAIN_MAX`, so it applied any non-[0, 1] LUT wrongly, and it
+  rejected Resolve's `LUT_3D_INPUT_RANGE`.
+  - Both now set a per-channel domain (`lut3d_domain_min/max`, `lut3d_set_domain`),
+    and lookup maps each input through it.
+  - A [0, 1] LUT is bit-identical to Rust's, with no per-pixel cost.
+  - `lut3d_17cube_1080p` measured 0.96× of 2.3.3.
+- **`src/decimal.cyr`:** exact decimal↔binary conversion, shared by the two above.
+  - The exact expansion of any f64, subnormals included.
+  - Correctly rounded decimal→f32.
+  - The shortest round-trip digits in serde_json's notation, checked against ryu on
+    43,921 floats. ryu's digits and thresholds are zmij's; zmij only adds the `+` in
+    `e+38`.
+- **Clone and PartialEq** where Rust derived them:
+  - `_clone` and `_eq` on all 8 colour structs;
+  - `srgba_hash` (Srgba's Hash: its four bytes, injective);
+  - `affine_clone`/`_eq` and `perspective_clone`/`_eq`;
+  - deep `lut3d_clone`, `tone_curve_clone`, `icc_profile_clone` and
+    `icc_lut_profile_clone`.
+
+  `_eq` is IEEE `==` field by field, as derived PartialEq is: a NaN field is unequal
+  even to itself, and −0.0 equals +0.0.
+- **Writable records**, for Rust's pub fields:
+  - a setter for every colour-struct field (`lin_rgba_set_r`, …, and `srgba_set_r`
+    beside `srgba_set`);
+  - `affine_set_a`..`_ty` and `perspective_set_m`;
+  - `tone_curve_table_at`, `tone_curve_set_table_at` and
+    `tone_curve_set_gamma_value`;
+  - `pixel_buffer_into_bv`, Rust's `into_data`.
+- **ICC constructors**, Rust's struct literals:
+  - `icc_profile_new` and `icc_lut_profile_new`, each with setters for every field;
+  - they refuse what Rust would only panic on later: a null curve, a grid of 0, or a
+    LUT whose length is not grid³·3.
+- **Rust's spectral names**, beside prakash's: `VISIBLE_MIN_NM`, `VISIBLE_MAX_NM` and
+  `CIE_1931_2DEG()` with `CIE_1931_2DEG_LEN`. The table is a function because
+  prakash builds it on first use.
+
+### Changed
+
+- **`bv_*` → `rg_bv_*`, and `xorshift64_*` → private `_fk_xorshift64_*`**
+  ([ADR 006](docs/adr/006-bytevec-is-rg-bv-and-xorshift-is-private.md)).
+  - Cyrius resolves a duplicate name as last-definition-wins with only a warning,
+    so a consumer's own `bv_len` would have replaced ranga's.
+  - The PRNG was private in Rust.
+  - To migrate, rename `\bbv_` → `rg_bv_` (276 sites in this tree).
+- **`IccLutProfile` keeps one length per input curve** (80 → 96 bytes).
+  `icc_lut_profile_curve_len(p, ch)` takes the channel. Rust's three curves are
+  separate Vecs, and a constructed profile can give them different lengths. `apply`
+  now samples each curve over its own length; a parsed profile's three are always
+  equal, so its output is unchanged.
+- `Lut3d` is 48 bytes (was 16): the domain and its cached flag.
+- The colour module header documents all eight layouts, Hsl, Cmyk, Oklab and Oklch
+  included.
+
+### Tests
+
+**2,839 assertions across 26 suites**, up from 2,268 across 24. All of them pass.
+- `cube.tcyr` (212) and `serde.tcyr` (53) are new. The serde suite holds 6,000
+  random round trips, the ColorSpace additions, `null` and `-0.0`, and the API edges.
+- `color.tcyr` gains 136 assertions: every setter, clone and `_eq` field, the IEEE
+  cases and null.
+- `icc.tcyr` gains 107, `transform.tcyr` 41, `filter_kernel.tcyr` 7, `pixel.tcyr` 5 and
+  `spectral.tcyr` 4.
+- `oracle_golden.tcyr` gains 6: three new exact digests (`serde_enc`, `serde_dec`,
+  `serde_long.f32`), 55 exact groups in all.
+- The oracle compares 2,116,558 values. It is clean except for its accepted groups:
+  ADR 002's three, ADR 004's bilateral, and ADR 008's `serde_dec.f64` and
+  `serde_long.f64`.
+- `fuzz_lut` runs Rust's two `from_cube` strategies plus two of its own:
+  - text drawn from the format's alphabet;
+  - every f32 written as its exact decimal, which must round-trip bit for bit;
+  - midpoint traps, which must round up.
+
+  It passes 2,000 iterations under `--poison`.
+- Mutation checks, run once:
+  - with the f32 tie-break removed, exactly the 46 traps fail;
+  - with DOMAIN parsing disabled, 7 domain tests fail.
+
+### Bundles
+
+The core bundle is 10,839 lines, up from 8,091: `decimal.cyr`, `cube.cyr` and
+`serde.cyr`, plus the record surface. The `.deps` sidecars are unchanged.
+`cyrius.cyml` lists the three new modules in all four profiles.
+
+### Oracle
+
+- `scripts/oracle/make_serde_inputs.py` generates the 435 decode inputs for both
+  sides:
+  - `rust/src/serde_inputs.rs`;
+  - `serde_inputs.cyr`, hex-encoded so control bytes and invalid UTF-8 survive.
+- `probe_serde.cyr` is the Cyrius side.
+- The Rust driver pins `serde = "=1.0.229"` and `serde_json = "=1.0.151"`, the
+  versions `rust-old/Cargo.lock` already resolves, so no new crate is built.
+
+### Performance
+
+129 benchmarks have a median of 0.98× of 2.3.3: no change. The load average was 2 to
+3.6 from other work.
+
+### Docs
+
+ADRs 006, 007 and 008. The parity doc is updated for 2.4.0. The two Rust-era guides
+that advertised `from_cube` (`filters.md`, `migration-guide.md`) now give the Cyrius
+call too.
+
 ## [2.3.3] - 2026-11-13
 
 Closes milestone 2.3.x. ranga no longer hands its SPIR-V to a backend that cannot
@@ -98,13 +267,17 @@ themselves, so it bypasses the guard and would fault the channel again.
   - `dist/ranga-spectral.deps` is `freelist` alone, down from `sakshi`, `ganita` and
     `freelist`. Its `# Requires` block drops the `sakshi` and `ganita` includes;
   - hisab is now a test-scope dependency of prakash, so a ranga resolve no longer
-    fetches hisab, or the sakshi package that came with it. `cyrius.lock` keeps 69
-    entries, with 5 commit pins instead of 7. `lib/sakshi.cyr` stays: it is a
-    declared stdlib leaf, byte-identical to hisab's copy;
-  - `lib/hisab.cyr` (3.6 MB) is no longer in the declared footprint, and nothing
-    includes it. It is still in `lib/` and the lock, pending removal by
-    `rm lib/hisab.cyr && cyrius deps --lock`.
-- `cyrius deps --verify --features spectral,hwaccel,gpu`: 69 verified, 0 failed.
+    fetches hisab, or the sakshi package that came with it. `cyrius.lock` has 5
+    commit pins instead of 7. `lib/sakshi.cyr` stays: it is a declared stdlib leaf,
+    byte-identical to hisab's copy;
+  - **`lib/hisab.cyr` (3.6 MB, 70,654 lines) is removed.** It fell outside the
+    declared footprint, and nothing in ranga includes it or calls any of its 1,155
+    functions. ranga never depended on hisab directly, in Rust or Cyrius: Rust's
+    `Cargo.toml` never named it, and it came in only through prakash. ranga's math
+    comes from the `math` and `ganita` stdlib leaves, which are unchanged. Removed
+    with `rm lib/hisab.cyr && cyrius deps --lock`, so the lock has 68 entries,
+    down from 69.
+- `cyrius deps --verify --features spectral,hwaccel,gpu`: 68 verified, 0 failed.
 - Unchanged, because each is still its newest release: cyrius 6.7.18, mabda 4.2.0,
   ai-hwaccel 2.5.6.
 

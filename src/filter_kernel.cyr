@@ -223,12 +223,12 @@ fn _fk_separable_blur(buf, kernel, klen, radius, err_out) {
     if (out == 0) { return 0; }
     var n = w * h;
     if (n == 0) { store64(err_out, RG_ERR_NONE); return out; }
-    # bv_uninit, not bv_zeroed: the horizontal pass writes every element.
-    var acc = bv_uninit(n * 12);
+    # rg_bv_uninit, not rg_bv_zeroed: the horizontal pass writes every element.
+    var acc = rg_bv_uninit(n * 12);
     if (acc == 0) { pixel_buffer_free(out); store64(err_out, RG_ERR_ALLOCATION); return 0; }
-    _fk_blur_pass_h(pixel_buffer_data(buf), bv_data(acc), w, h, kernel, klen, radius);
-    _fk_blur_pass_v(bv_data(acc), pixel_buffer_data(buf), pixel_buffer_data(out), w, h, kernel, klen, radius);
-    bv_free(acc);
+    _fk_blur_pass_h(pixel_buffer_data(buf), rg_bv_data(acc), w, h, kernel, klen, radius);
+    _fk_blur_pass_v(rg_bv_data(acc), pixel_buffer_data(buf), pixel_buffer_data(out), w, h, kernel, klen, radius);
+    rg_bv_free(acc);
     store64(err_out, RG_ERR_NONE);
     return out;
 }
@@ -362,7 +362,17 @@ fn vignette(buf, strength) {
 # ── Lut3d ────────
 #   +0  size   i64, the cube edge length
 #   +8  data   pointer to size^3 * 3 f32 bit patterns, laid out r + g*size + b*size^2
-var _FK_LUT_SIZE = 16;
+#   +16 domain min, f32 x 3 (r, g, b)     +28 domain max, f32 x 3
+#   +40 1 if the domain is the default [0, 1] on every channel, else 0
+#
+# THE DOMAIN IS A RANGA ADDITION (ADR 007). A .cube file's DOMAIN_MIN/DOMAIN_MAX
+# give the input range the table spans; the default is [0, 1] per channel. Rust's
+# Lut3d had no domain field and its parser skipped those lines, so a LUT whose
+# domain was not [0, 1] was looked up as if it were, and every output was wrong.
+# Here lookup maps each input through (v - min) / (max - min) first. For the
+# default domain that map is skipped, so every [0, 1] LUT is bit-identical to
+# Rust's. The +40 flag caches that test, so lookup pays nothing for it per pixel.
+var _FK_LUT_SIZE = 48;
 
 #must_use
 fn lut3d_new(size) {
@@ -379,7 +389,74 @@ fn lut3d_new(size) {
     if (d == 0) { fl_free(l); return 0; }
     store64(l, size);
     store64(l + 8, d);
+    _fk_lut_domain_default(l);
     return l;
+}
+
+# [0, 1] on all three channels: the .cube default.
+fn _fk_lut_domain_default(l) {
+    var c = 0;
+    while (c < 3) {
+        store32(l + 16 + c * 4, 0);
+        store32(l + 28 + c * 4, f32_from(F64_ONE));
+        c = c + 1;
+    }
+    store64(l + 40, 1);
+    return RG_ERR_NONE;
+}
+
+# Channel `c`'s domain bounds, as f32 bit patterns. [0, 1] unless set.
+#must_use
+fn lut3d_domain_min(l, c) { return load32(l + 16 + c * 4); }
+#must_use
+fn lut3d_domain_max(l, c) { return load32(l + 28 + c * 4); }
+
+# Set channel `c`'s input domain to [min, max] (f32 bit patterns), the .cube
+# DOMAIN_MIN/DOMAIN_MAX pair for that channel. The format requires min < max:
+# anything else, a non-finite bound or a channel outside 0..3 is
+# RG_ERR_INVALID_PARAMETER, and the domain is left unchanged.
+fn lut3d_set_domain(l, c, min, max) {
+    if (c < 0 || c > 2) { return RG_ERR_INVALID_PARAMETER; }
+    if (_fk_lut_domain_ok(min, max) == 0) { return RG_ERR_INVALID_PARAMETER; }
+    store32(l + 16 + c * 4, min);
+    store32(l + 28 + c * 4, max);
+    store64(l + 40, _fk_lut_domain_is_default(l));
+    return RG_ERR_NONE;
+}
+
+# 1 if [min, max] is a usable domain: both finite and min < max.
+#must_use
+fn _fk_lut_domain_ok(min, max) {
+    if ((min & 0x7F800000) == 0x7F800000) { return 0; }
+    if ((max & 0x7F800000) == 0x7F800000) { return 0; }
+    var lo: f32 = min;
+    var hi: f32 = max;
+    if (lo < hi) { return 1; }
+    return 0;
+}
+
+# 1 if every channel has the default [0, 1] domain, compared by bits. Lookup then
+# skips the normalisation, which keeps a default LUT bit-identical to Rust's.
+#must_use
+fn _fk_lut_domain_is_default(l) {
+    var one = f32_from(F64_ONE);
+    var c = 0;
+    while (c < 3) {
+        if (load32(l + 16 + c * 4) != 0) { return 0; }
+        if (load32(l + 28 + c * 4) != one) { return 0; }
+        c = c + 1;
+    }
+    return 1;
+}
+
+# Map `v` from channel `c`'s domain onto [0, 1], in f32: (v - min) / (max - min).
+# The clamp that follows in lookup handles inputs outside the domain, as the
+# .cube format specifies.
+#must_use
+fn _fk_lut_normalize(l, c, v) {
+    var lo: f32 = load32(l + 16 + c * 4);
+    var hi: f32 = load32(l + 28 + c * 4);
+    return _fk_div(_fk_sub(v, lo), _fk_sub(hi, lo));
 }
 
 #must_use
@@ -392,6 +469,22 @@ fn lut3d_free(l) {
     if (d != 0) { fl_free(d); }
     fl_free(l);
     return RG_ERR_NONE;
+}
+
+# Rust's `#[derive(Clone)]` on Lut3d: a DEEP copy. The table is heap-owned, so a
+# copy of the 16-byte header alone would share it, and freeing either LUT would
+# leave the other reading freed memory. Returns 0 if `l` is 0 or an allocation
+# fails.
+#must_use
+fn lut3d_clone(l) {
+    if (l == 0) { return 0; }
+    var size = load64(l);
+    var c = lut3d_new(size);
+    if (c == 0) { return 0; }
+    memcpy(load64(c + 8), load64(l + 8), size * size * size * 3 * 4);
+    # The domain is part of the value (ADR 007), and so is its cached flag.
+    memcpy(c + 16, l + 16, 32);
+    return c;
 }
 
 # Entry (r, g, b), channel c, as an f32 bit pattern.
@@ -410,6 +503,11 @@ fn lut3d_set(l, r, g, b, c, v) {
 # Trilinear lookup. `r`, `g`, `b` are f32 bit patterns in [0,1]; writes three
 # f32 bit patterns to `out`.
 fn lut3d_lookup(l, r, g, b, out) {
+    if (load64(l + 40) == 0) {
+        r = _fk_lut_normalize(l, 0, r);
+        g = _fk_lut_normalize(l, 1, g);
+        b = _fk_lut_normalize(l, 2, b);
+    }
     var s = load64(l);
     var n: f32 = f32_from(f64_from(s - 1));
     var zero: f32 = f32_from(0);
@@ -497,6 +595,11 @@ fn apply_lut3d(buf, l) {
 # ── Xorshift64 ────────
 # The PRNG both noise filters use. State is one i64.
 #
+# PRIVATE, as it was in Rust (`fn xorshift64`, not `pub`). Up to 2.3.3 these were
+# public `xorshift64_*`, an API commitment Rust never made. 2.4.0 renamed them
+# under the module's `_fk_` prefix (ADR 006). The noise filters take a seed, which
+# is the whole reproducibility contract a caller needs.
+#
 # ⚠ `x ^= x >> 7` is a LOGICAL shift on Rust's u64. Cyrius `>>` is logical and
 # `>>>` is arithmetic — the REVERSE of JS/Java — so `>>` is correct here. Using
 # `>>>` would sign-extend and diverge the entire sequence the moment the state's
@@ -504,7 +607,7 @@ fn apply_lut3d(buf, l) {
 var _FK_SEED_DEFAULT = 0x123456789ABCDEF0;
 
 #must_use
-fn xorshift64_new(seed) {
+fn _fk_xorshift64_new(seed) {
     var s = fl_alloc(8);
     if (s == 0) { return 0; }
     # A zero state is a fixed point of xorshift — it would emit zeros forever —
@@ -515,10 +618,10 @@ fn xorshift64_new(seed) {
     return s;
 }
 
-fn xorshift64_free(s) { if (s != 0) { fl_free(s); } return RG_ERR_NONE; }
+fn _fk_xorshift64_free(s) { if (s != 0) { fl_free(s); } return RG_ERR_NONE; }
 
 #must_use
-fn xorshift64_next(s) {
+fn _fk_xorshift64_next(s) {
     var x = load64(s);
     x = x ^ (x << 13);
     x = x ^ (x >> 7);
@@ -531,12 +634,12 @@ fn xorshift64_next(s) {
 # Box-Muller, despite what the module docs elsewhere suggest. Range is roughly
 # [-3, 3]. Returns an f32 bit pattern.
 #must_use
-fn xorshift64_next_gaussian(s) {
+fn _fk_xorshift64_next_gaussian(s) {
     var sum: f32 = f32_from(0);
     var scale: f32 = f32_from(65535.0);
     var i = 0;
     while (i < 6) {
-        var raw = xorshift64_next(s) & 0xFFFF;
+        var raw = _fk_xorshift64_next(s) & 0xFFFF;
         var u: f32 = _fk_div(f32_from(f64_from(raw)), scale);
         sum = sum + u;
         i = i + 1;
@@ -547,8 +650,8 @@ fn xorshift64_next_gaussian(s) {
 
 # Uniform in [0,1] from the low 32 bits.
 #must_use
-fn xorshift64_next_f32(s) {
-    var raw = xorshift64_next(s) & 0xFFFFFFFF;
+fn _fk_xorshift64_next_f32(s) {
+    var raw = _fk_xorshift64_next(s) & 0xFFFFFFFF;
     var d: f32 = f32_from(f64_from(raw));
     # 4294967295.0 as a DECIMAL literal is 10 significant digits, which the
     # lexer gets silently wrong. f64_from(int) is exact below 2^53.
@@ -563,7 +666,7 @@ fn xorshift64_next_f32(s) {
 fn noise_gaussian(buf, amount, seed) {
     var rc = _fk_validate_rgba8(buf);
     if (rc != RG_ERR_NONE) { return rc; }
-    var rng = xorshift64_new(seed);
+    var rng = _fk_xorshift64_new(seed);
     if (rng == 0) { return RG_ERR_ALLOCATION; }
     var f255: f32 = f32_from(255.0);
     var amt: f32 = amount;
@@ -574,7 +677,7 @@ fn noise_gaussian(buf, amount, seed) {
     while (i < n) {
         var c = 0;
         while (c < 3) {
-            var g: f32 = xorshift64_next_gaussian(rng);
+            var g: f32 = _fk_xorshift64_next_gaussian(rng);
             var noise: f32 = _fk_mul(g, scale);
             var v: f32 = _fk_u8_to_f32(load8(p + i * 4 + c));
             store8(p + i * 4 + c, _fk_f32_to_u8(_fk_add(v, noise)));
@@ -582,7 +685,7 @@ fn noise_gaussian(buf, amount, seed) {
         }
         i = i + 1;
     }
-    xorshift64_free(rng);
+    _fk_xorshift64_free(rng);
     return RG_ERR_NONE;
 }
 
@@ -593,7 +696,7 @@ fn noise_gaussian(buf, amount, seed) {
 fn noise_salt_pepper(buf, density, seed) {
     var rc = _fk_validate_rgba8(buf);
     if (rc != RG_ERR_NONE) { return rc; }
-    var rng = xorshift64_new(seed);
+    var rng = _fk_xorshift64_new(seed);
     if (rng == 0) { return RG_ERR_ALLOCATION; }
     var dens = f32_to(density);
     var half = f64_div(dens, 2.0);
@@ -601,7 +704,7 @@ fn noise_salt_pepper(buf, density, seed) {
     var n = pixel_buffer_pixel_count(buf);
     var i = 0;
     while (i < n) {
-        var r = f32_to(xorshift64_next_f32(rng));
+        var r = f32_to(_fk_xorshift64_next_f32(rng));
         var q = p + i * 4;
         if (f64_lt(r, half) == 1) {
             store8(q, 0); store8(q + 1, 0); store8(q + 2, 0);
@@ -613,7 +716,7 @@ fn noise_salt_pepper(buf, density, seed) {
         }
         i = i + 1;
     }
-    xorshift64_free(rng);
+    _fk_xorshift64_free(rng);
     return RG_ERR_NONE;
 }
 

@@ -7,6 +7,8 @@
 # skipped (accepted within a bound by an ADR, see compare.py): oklch_to_oklab.b
 # skipped (accepted within a bound by an ADR, see compare.py): color_temperature
 # skipped (accepted within a bound by an ADR, see compare.py): bilateral
+# skipped (accepted within a bound by an ADR, see compare.py): serde_dec.f64
+# skipped (accepted within a bound by an ADR, see compare.py): serde_long.f64
 
 fn golden_check_all() {
     golden_expect("srgb_to_linear", 256, 0xF9DF3F28CEB155BA);
@@ -61,5 +63,8 @@ fn golden_check_all() {
     golden_expect("repack.rgba_to_f32", 6, 0xEDE9B27E87BF5C80);
     golden_expect("repack.rgb_to_rgba", 6, 0x333C3BC9B4567E16);
     golden_expect("blend_pixel", 786432, 0x907E7D11F4531BF0);
+    golden_expect("serde_enc", 3525, 0xC0208EEA2DC7921F);
+    golden_expect("serde_dec", 956, 0x2F822D93A1A28F63);
+    golden_expect("serde_long.f32", 4000, 0xBCCFD0712F15A1B6);
     return 0;
 }

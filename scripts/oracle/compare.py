@@ -18,11 +18,15 @@ from collections import OrderedDict, defaultdict
 # The bound is in the group's distance unit (ULPs for floats).
 _ADR002 = "ADR 002: glibc's f32 libm is not correctly rounded; ranga's is"
 _ADR004 = "ADR 004: bilateral rounds its weighted mean; Rust truncated it"
+_ADR008 = ("ADR 008: JSON numbers decode correctly rounded; serde_json's default "
+           "float parser is best effort")
 ACCEPTED = {
     "oklch_to_oklab.a": (2, _ADR002),
     "oklch_to_oklab.b": (2, _ADR002),
     "color_temperature": (2, _ADR002),
     "bilateral": (1, _ADR004),
+    "serde_dec.f64": (1, _ADR008),
+    "serde_long.f64": (2, _ADR008),
 }
 
 

@@ -160,7 +160,7 @@ fn pixel_buffer_new(bv, width, height, format, err_out) {
     # panics instead of returning a code.
     if (want == RG_ERR_ALLOCATION) { store64(err_out, RG_ERR_BUFFER_TOO_SMALL); return 0; }
     if (ranga_is_err(want) == 1) { store64(err_out, want); return 0; }
-    if (bv_len(bv) != want) {
+    if (rg_bv_len(bv) != want) {
         store64(err_out, RG_ERR_DIMENSION_MISMATCH);
         return 0;
     }
@@ -181,10 +181,10 @@ fn pixel_buffer_new(bv, width, height, format, err_out) {
 fn pixel_buffer_zeroed(width, height, format, err_out) {
     var want = pixel_format_checked_buffer_size(format, width, height);
     if (ranga_is_err(want) == 1) { store64(err_out, want); return 0; }
-    var bv = bv_zeroed(want);
+    var bv = rg_bv_zeroed(want);
     if (bv == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
     var b = fl_alloc(_PB_SIZE);
-    if (b == 0) { bv_free(bv); store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    if (b == 0) { rg_bv_free(bv); store64(err_out, RG_ERR_ALLOCATION); return 0; }
     store64(b, bv);
     store64(b + 8, width);
     store64(b + 16, height);
@@ -193,7 +193,7 @@ fn pixel_buffer_zeroed(width, height, format, err_out) {
     return b;
 }
 
-# Same shape as pixel_buffer_zeroed but WITHOUT the zero fill — see bv_uninit.
+# Same shape as pixel_buffer_zeroed but WITHOUT the zero fill — see rg_bv_uninit.
 # Only for callers that write every byte before reading any. A caller that
 # skips pixels (affine/perspective leave them transparent) must use the zeroed
 # form; using this there leaks allocator garbage into the image.
@@ -201,10 +201,10 @@ fn pixel_buffer_zeroed(width, height, format, err_out) {
 fn pixel_buffer_uninit(width, height, format, err_out) {
     var want = pixel_format_checked_buffer_size(format, width, height);
     if (ranga_is_err(want) == 1) { store64(err_out, want); return 0; }
-    var bv = bv_uninit(want);
+    var bv = rg_bv_uninit(want);
     if (bv == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
     var b = fl_alloc(_PB_SIZE);
-    if (b == 0) { bv_free(bv); store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    if (b == 0) { rg_bv_free(bv); store64(err_out, RG_ERR_ALLOCATION); return 0; }
     store64(b, bv);
     store64(b + 8, width);
     store64(b + 16, height);
@@ -217,9 +217,9 @@ fn pixel_buffer_uninit(width, height, format, err_out) {
 fn pixel_buffer_bv(b) { return load64(b); }
 # Raw pointer to the first pixel byte — the hot-loop entry point.
 #must_use
-fn pixel_buffer_data(b) { return bv_data(load64(b)); }
+fn pixel_buffer_data(b) { return rg_bv_data(load64(b)); }
 #must_use
-fn pixel_buffer_len(b) { return bv_len(load64(b)); }
+fn pixel_buffer_len(b) { return rg_bv_len(load64(b)); }
 #must_use
 fn pixel_buffer_width(b) { return load64(b + 8); }
 #must_use
@@ -259,7 +259,7 @@ fn pixel_buffer_get_rgba(b, x, y, out) {
     if (y < 0) { return 0; }
     if (x >= load64(b + 8)) { return 0; }
     if (y >= load64(b + 16)) { return 0; }
-    var p = bv_data(load64(b)) + (y * load64(b + 8) + x) * 4;
+    var p = rg_bv_data(load64(b)) + (y * load64(b + 8) + x) * 4;
     store8(out, load8(p));
     store8(out + 1, load8(p + 1));
     store8(out + 2, load8(p + 2));
@@ -275,7 +275,7 @@ fn pixel_buffer_set_rgba(b, x, y, px) {
     if (y < 0) { return 0; }
     if (x >= load64(b + 8)) { return 0; }
     if (y >= load64(b + 16)) { return 0; }
-    var p = bv_data(load64(b)) + (y * load64(b + 8) + x) * 4;
+    var p = rg_bv_data(load64(b)) + (y * load64(b + 8) + x) * 4;
     store8(p, load8(px));
     store8(p + 1, load8(px + 1));
     store8(p + 2, load8(px + 2));
@@ -285,10 +285,10 @@ fn pixel_buffer_set_rgba(b, x, y, px) {
 
 #must_use
 fn pixel_buffer_clone(b) {
-    var bv = bv_clone(load64(b));
+    var bv = rg_bv_clone(load64(b));
     if (bv == 0) { return 0; }
     var c = fl_alloc(_PB_SIZE);
-    if (c == 0) { bv_free(bv); return 0; }
+    if (c == 0) { rg_bv_free(bv); return 0; }
     store64(c, bv);
     store64(c + 8, load64(b + 8));
     store64(c + 16, load64(b + 16));
@@ -298,9 +298,24 @@ fn pixel_buffer_clone(b) {
 
 fn pixel_buffer_free(b) {
     if (b == 0) { return RG_ERR_NONE; }
-    bv_free(load64(b));
+    rg_bv_free(load64(b));
     fl_free(b);
     return RG_ERR_NONE;
+}
+
+# Rust's `PixelBuffer::into_data`: consume the buffer and hand back its pixel
+# bytes. Frees the 32-byte header only and returns the bytevec, which the caller
+# now owns (rg_bv_free). `b` must not be used afterwards. 0 for a null buffer.
+#
+# ⚠ NOT pixel_buffer_bv. That one BORROWS: the buffer still owns the bytevec, and
+# freeing either afterwards frees the bytes twice. This is the only way to keep
+# the pixel bytes past the buffer without copying them.
+#must_use
+fn pixel_buffer_into_bv(b) {
+    if (b == 0) { return 0; }
+    var bv = load64(b);
+    fl_free(b);
+    return bv;
 }
 
 # ── PixelView / PixelViewMut ────────
@@ -353,14 +368,14 @@ fn pixel_view_pixel_count(v) { return load64(v + 8) * load64(v + 16); }
 # Borrow a buffer as a view. The view must not outlive `b`.
 #must_use
 fn pixel_buffer_as_view(b, err_out) {
-    return _pixel_view_make(bv_data(load64(b)), load64(b + 8), load64(b + 16),
-      load64(b + 24), bv_len(load64(b)), err_out);
+    return _pixel_view_make(rg_bv_data(load64(b)), load64(b + 8), load64(b + 16),
+      load64(b + 24), rg_bv_len(load64(b)), err_out);
 }
 
 #must_use
 fn pixel_buffer_as_view_mut(b, err_out) {
-    return _pixel_view_make(bv_data(load64(b)), load64(b + 8), load64(b + 16),
-      load64(b + 24), bv_len(load64(b)), err_out);
+    return _pixel_view_make(rg_bv_data(load64(b)), load64(b + 8), load64(b + 16),
+      load64(b + 24), rg_bv_len(load64(b)), err_out);
 }
 
 # Copy a view into a new owned buffer. Rust's PixelBuffer::from_view.
@@ -371,11 +386,11 @@ fn pixel_buffer_from_view(v, err_out) {
     var f = load64(v + 24);
     var want = pixel_format_checked_buffer_size(f, w, h);
     if (ranga_is_err(want) == 1) { store64(err_out, want); return 0; }
-    var bv = bv_zeroed(want);
+    var bv = rg_bv_zeroed(want);
     if (bv == 0) { store64(err_out, RG_ERR_ALLOCATION); return 0; }
-    if (want > 0) { memcpy(bv_data(bv), load64(v), want); }
+    if (want > 0) { memcpy(rg_bv_data(bv), load64(v), want); }
     var b = fl_alloc(_PB_SIZE);
-    if (b == 0) { bv_free(bv); store64(err_out, RG_ERR_ALLOCATION); return 0; }
+    if (b == 0) { rg_bv_free(bv); store64(err_out, RG_ERR_ALLOCATION); return 0; }
     store64(b, bv);
     store64(b + 8, w);
     store64(b + 16, h);
@@ -441,7 +456,7 @@ fn buffer_pool_acquire(p, size) {
     var best_cap = 0;
     var i = 0;
     while (i < len) {
-        var cap = bv_cap(load64(slots + i * 8));
+        var cap = rg_bv_cap(load64(slots + i * 8));
         if (cap >= size) {
             if (best < 0) { best = i; best_cap = cap; }
             if (cap < best_cap) { best = i; best_cap = cap; }
@@ -452,11 +467,11 @@ fn buffer_pool_acquire(p, size) {
         var buf = load64(slots + best * 8);
         store64(slots + best * 8, load64(slots + (len - 1) * 8));
         store64(p + 8, len - 1);
-        bv_clear(buf);
-        bv_resize_zero(buf, size);
+        rg_bv_clear(buf);
+        rg_bv_resize_zero(buf, size);
         return buf;
     }
-    return bv_zeroed(size);
+    return rg_bv_zeroed(size);
 }
 
 # Return a buffer for reuse. If the pool is full the buffer is FREED, not
@@ -466,14 +481,14 @@ fn buffer_pool_release(p, buf) {
     if (buf == 0) { return RG_ERR_NONE; }
     var len = load64(p + 8);
     var max = load64(p + 16);
-    if (len >= max) { bv_free(buf); return RG_ERR_NONE; }
+    if (len >= max) { rg_bv_free(buf); return RG_ERR_NONE; }
     var cap = load64(p + 24);
     if (len == cap) {
         var ncap = cap * 2;
         if (ncap < 4) { ncap = 4; }
         if (ncap > max) { ncap = max; }
         var ns = fl_alloc(ncap * 8);
-        if (ns == 0) { bv_free(buf); return RG_ERR_ALLOCATION; }
+        if (ns == 0) { rg_bv_free(buf); return RG_ERR_ALLOCATION; }
         var old = load64(p);
         if (old != 0) {
             memcpy(ns, old, len * 8);
@@ -492,7 +507,7 @@ fn buffer_pool_clear(p) {
     var len = load64(p + 8);
     var i = 0;
     while (i < len) {
-        bv_free(load64(slots + i * 8));
+        rg_bv_free(load64(slots + i * 8));
         i = i + 1;
     }
     store64(p + 8, 0);

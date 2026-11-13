@@ -29,7 +29,7 @@ fn approx(a, b, eps) {
     if (f64_lt(f64_abs(f64_sub(a, b)), eps) == 1) { return 1; }
     return 0;
 }
-fn fill(b, v) { bv_fill(pixel_buffer_bv(b), v); return 0; }
+fn fill(b, v) { rg_bv_fill(pixel_buffer_bv(b), v); return 0; }
 
 var argb = pixel_buffer_zeroed(2, 2, PF_ARGB8, err);
 
@@ -315,34 +315,34 @@ test_group("xorshift64");
 # Oracle: from seed 1 the first draw is 1082269761. This pins that `>>` is the
 # LOGICAL shift — with `>>>` (arithmetic) the sequence diverges as soon as the
 # state's high bit sets, which happens on draw 2.
-var rng = xorshift64_new(1);
-assert_eq(xorshift64_next(rng), 1082269761, "first draw from seed 1 matches Rust");
-assert_eq(xorshift64_next(rng), 1152992998833853505, "second draw matches (high bit now set)");
+var rng = _fk_xorshift64_new(1);
+assert_eq(_fk_xorshift64_next(rng), 1082269761, "first draw from seed 1 matches Rust");
+assert_eq(_fk_xorshift64_next(rng), 1152992998833853505, "second draw matches (high bit now set)");
 # ⚠ The `>>` vs `>>>` distinction is NOT observable until draw 7. The state's
 # bit 63 stays clear through draw 6, so both shifts agree; and at draw 7 the low
 # 16 bits coincidentally match too (40561 either way), so only the FULL value
 # separates them. Oracle: correct -6753709453369041295, arithmetic
 # +6649003037685554801. Checking three draws — the obvious thing to do — leaves
 # a wrong shift undetected.
-assert_eq(xorshift64_next(rng), (0 - 7269227409276787159), "draw 3");
-assert_eq(xorshift64_next(rng), (0 - 768720241707614171), "draw 4");
-assert_eq(xorshift64_next(rng), (0 - 8787613929710185883), "draw 5");
-assert_eq(xorshift64_next(rng), (0 - 670945072575735807), "draw 6");
-var _lv = xorshift64_next(rng);
+assert_eq(_fk_xorshift64_next(rng), (0 - 7269227409276787159), "draw 3");
+assert_eq(_fk_xorshift64_next(rng), (0 - 768720241707614171), "draw 4");
+assert_eq(_fk_xorshift64_next(rng), (0 - 8787613929710185883), "draw 5");
+assert_eq(_fk_xorshift64_next(rng), (0 - 670945072575735807), "draw 6");
+var _lv = _fk_xorshift64_next(rng);
 assert_eq(_lv, (0 - 6753709453369041295), "draw 7 pins `>>` as LOGICAL, not arithmetic");
-xorshift64_free(rng);
+_fk_xorshift64_free(rng);
 
 # Seed 0 is a fixed point of xorshift (it would emit zeros forever), so Rust
 # substitutes a constant. Without that, all noise on seed 0 would be a no-op.
-var rz = xorshift64_new(0);
-assert_neq(xorshift64_next(rz), 0, "seed 0 does not produce zeros (a constant is substituted)");
-xorshift64_free(rz);
+var rz = _fk_xorshift64_new(0);
+assert_neq(_fk_xorshift64_next(rz), 0, "seed 0 does not produce zeros (a constant is substituted)");
+_fk_xorshift64_free(rz);
 
 # Determinism: the same seed gives the same sequence.
-var ra = xorshift64_new(42);
-var rb = xorshift64_new(42);
-assert_eq(xorshift64_next(ra), xorshift64_next(rb), "the same seed gives the same sequence");
-xorshift64_free(ra); xorshift64_free(rb);
+var ra = _fk_xorshift64_new(42);
+var rb = _fk_xorshift64_new(42);
+assert_eq(_fk_xorshift64_next(ra), _fk_xorshift64_next(rb), "the same seed gives the same sequence");
+_fk_xorshift64_free(ra); _fk_xorshift64_free(rb);
 
 # ================================================================
 # noise
@@ -666,6 +666,39 @@ assert_eq(flood_fill(argb, 0, 0, red, 0), RG_ERR_INVALID_FORMAT, "flood_fill rej
 pixel_buffer_free(b1); pixel_buffer_free(b2); pixel_buffer_free(b3); pixel_buffer_free(b4);
 pixel_buffer_free(argb);
 fl_free(red); fl_free(trip); fl_free(err);
+
+# ================================================================
+# lut3d_clone (2.4.0)
+# ================================================================
+test_group("lut3d clone");
+
+# Rust's #[derive(Clone)] on Lut3d copies the data Vec: a DEEP copy. A shallow
+# copy would share the table, so a write through either would show in both, and
+# freeing both would free it twice.
+var lsrc = lut3d_new(3);
+var li = 0;
+while (li < 27 * 3) { store32(lut3d_data(lsrc) + li * 4, f32_from(f64_from(li))); li = li + 1; }
+var lcl = lut3d_clone(lsrc);
+assert_eq(lcl != 0, 1, "lut3d_clone returns a LUT");
+assert_eq(lut3d_size(lcl), 3, "of the same size");
+assert_eq(lut3d_data(lcl) != lut3d_data(lsrc), 1, "with its OWN table, not the source's");
+var lsame = 1;
+li = 0;
+while (li < 27 * 3) {
+    if (load32(lut3d_data(lcl) + li * 4) != load32(lut3d_data(lsrc) + li * 4)) { lsame = 0; }
+    li = li + 1;
+}
+assert_eq(lsame, 1, "holding every one of the 81 values");
+lut3d_set(lcl, 2, 1, 0, 1, f32_from(-1.0));
+assert_eq(lut3d_get(lsrc, 2, 1, 0, 1), f32_from(f64_from((2 + 1 * 3) * 3 + 1)),
+  "a write through the clone leaves the source alone");
+assert_eq(lut3d_clone(0), 0, "cloning null gives null");
+lut3d_free(lsrc);
+# The clone must still be readable after its source is freed: a shared table
+# would now be dangling.
+assert_eq(lut3d_get(lcl, 2, 2, 2, 2), f32_from(f64_from((2 + 2 * 3 + 2 * 9) * 3 + 2)),
+  "and outlives the source");
+lut3d_free(lcl);
 
 var exit_code = assert_summary();
 if (exit_code > 0) { exit_code = 1; }

@@ -35,9 +35,12 @@ modules = [
     "src/transform.cyr",
     "src/filter_point.cyr",
     "src/filter_kernel.cyr",
+    "src/decimal.cyr",
+    "src/cube.cyr",
     "src/blend.cyr",
     "src/convert.cyr",
     "src/icc.cyr",
+    "src/serde.cyr",
 ]
 
 [lib.spectral]
@@ -52,9 +55,12 @@ modules = [
     "src/transform.cyr",
     "src/filter_point.cyr",
     "src/filter_kernel.cyr",
+    "src/decimal.cyr",
+    "src/cube.cyr",
     "src/blend.cyr",
     "src/convert.cyr",
     "src/icc.cyr",
+    "src/serde.cyr",
     "src/spectral.cyr",
 ]
 
@@ -70,9 +76,12 @@ modules = [
     "src/transform.cyr",
     "src/filter_point.cyr",
     "src/filter_kernel.cyr",
+    "src/decimal.cyr",
+    "src/cube.cyr",
     "src/blend.cyr",
     "src/convert.cyr",
     "src/icc.cyr",
+    "src/serde.cyr",
     "src/hwaccel.cyr",
 ]
 
@@ -88,9 +97,12 @@ modules = [
     "src/transform.cyr",
     "src/filter_point.cyr",
     "src/filter_kernel.cyr",
+    "src/decimal.cyr",
+    "src/cube.cyr",
     "src/blend.cyr",
     "src/convert.cyr",
     "src/icc.cyr",
+    "src/serde.cyr",
     "src/gpu_spirv.cyr",
     "src/gpu_kernels.cyr",
     "src/gpu_shaders.cyr",

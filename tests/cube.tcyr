@@ -1,0 +1,488 @@
+# cube.tcyr — the .cube 3D LUT parser
+# Ported from rust-old/src/filter.rs: Lut3d::from_cube, its doctest, and its two
+# tests (lut3d_identity_preserves_values, lut3d_bad_size_rejected).
+#
+# ⚠ THE FLOAT EXPECTATIONS ARE EXACT, FROM AN EXACT ORACLE. Rust's f32::from_str is
+# correctly rounded (ties to even) straight to f32. Every expected bit pattern
+# below comes from a Python oracle in `fractions` that finds the nearest f32 to the
+# decimal by exact rational arithmetic (build/gen/cube_cases.py). It does not come
+# from reading ranga back, and it does not come from Python's float parsing, which
+# rounds twice.
+#
+# The cases marked "double-rounding trap" are why the oracle has to be exact. Each
+# lies a hair above or below a midpoint between two f32s, so close that rounding to
+# f64 first lands exactly ON the midpoint, and rounding that f64 to f32 then breaks
+# the tie the wrong way. 46 of the 124 are traps. Without cube.cyr's exact
+# tie-break every one of them fails.
+
+include "src/error.cyr"
+include "src/bytevec.cyr"
+include "src/pixel.cyr"
+include "src/filter_kernel.cyr"
+include "src/decimal.cyr"
+include "src/cube.cyr"
+
+alloc_init();
+
+var err = fl_alloc(8);
+var out = fl_alloc(8);
+var perr = fl_alloc(8);
+
+# One f32 token, parsed by the white-box entry, against the oracle's bits.
+fn f32_case(s, want, name) {
+    store64(out, 0x5A5A5A5A);
+    var ok = _cb_parse_f32(s, 0, strlen(s), out);
+    if (ok == 0) { assert_eq(0, 1, name); return 0; }
+    assert_eq(load64(out), want, name);
+    return 0;
+}
+
+# A token outside Rust's float grammar must be refused.
+fn f32_bad(s, name) {
+    assert_eq(_cb_parse_f32(s, 0, strlen(s), out), 0, name);
+    return 0;
+}
+
+# from_cube on a cstring.
+fn cube(s) { return lut3d_from_cube(s, strlen(s), err); }
+
+# 1 if from_cube refuses `s` with RG_ERR_OTHER.
+fn rejects(s) {
+    var l = cube(s);
+    if (l != 0) { lut3d_free(l); return 0; }
+    if (load64(err) != RG_ERR_OTHER) { return 0; }
+    return 1;
+}
+
+# The size-2 identity body, R fastest, as Rust's doctest writes it.
+var ID2 = "0.0 0.0 0.0\n1.0 0.0 0.0\n0.0 1.0 0.0\n1.0 1.0 0.0\n0.0 0.0 1.0\n1.0 0.0 1.0\n0.0 1.0 1.0\n1.0 1.0 1.0\n";
+
+fn cat2(a, b) {
+    var na = strlen(a);
+    var nb = strlen(b);
+    var r = fl_alloc(na + nb + 1);
+    memcpy(r, a, na);
+    memcpy(r + na, b, nb);
+    store8(r + na + nb, 0);
+    return r;
+}
+
+# ================================================================
+test_group("f32 tokens: values");
+f32_case("0.1", 0x3DCCCCCD, "0.1");
+f32_case("1", 0x3F800000, "1");
+f32_case("1.", 0x3F800000, "trailing point");
+f32_case(".5", 0x3F000000, "leading point");
+f32_case("+.5", 0x3F000000, "plus sign");
+f32_case("-0", 0x80000000, "negative zero");
+f32_case("1E+0", 0x3F800000, "upper-case exponent");
+f32_case("2.5e-1", 0x3E800000, "exponent");
+f32_case("1e-45", 0x00000001, "the smallest subnormal");
+f32_case("1e-50", 0x00000000, "underflow to 0");
+f32_case("3.4028235e38", 0x7F7FFFFF, "FLT_MAX");
+f32_case("3.4028236e38", 0x7F800000, "just past FLT_MAX: inf");
+f32_case("1e39", 0x7F800000, "overflow: inf");
+f32_case("inf", 0x7F800000, "inf");
+f32_case("-Infinity", 0xFF800000, "-Infinity");
+f32_case("NaN", 0x7FC00000, "NaN");
+f32_case("-nan", 0xFFC00000, "a signed NaN keeps its sign");
+f32_case("0.000000000000000000000000000000000000000000001401298464324817", 0x00000001, "a 61-digit subnormal");
+f32_case("1.000000059604644775390625", 0x3F800000,
+  "exactly on the midpoint above 1.0 (between even 1.0 and odd 1+2^-23)");
+f32_case("1.0000000596046447753906250000000000000001", 0x3F800001,
+  "a hair ABOVE the midpoint above 1.0 (between even 1.0 and odd 1+2^-23) (a double-rounding trap)");
+f32_case("1.0000000596046447753906249999999999999999", 0x3F800000,
+  "a hair BELOW the midpoint above 1.0 (between even 1.0 and odd 1+2^-23)");
+f32_case("-1.0000000596046447753906250000000000000001", 0xBF800001,
+  "negative, a hair beyond the midpoint above 1.0 (between even 1.0 and odd 1+2^-23) (a double-rounding trap)");
+f32_case("1.000000178813934326171875", 0x3F800002, "exactly on the midpoint above 1+2^-23 (between odd and even)");
+f32_case("1.0000001788139343261718750000000000000001", 0x3F800002,
+  "a hair ABOVE the midpoint above 1+2^-23 (between odd and even)");
+f32_case("1.0000001788139343261718749999999999999999", 0x3F800001,
+  "a hair BELOW the midpoint above 1+2^-23 (between odd and even) (a double-rounding trap)");
+f32_case("-1.0000001788139343261718750000000000000001", 0xBF800002,
+  "negative, a hair beyond the midpoint above 1+2^-23 (between odd and even)");
+f32_case(cat2("0.0000000000000000000000000000000000000000000007006492321624085354618647916449580656401309709382",
+  "57885878534141944895541342930300743319094181060791015625"), 0x00000000,
+  "exactly on half the smallest subnormal, 2^-150");
+f32_case(cat2("0.0000000000000000000000000000000000000000000007006492321624085354618647916449580656401309709382",
+  "578858785341419448955413429303007433190941810607910156250000000000000001"), 0x00000001,
+  "a hair ABOVE half the smallest subnormal, 2^-150 (a double-rounding trap)");
+f32_case(cat2("0.0000000000000000000000000000000000000000000007006492321624085354618647916449580656401309709382",
+  "578858785341419448955413429303007433190941810607910156249999999999999999"), 0x00000000,
+  "a hair BELOW half the smallest subnormal, 2^-150");
+f32_case(cat2("-0.000000000000000000000000000000000000000000000700649232162408535461864791644958065640130970938",
+  "2578858785341419448955413429303007433190941810607910156250000000000000001"), 0x80000001,
+  "negative, a hair beyond half the smallest subnormal, 2^-150 (a double-rounding trap)");
+f32_case(cat2("0.0000000000000000000000000000000000000000000021019476964872256063855943749348741969203929128147",
+  "73657635602425834686624028790902229957282543182373046875"), 0x00000002,
+  "exactly on between subnormals 1 and 2");
+f32_case(cat2("0.0000000000000000000000000000000000000000000021019476964872256063855943749348741969203929128147",
+  "736576356024258346866240287909022299572825431823730468750000000000000001"), 0x00000002,
+  "a hair ABOVE between subnormals 1 and 2");
+f32_case(cat2("0.0000000000000000000000000000000000000000000021019476964872256063855943749348741969203929128147",
+  "736576356024258346866240287909022299572825431823730468749999999999999999"), 0x00000001,
+  "a hair BELOW between subnormals 1 and 2 (a double-rounding trap)");
+f32_case(cat2("-0.000000000000000000000000000000000000000000002101947696487225606385594374934874196920392912814",
+  "7736576356024258346866240287909022299572825431823730468750000000000000001"), 0x80000002,
+  "negative, a hair beyond between subnormals 1 and 2");
+f32_case("340282356779733661637539395458142568448", 0x7F800000, "exactly on between FLT_MAX and 2^128");
+f32_case("340282356779733661637539395458142568448.0000000000000001", 0x7F800000,
+  "a hair ABOVE between FLT_MAX and 2^128");
+f32_case("340282356779733661637539395458142568447.9999999999999999", 0x7F7FFFFF,
+  "a hair BELOW between FLT_MAX and 2^128 (a double-rounding trap)");
+f32_case("-340282356779733661637539395458142568448.0000000000000001", 0xFF800000,
+  "negative, a hair beyond between FLT_MAX and 2^128");
+f32_case("0.0711111761629581451416015625", 0x3D91A2BC, "exactly on a mid-range midpoint (0x3D91A2BC + half an ulp)");
+f32_case("0.07111117616295814514160156250000000000000001", 0x3D91A2BD,
+  "a hair ABOVE a mid-range midpoint (0x3D91A2BC + half an ulp) (a double-rounding trap)");
+f32_case("0.07111117616295814514160156249999999999999999", 0x3D91A2BC,
+  "a hair BELOW a mid-range midpoint (0x3D91A2BC + half an ulp)");
+f32_case("-0.07111117616295814514160156250000000000000001", 0xBD91A2BD,
+  "negative, a hair beyond a mid-range midpoint (0x3D91A2BC + half an ulp) (a double-rounding trap)");
+f32_case("10.0000005960464477539062500000000001e-1", 0x3F800001,
+  "the 1.0 trap with an e-1 exponent (a double-rounding trap)");
+f32_case("0.0000100000005960464477539062500000000001e5", 0x3F800001,
+  "and with leading fraction zeros (a double-rounding trap)");
+f32_case(cat2("0.0000000000000000000000007175003258675894840846133272186464015533410853997509093460394069552421",
+  "5698242187500000000000000000000001"), 0x175E0E3C,
+  "random midpoint, above");
+f32_case(cat2("0.0000000000000000000000007175003258675894840846133272186464015533410853997509093460394069552421",
+  "5698242187499999999999999999999999"), 0x175E0E3B,
+  "random midpoint, below (a double-rounding trap)");
+f32_case("23461455478996549489183948800000000000000000000001", 0x7F800000, "random midpoint, above");
+f32_case("234614554789965494891839487.99999999999999999999999", 0x6B421190, "random midpoint, below");
+f32_case("0.00000000014016101473890429929269885178655385971069335937500000000000000000000001", 0x2F1A1BD2,
+  "random midpoint, above");
+f32_case("0.00000000014016101473890429929269885178655385971069335937499999999999999999999999", 0x2F1A1BD1,
+  "random midpoint, below (a double-rounding trap)");
+f32_case("0.00240563380066305398941040039062500000000000000000000001", 0x3B1DA7D7,
+  "random midpoint, above (a double-rounding trap)");
+f32_case("0.00240563380066305398941040039062499999999999999999999999", 0x3B1DA7D6, "random midpoint, below");
+f32_case("61.864957809448242187500000000000000000000001", 0x427775B8, "random midpoint, above");
+f32_case("61.864957809448242187499999999999999999999999", 0x427775B7,
+  "random midpoint, below (a double-rounding trap)");
+f32_case(cat2("0.0000000000000000000000000000002620326313314868368004576567882266563283456278437248817766991315",
+  "6364600581582635641098022460937500000000000000000000001"), 0x0CAA11A4,
+  "random midpoint, above");
+f32_case(cat2("0.0000000000000000000000000000002620326313314868368004576567882266563283456278437248817766991315",
+  "6364600581582635641098022460937499999999999999999999999"), 0x0CAA11A3,
+  "random midpoint, below (a double-rounding trap)");
+f32_case("0.0000000181205477289836380805354565382003784179687500000000000000000000001", 0x329BA782,
+  "random midpoint, above");
+f32_case("0.0000000181205477289836380805354565382003784179687499999999999999999999999", 0x329BA781,
+  "random midpoint, below (a double-rounding trap)");
+f32_case("46879.97851562500000000000000000000001", 0x47371FFB, "random midpoint, above (a double-rounding trap)");
+f32_case("46879.97851562499999999999999999999999", 0x47371FFA, "random midpoint, below");
+f32_case("-22071301600000000000000000000001", 0xF38B4A1C, "random midpoint, above");
+f32_case("-220713015.99999999999999999999999", 0xCD527D03, "random midpoint, below (a double-rounding trap)");
+f32_case(cat2("-0.000000000000000000000000000000000002941057324143657834874216430432475601206388025073609114860",
+  "0028952978663321360386362357530742883682250976562500000000000000000000001"), 0x847A328F,
+  "random midpoint, above (a double-rounding trap)");
+f32_case(cat2("-0.000000000000000000000000000000000002941057324143657834874216430432475601206388025073609114860",
+  "0028952978663321360386362357530742883682250976562499999999999999999999999"), 0x847A328E,
+  "random midpoint, below");
+f32_case("-232048558485399710073907419545600000000000000000000001", 0xFF800000, "random midpoint, above");
+f32_case("-2320485584853997100739074195455.99999999999999999999999", 0xF1EA4F25,
+  "random midpoint, below (a double-rounding trap)");
+f32_case(cat2("-0.000000000000000000000000000000000000149561655689414470139931844153934382187466655176604121977",
+  "68152033972629405544907399416842963546514511108398437500000000000000000000001"), 0x824B92A2,
+  "random midpoint, above");
+f32_case(cat2("-0.000000000000000000000000000000000000149561655689414470139931844153934382187466655176604121977",
+  "68152033972629405544907399416842963546514511108398437499999999999999999999999"), 0x824B92A1,
+  "random midpoint, below (a double-rounding trap)");
+f32_case("-8.77587556838989257812500000000000000000000001", 0xC10C69FD,
+  "random midpoint, above (a double-rounding trap)");
+f32_case("-8.77587556838989257812499999999999999999999999", 0xC10C69FC, "random midpoint, below");
+f32_case("-1135068101453369082389154289323448729600000000000000000000001", 0xFF800000, "random midpoint, above");
+f32_case("-11350681014533690823891542893234487295.99999999999999999999999", 0xFD08A0FC, "random midpoint, below");
+f32_case("70112828029558597038899200000000000000000000001", 0x7F800000, "random midpoint, above");
+f32_case("701128280295585970388991.99999999999999999999999", 0x6714783D,
+  "random midpoint, below (a double-rounding trap)");
+f32_case("-0.4692641645669937133789062500000000000000000000001", 0xBEF04365,
+  "random midpoint, above (a double-rounding trap)");
+f32_case("-0.4692641645669937133789062499999999999999999999999", 0xBEF04364, "random midpoint, below");
+f32_case("-0.0000000000005043238775811337282206636700720991939306259155273437500000000000000000000001", 0xAB0DF45E,
+  "random midpoint, above");
+f32_case("-0.0000000000005043238775811337282206636700720991939306259155273437499999999999999999999999", 0xAB0DF45D,
+  "random midpoint, below (a double-rounding trap)");
+f32_case(cat2("0.0000000000000000000000000002752040381033262711303902993253870039037110915933898036556115584971",
+  "848875284194946289062500000000000000000000001"), 0x11AE6E69,
+  "random midpoint, above (a double-rounding trap)");
+f32_case(cat2("0.0000000000000000000000000002752040381033262711303902993253870039037110915933898036556115584971",
+  "848875284194946289062499999999999999999999999"), 0x11AE6E68,
+  "random midpoint, below");
+f32_case("2462454594666194208424383951667200000000000000000000001", 0x7F800000, "random midpoint, above");
+f32_case("24624545946661942084243839516671.99999999999999999999999", 0x739B6719,
+  "random midpoint, below (a double-rounding trap)");
+f32_case("-0.0000000000432374292619330802267541002947837114334106445312500000000000000000000001", 0xAE3E2905,
+  "random midpoint, above (a double-rounding trap)");
+f32_case("-0.0000000000432374292619330802267541002947837114334106445312499999999999999999999999", 0xAE3E2904,
+  "random midpoint, below");
+f32_case("-9849415925719734681600000000000000000000001", 0xFF800000, "random midpoint, above");
+f32_case("-98494159257197346815.99999999999999999999999", 0xE0AADC31,
+  "random midpoint, below (a double-rounding trap)");
+f32_case(cat2("-0.000000000000000007333160030303584659056893857442815942704328335821628570556640625000000000000",
+  "00000000001"), 0xA30745DF,
+  "random midpoint, above (a double-rounding trap)");
+f32_case(cat2("-0.000000000000000007333160030303584659056893857442815942704328335821628570556640624999999999999",
+  "99999999999"), 0xA30745DE,
+  "random midpoint, below");
+f32_case("0.000000000000018784020325778808674366260333954414818435907363891601562500000000000000000000001", 0x28A93101,
+  "random midpoint, above (a double-rounding trap)");
+f32_case("0.000000000000018784020325778808674366260333954414818435907363891601562499999999999999999999999", 0x28A93100,
+  "random midpoint, below");
+f32_case("-98.66441726684570312500000000000000000000001", 0xC2C5542F,
+  "random midpoint, above (a double-rounding trap)");
+f32_case("-98.66441726684570312499999999999999999999999", 0xC2C5542E, "random midpoint, below");
+f32_case("-1232957027123200000000000000000000001", 0xFB6D757A, "random midpoint, above");
+f32_case("-12329570271231.99999999999999999999999", 0xD5336B3A, "random midpoint, below");
+f32_case("-0.00000000001538230393755002367583983868826180696487426757812500000000000000000000001", 0xAD874DDF,
+  "random midpoint, above (a double-rounding trap)");
+f32_case("-0.00000000001538230393755002367583983868826180696487426757812499999999999999999999999", 0xAD874DDE,
+  "random midpoint, below");
+f32_case(cat2("-0.000000000000000000000000000000502527996226529820554413078989851794017179003596138388634817495",
+  "4150636040139943361282348632812500000000000000000000001"), 0x8D231465,
+  "random midpoint, above (a double-rounding trap)");
+f32_case(cat2("-0.000000000000000000000000000000502527996226529820554413078989851794017179003596138388634817495",
+  "4150636040139943361282348632812499999999999999999999999"), 0x8D231464,
+  "random midpoint, below");
+f32_case("-44179913318371821330261606400000000000000000000001", 0xFF800000, "random midpoint, above");
+f32_case("-441799133183718213302616063.99999999999999999999999", 0xEBB6B94D,
+  "random midpoint, below (a double-rounding trap)");
+f32_case(cat2("0.0000000000000000000000000000000000013501058700936959865355737376783955929538018048688257771952",
+  "0149553324855906666357441281434148550033569335937500000000000000000000001"), 0x03E5B568,
+  "random midpoint, above");
+f32_case(cat2("0.0000000000000000000000000000000000013501058700936959865355737376783955929538018048688257771952",
+  "0149553324855906666357441281434148550033569335937499999999999999999999999"), 0x03E5B567,
+  "random midpoint, below (a double-rounding trap)");
+f32_case("1720088250047424102400000000000000000000001", 0x7F800000, "random midpoint, above");
+f32_case("17200882500474241023.99999999999999999999999", 0x5F6EB5CF, "random midpoint, below (a double-rounding trap)");
+f32_case("1140487602202214400000000000000000000001", 0x7F800000, "random midpoint, above");
+f32_case("11404876022022143.99999999999999999999999", 0x5A2212B2, "random midpoint, below");
+f32_case("13720530976768000000000000000000000001", 0x7D2527A6, "random midpoint, above");
+f32_case("137205309767679.99999999999999999999999", 0x56F99333, "random midpoint, below (a double-rounding trap)");
+f32_case(cat2("-0.000000000000000000000000000000009021678533561122686685765572420772898846079640119619940915110",
+  "5230719736027822364121675491333007812500000000000000000000001"), 0x8A3B5F79,
+  "random midpoint, above (a double-rounding trap)");
+f32_case(cat2("-0.000000000000000000000000000000009021678533561122686685765572420772898846079640119619940915110",
+  "5230719736027822364121675491333007812499999999999999999999999"), 0x8A3B5F78,
+  "random midpoint, below");
+f32_case("-1267739906213015480258038648116818739200000000000000000000001", 0xFF800000, "random midpoint, above");
+f32_case("-12677399062130154802580386481168187391.99999999999999999999999", 0xFD189940, "random midpoint, below");
+f32_case("1732921660779987385880054394163455590400000000000000000000001", 0x7F800000, "random midpoint, above");
+f32_case("17329216607799873858800543941634555903.99999999999999999999999", 0x7D5097C5,
+  "random midpoint, below (a double-rounding trap)");
+f32_case("43.726873397827148437500000000000000000000001", 0x422EE852, "random midpoint, above");
+f32_case("43.726873397827148437499999999999999999999999", 0x422EE851,
+  "random midpoint, below (a double-rounding trap)");
+f32_case("-0.000000006758819059982101862260606139898300170898437500000000000000000000001", 0xB1E83B34,
+  "random midpoint, above");
+f32_case("-0.000000006758819059982101862260606139898300170898437499999999999999999999999", 0xB1E83B33,
+  "random midpoint, below (a double-rounding trap)");
+f32_case("22055542063104000000000000000000000001", 0x7D84BDF1, "random midpoint, above");
+f32_case("220555420631039.99999999999999999999999", 0x5748980F, "random midpoint, below (a double-rounding trap)");
+f32_case(cat2("-0.000000000000000000000105900632221394729817497501246387637402479597881210793275386095046997070",
+  "312500000000000000000000001"), 0x9B0006A9,
+  "random midpoint, above (a double-rounding trap)");
+f32_case(cat2("-0.000000000000000000000105900632221394729817497501246387637402479597881210793275386095046997070",
+  "312499999999999999999999999"), 0x9B0006A8,
+  "random midpoint, below");
+f32_case("0.000000000000155211950334400300421933138750318903475999832153320312500000000000000000000001", 0x2A2EC0CD,
+  "random midpoint, above (a double-rounding trap)");
+f32_case("0.000000000000155211950334400300421933138750318903475999832153320312499999999999999999999999", 0x2A2EC0CC,
+  "random midpoint, below");
+
+# ================================================================
+test_group("f32 tokens: grammar");
+
+# Rust's grammar: Sign? (inf | infinity | nan | Number), Number needs a digit on
+# one side of the point, an exponent needs digits, and nothing may follow.
+f32_bad("", "an empty token");
+f32_bad("+", "a bare sign");
+f32_bad(".", "a bare point");
+f32_bad("e5", "an exponent with no mantissa");
+f32_bad("1e", "an exponent with no digits");
+f32_bad("1e+", "an exponent sign with no digits");
+f32_bad("1.5abc", "trailing junk (the stdlib's f64_parse would read 1.5)");
+f32_bad("1..2", "two points");
+f32_bad("--1", "two signs");
+f32_bad("0x1p3", "hex");
+f32_bad("1_000", "an underscore");
+f32_bad("infinit", "a truncated infinity");
+f32_bad("infx", "inf with junk");
+f32_bad("nana", "nan with junk");
+f32_bad("1,5", "a comma decimal point");
+f32_case("INF", 0x7F800000, "inf in any case");
+f32_case("+NaN", 0x7FC00000, "nan with a plus sign");
+f32_case("00001.5000", 0x3FC00000, "leading and trailing zeros");
+f32_case("1e0000000000000000000005", 0x47C35000, "an exponent with many leading zeros is 1e5");
+
+# ================================================================
+test_group("from_cube: Rust's tests");
+
+# The doctest: LUT_3D_SIZE 2 and the identity body.
+var docs = cat2("LUT_3D_SIZE 2\n", ID2);
+var dl = cube(docs);
+assert_eq(load64(err), RG_ERR_NONE, "the doctest's cube parses");
+assert_eq(dl != 0, 1, "into a LUT");
+assert_eq(lut3d_size(dl), 2, "of size 2");
+# lut3d_identity_preserves_values: (128, 64, 200) within 1 of itself.
+var ib = pixel_buffer_zeroed(1, 1, PF_RGBA8, perr);
+var ip = pixel_buffer_data(ib);
+store8(ip, 128); store8(ip + 1, 64); store8(ip + 2, 200); store8(ip + 3, 255);
+assert_eq(apply_lut3d(ib, dl), RG_ERR_NONE, "apply_lut3d succeeds");
+var idl = load8(ip) - 128;
+assert_eq(idl >= 0 - 1 && idl <= 1, 1, "the identity LUT keeps red within 1");
+idl = load8(ip + 1) - 64;
+assert_eq(idl >= 0 - 1 && idl <= 1, 1, "and green");
+idl = load8(ip + 2) - 200;
+assert_eq(idl >= 0 - 1 && idl <= 1, 1, "and blue");
+assert_eq(load8(ip + 3), 255, "and leaves alpha alone");
+pixel_buffer_free(ib);
+# lut3d_bad_size_rejected.
+assert_eq(rejects("LUT_3D_SIZE 1\n0.0 0.0 0.0\n"), 1, "LUT_3D_SIZE 1 is rejected");
+
+# ================================================================
+test_group("from_cube: layout");
+
+# Entry k of the file is (r, g, b) = (k % s, (k / s) % s, k / s^2): R fastest, as
+# Rust's Vec is, and as lut3d_get indexes. An asymmetric body pins it.
+var asy = "LUT_3D_SIZE 2\n0 0 0\n0.125 0 0\n0 0.25 0\n0 0 0\n0 0 0.5\n0 0 0\n0 0 0\n1 1 1\n";
+var al = cube(asy);
+assert_eq(al != 0, 1, "an asymmetric cube parses");
+assert_eq(lut3d_get(al, 1, 0, 0, 0), f32_from(0.125), "line 2 is (r=1, g=0, b=0)");
+assert_eq(lut3d_get(al, 0, 1, 0, 1), f32_from(0.25), "line 3 is (r=0, g=1, b=0)");
+assert_eq(lut3d_get(al, 0, 0, 1, 2), f32_from(0.5), "line 5 is (r=0, g=0, b=1)");
+assert_eq(lut3d_get(al, 1, 1, 1, 0), f32_from(F64_ONE), "line 8 is (1, 1, 1)");
+lut3d_free(al);
+
+# ================================================================
+test_group("from_cube: text grammar");
+
+fn parses(s) {
+    var l = cube(s);
+    if (l == 0) { return 0; }
+    lut3d_free(l);
+    return 1;
+}
+assert_eq(parses(cat2("# a comment\nTITLE \"grade\"\n\nLUT_3D_SIZE 2\n", ID2)), 1,
+  "comments, TITLE and blank lines are skipped");
+assert_eq(parses(cat2("TITLEFOO\nLUT_3D_SIZE 2\n", ID2)), 1,
+  "TITLE is a prefix match, as starts_with is");
+assert_eq(parses(cat2("LUT_3D_SIZE 2\r\n", "0 0 0\r\n1 0 0\r\n0 1 0\r\n1 1 0\r\n0 0 1\r\n1 0 1\r\n0 1 1\r\n1 1 1")), 1,
+  "CRLF line ends, and a last line with no newline");
+assert_eq(parses(cat2(ID2, "LUT_3D_SIZE 2\n")), 1, "LUT_3D_SIZE may follow the data");
+assert_eq(parses(cat2("LUT_3D_SIZE 9\nLUT_3D_SIZE 2\n", ID2)), 1, "the last LUT_3D_SIZE wins");
+assert_eq(parses(cat2("LUT_3D_SIZE +2\n", ID2)), 1, "usize::from_str accepts a leading +");
+assert_eq(parses(cat2("LUT_3D_SIZE 0002\n", ID2)), 1, "and leading zeros");
+assert_eq(parses(cat2("  \t LUT_3D_SIZE   2   \n", ID2)), 1, "lines are trimmed");
+assert_eq(parses(cat2("LUT_3D_SIZE 2\n1 2\n", ID2)), 1, "a data line of two tokens is ignored");
+assert_eq(parses(cat2("LUT_3D_SIZE 2\n", "0 0 0 junk\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n")), 1,
+  "tokens past the third are ignored");
+# Unicode White_Space, as char::is_whitespace: NBSP (C2 A0) and U+3000 (E3 80 80)
+# both trim and separate.
+assert_eq(parses(cat2("\xC2\xA0LUT_3D_SIZE\xE3\x80\x802\xC2\xA0\n", ID2)), 1,
+  "NBSP and U+3000 trim a line and separate the size");
+assert_eq(parses(cat2("LUT_3D_SIZE 2\n0\xC2\xA00\xE2\x80\x830\n",
+  "1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n")), 1,
+  "and U+2003 separates data tokens");
+assert_eq(parses(cat2("DOMAIN_MINX whatever\nLUT_3D_SIZE 2\n", ID2)), 1,
+  "DOMAIN_MINX is not a DOMAIN_MIN keyword, and is skipped by prefix as Rust skipped it");
+
+assert_eq(rejects(""), 1, "empty text is rejected (size 0)");
+assert_eq(rejects(ID2), 1, "data with no LUT_3D_SIZE is rejected");
+assert_eq(rejects(cat2("LUT_3D_SIZE 3\n", ID2)), 1, "8 entries for size 3 is a count mismatch");
+assert_eq(rejects(cat2("LUT_3D_SIZE 2\n", cat2(ID2, "0 0 0\n"))), 1, "and so are 9 for size 2");
+assert_eq(rejects(cat2("LUT_3D_SIZE two\n", ID2)), 1, "a size that is not a usize");
+assert_eq(rejects(cat2("LUT_3D_SIZE -2\n", ID2)), 1, "a negative size");
+assert_eq(rejects(cat2("LUT_3D_SIZE 2.0\n", ID2)), 1, "a fractional size");
+assert_eq(rejects(cat2("LUT_3D_SIZE\n", ID2)), 1, "a missing size");
+assert_eq(rejects(cat2("LUT_3D_SIZEX 2\n", ID2)), 1, "LUT_3D_SIZEX is a prefix match with a bad value");
+assert_eq(rejects(cat2("LUT_3D_SIZE 99999999999999999999\n", ID2)), 1, "a size past 2^63");
+assert_eq(rejects("LUT_1D_SIZE 2\n0 0 0\n1 1 1\n"), 1, "a 1D LUT");
+assert_eq(rejects(cat2(cat2("LUT_3D_SIZE 2\n", ID2), "LUT_1D_SIZE 2\n")), 1,
+  "LUT_1D_SIZE anywhere");
+assert_eq(rejects(cat2("LUT_3D_SIZE 2\n0 0 zero\n", ID2)), 1, "a data token that is not an f32");
+assert_eq(rejects(cat2("LUT_3D_SIZE 2\nLUT_3D_INPUT_RANGEX 0 1\n", ID2)), 1,
+  "LUT_3D_INPUT_RANGEX is not the keyword, so it is a data line, as in Rust");
+# A NUL byte is an ordinary character in a Rust &str: it is not whitespace, so a
+# token containing it is not a number.
+var nul = cat2("LUT_3D_SIZE 2\n", ID2);
+store8(nul + 14, 0);
+assert_eq(lut3d_from_cube(nul, strlen(nul + 15) + 15, err), 0, "a NUL inside a token is not a number");
+assert_eq(load64(err), RG_ERR_OTHER, "and the error is Other, as all of Rust's are");
+
+# ================================================================
+test_group("from_cube: domain (ADR 007)");
+
+# Rust skipped DOMAIN_MIN/DOMAIN_MAX, so a [0, 2] LUT was applied as if it were
+# [0, 1]. Here the domain is honoured: an identity table over [0, 2] maps an input
+# of 1.0 to the middle of the table, 0.5.
+var d2 = cube(cat2("DOMAIN_MIN 0 0 0\nDOMAIN_MAX 2 2 2\nLUT_3D_SIZE 2\n", ID2));
+assert_eq(d2 != 0, 1, "a cube with DOMAIN lines parses");
+assert_eq(lut3d_domain_max(d2, 1), f32_from(2.0), "the domain is read");
+assert_eq(lut3d_domain_min(d2, 2), 0, "min and max");
+var lo3 = fl_alloc(12);
+lut3d_lookup(d2, f32_from(F64_ONE), f32_from(0.5), f32_from(2.0), lo3);
+assert_eq(load32(lo3), f32_from(0.5), "input 1.0 is the middle of [0, 2]");
+assert_eq(load32(lo3 + 4), f32_from(0.25), "input 0.5 is a quarter of the way");
+assert_eq(load32(lo3 + 8), f32_from(F64_ONE), "input 2.0 is the top");
+lut3d_lookup(d2, f32_from(4.0), f32_from(-1.0), f32_from(0.5), lo3);
+assert_eq(load32(lo3), f32_from(F64_ONE), "inputs past the domain clamp at the top");
+assert_eq(load32(lo3 + 4), 0, "and below it at the bottom");
+
+# The default domain, written out or left implicit, is EXACTLY Rust's LUT: lookup
+# skips the normalisation, so not one bit moves.
+var dflt = cube(cat2("DOMAIN_MIN 0.0 0.0 0.0\nDOMAIN_MAX 1.0 1.0 1.0\nLUT_3D_SIZE 2\n", ID2));
+var none = cube(cat2("LUT_3D_SIZE 2\n", ID2));
+var lo4 = fl_alloc(12);
+var dsame = 1;
+var dk = 0;
+while (dk < 64) {
+    var dv = f32_from(f64_div(f64_from(dk), 63.0));
+    lut3d_lookup(dflt, dv, dv, dv, lo3);
+    lut3d_lookup(none, dv, dv, dv, lo4);
+    if (load32(lo3) != load32(lo4) || load32(lo3 + 8) != load32(lo4 + 8)) { dsame = 0; }
+    dk = dk + 1;
+}
+assert_eq(dsame, 1, "an explicit [0, 1] domain looks up bit for bit as no DOMAIN line");
+
+# Resolve's LUT_3D_INPUT_RANGE sets all three channels. Rust rejected the file.
+var rr = cube(cat2("LUT_3D_INPUT_RANGE 0 2\nLUT_3D_SIZE 2\n", ID2));
+assert_eq(rr != 0, 1, "LUT_3D_INPUT_RANGE is accepted");
+assert_eq(lut3d_domain_max(rr, 0), f32_from(2.0), "and sets red's domain");
+assert_eq(lut3d_domain_max(rr, 2), f32_from(2.0), "and blue's");
+lut3d_lookup(rr, f32_from(F64_ONE), f32_from(F64_ONE), f32_from(F64_ONE), lo3);
+assert_eq(load32(lo3 + 4), f32_from(0.5), "and lookup honours it as DOMAIN does");
+
+assert_eq(rejects(cat2("DOMAIN_MIN 0 0\nLUT_3D_SIZE 2\n", ID2)), 1, "a DOMAIN line needs three values");
+assert_eq(rejects(cat2("DOMAIN_MAX 1 one 1\nLUT_3D_SIZE 2\n", ID2)), 1, "that parse as f32");
+assert_eq(rejects(cat2("DOMAIN_MIN 1 0 0\nDOMAIN_MAX 1 1 1\nLUT_3D_SIZE 2\n", ID2)), 1,
+  "min == max on a channel is rejected");
+assert_eq(rejects(cat2("DOMAIN_MIN 0 2 0\nDOMAIN_MAX 1 1 1\nLUT_3D_SIZE 2\n", ID2)), 1,
+  "and so is min > max");
+assert_eq(rejects(cat2("DOMAIN_MAX inf 1 1\nLUT_3D_SIZE 2\n", ID2)), 1, "and an infinite bound");
+assert_eq(rejects(cat2("DOMAIN_MIN nan 0 0\nLUT_3D_SIZE 2\n", ID2)), 1, "and a NaN one");
+assert_eq(rejects(cat2("LUT_3D_INPUT_RANGE 0\nLUT_3D_SIZE 2\n", ID2)), 1, "INPUT_RANGE needs two values");
+
+# The setter has the same rules, and leaves the domain alone when it refuses.
+assert_eq(lut3d_set_domain(none, 0, f32_from(0.5), f32_from(0.5)), RG_ERR_INVALID_PARAMETER,
+  "lut3d_set_domain refuses min == max");
+assert_eq(lut3d_set_domain(none, 3, 0, f32_from(F64_ONE)), RG_ERR_INVALID_PARAMETER, "and channel 3");
+assert_eq(lut3d_domain_max(none, 0), f32_from(F64_ONE), "and the domain is unchanged");
+assert_eq(lut3d_set_domain(none, 1, f32_from(-1.0), f32_from(F64_ONE)), RG_ERR_NONE, "a valid domain is set");
+var ncl = lut3d_clone(none);
+assert_eq(lut3d_domain_min(ncl, 1), f32_from(-1.0), "and lut3d_clone copies it");
+lut3d_lookup(ncl, f32_from(0), f32_from(0), f32_from(0), lo3);
+assert_eq(load32(lo3 + 4), f32_from(0.5), "and the clone looks up through it: 0 is the middle of [-1, 1]");
+lut3d_free(ncl);
+lut3d_free(rr);
+lut3d_free(none);
+lut3d_free(dflt);
+lut3d_free(d2);
+lut3d_free(dl);
+
+var exit_code = assert_summary();
+if (exit_code > 0) { exit_code = 1; }
+sys_exit_group(exit_code);

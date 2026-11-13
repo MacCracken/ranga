@@ -47,7 +47,7 @@ var CTX = 0;
 fn mk_uniform(v) {
     var b = pixel_buffer_zeroed(W, H, PF_RGBA8, err);
     if (b == 0) { return 0; }
-    bv_fill(pixel_buffer_bv(b), v);
+    rg_bv_fill(pixel_buffer_bv(b), v);
     return b;
 }
 

@@ -158,6 +158,9 @@ assert_eq(approx(cie_xyz_y(whi), 0, 0.0000001), 1, "above 780 nm y is zero");
 # VISIBLE_MIN_NM / VISIBLE_MAX_NM.
 assert_eq(approx(spec_visible_min_nm(), 380.0, 0.0000001), 1, "the visible range starts at 380 nm");
 assert_eq(approx(spec_visible_max_nm(), 780.0, 0.0000001), 1, "and ends at 780 nm");
+# Since 2.4.0 the Rust names exist too, and are exactly prakash's values.
+assert_eq(VISIBLE_MIN_NM, spec_visible_min_nm(), "VISIBLE_MIN_NM is spec_visible_min_nm(), bit for bit");
+assert_eq(VISIBLE_MAX_NM, spec_visible_max_nm(), "VISIBLE_MAX_NM is spec_visible_max_nm(), bit for bit");
 
 # ⚠ temperature_k is an f64 BIT PATTERN. A blackbody at 6500 K should read as
 # roughly daylight; passing a native integer here would silently give 2.5e-320 K
@@ -204,8 +207,8 @@ cie_xyz_free(bbx); cie_xyz_free(bb3); cie_xyz_free(bb9); cie_xyz_free(id65);
 # The re-exported prakash items (rust-old/tests/spectral.rs, the 8 tests that
 # exercise prakash rather than ranga's bridge). prakash's own suite covers these
 # in depth; they are here so a prakash bump that changes what ranga re-exports
-# fails ranga's suite too. Three names differ from Rust's (parity doc):
-# CIE_1931_2DEG is cie_1931_table() with cie_cmf_len() rows.
+# fails ranga's suite too. Three names differ from Rust's in prakash; ranga
+# provides the Rust names as well since 2.4.0 (spectral.cyr).
 test_group("re-exported prakash items");
 
 # cie_cmf_data_structure: 380-780 nm in 5 nm steps is 81 rows.
@@ -221,6 +224,9 @@ while (ci < cie_cmf_len()) {
     ci = ci + 1;
 }
 assert_eq(ybar_ok, 1, "cie_cmf_peak_y_bar: no row exceeds 555 nm's y-bar");
+# The Rust name: the same table, and the same length.
+assert_eq(CIE_1931_2DEG(), cie_1931_table(), "CIE_1931_2DEG() is prakash's table");
+assert_eq(CIE_1931_2DEG_LEN, cie_cmf_len(), "and CIE_1931_2DEG_LEN its 81 rows");
 
 # illuminant_spds_valid: D65, D50, A, F2 and F11 each have 81 values from 380 nm.
 fn illum_ok(spd) {

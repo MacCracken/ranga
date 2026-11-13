@@ -319,7 +319,7 @@ pixel_buffer_free(ridc);
 # oracle confirms Rust produces exactly the same 76. Asserting 77 here would
 # have meant "fixing" correct code, so both values are pinned deliberately.
 var suni = pixel_buffer_zeroed(4, 4, PF_RGBA8, err);
-bv_fill(pixel_buffer_bv(suni), 77);
+rg_bv_fill(pixel_buffer_bv(suni), 77);
 var runi = resize(suni, 8, 8, SF_BICUBIC, err);
 assert_eq(chan(runi, 0, 0), 77, "bicubic corner is exact at 77 (accumulator lands on 77.0)");
 assert_eq(chan(runi, 27, 0), 76, "bicubic interior truncates 76.99999999999996 to 76, matching Rust");
@@ -613,6 +613,115 @@ pixel_buffer_free(s22);
 pixel_buffer_free(suni);
 pixel_buffer_free(argb);
 fl_free(sq); fl_free(kq); fl_free(badq); fl_free(pt); fl_free(pt2); fl_free(err);
+
+# ================================================================
+# Record surface: Affine and Perspective (2.4.0)
+# ================================================================
+test_group("affine and perspective records");
+
+# Rust: #[derive(Clone, Copy, PartialEq)] with pub fields. PartialEq is IEEE ==
+# per field, so NaN is unequal to itself and -0.0 equals +0.0.
+var TNAN = 0x7FF8000000000000;
+var TNZ  = 0x8000000000000000;
+
+var am = affine_new(1.0, 2.0, 3.0, 4.0, 5.0, 6.0);
+affine_set_a(am, 1.5);
+affine_set_b(am, 2.5);
+affine_set_c(am, 3.5);
+affine_set_d(am, 4.5);
+affine_set_tx(am, 5.5);
+affine_set_ty(am, 6.5);
+assert_eq(affine_a(am), 1.5, "affine_set_a writes a");
+assert_eq(affine_b(am), 2.5, "affine_set_b writes b");
+assert_eq(affine_c(am), 3.5, "affine_set_c writes c");
+assert_eq(affine_d(am), 4.5, "affine_set_d writes d");
+assert_eq(affine_tx(am), 5.5, "affine_set_tx writes tx");
+assert_eq(affine_ty(am), 6.5, "affine_set_ty writes ty");
+var ac = affine_clone(am);
+assert_eq(ac != am, 1, "affine_clone returns a new record");
+assert_eq(affine_eq(am, ac), 1, "which equals its source");
+affine_set_a(ac, 9.0);
+assert_eq(affine_eq(am, ac), 0, "a takes part in affine_eq");
+assert_eq(affine_a(am), 1.5, "and the source keeps its a");
+affine_set_a(ac, 1.5);
+affine_set_b(ac, 9.0);
+assert_eq(affine_eq(am, ac), 0, "b takes part in affine_eq");
+assert_eq(affine_b(am), 2.5, "and the source keeps its b");
+affine_set_b(ac, 2.5);
+affine_set_c(ac, 9.0);
+assert_eq(affine_eq(am, ac), 0, "c takes part in affine_eq");
+assert_eq(affine_c(am), 3.5, "and the source keeps its c");
+affine_set_c(ac, 3.5);
+affine_set_d(ac, 9.0);
+assert_eq(affine_eq(am, ac), 0, "d takes part in affine_eq");
+assert_eq(affine_d(am), 4.5, "and the source keeps its d");
+affine_set_d(ac, 4.5);
+affine_set_tx(ac, 9.0);
+assert_eq(affine_eq(am, ac), 0, "tx takes part in affine_eq");
+assert_eq(affine_tx(am), 5.5, "and the source keeps its tx");
+affine_set_tx(ac, 5.5);
+affine_set_ty(ac, 9.0);
+assert_eq(affine_eq(am, ac), 0, "ty takes part in affine_eq");
+assert_eq(affine_ty(am), 6.5, "and the source keeps its ty");
+affine_set_ty(ac, 6.5);
+assert_eq(affine_eq(am, ac), 1, "restoring every field makes them equal again");
+affine_set_tx(am, 0);
+affine_set_tx(ac, TNZ);
+assert_eq(affine_eq(am, ac), 1, "-0.0 equals +0.0");
+affine_set_ty(am, TNAN);
+assert_eq(affine_eq(am, am), 0, "a NaN field makes an Affine unequal to itself");
+assert_eq(affine_eq(am, 0), 0, "a null Affine equals nothing");
+assert_eq(affine_clone(0), 0, "and cloning null gives null");
+# Copy semantics: a clone is independent of later changes to its source.
+var aid = affine_identity();
+var aid2 = affine_clone(aid);
+affine_set_a(aid, 2.0);
+assert_eq(affine_is_identity(aid2), 1, "a clone stays identity after its source changes");
+assert_eq(affine_is_identity(aid), 0, "while the source does not");
+affine_free(aid2);
+affine_free(aid);
+affine_free(ac);
+affine_free(am);
+
+var pm = perspective_new(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0);
+var pr = 0;
+while (pr < 3) {
+    var pcol = 0;
+    while (pcol < 3) {
+        perspective_set_m(pm, pr, pcol, f64_from(10 + pr * 3 + pcol));
+        pcol = pcol + 1;
+    }
+    pr = pr + 1;
+}
+# m[r][c] = 10 + 3r + c, written through the setter and read back row-major.
+assert_eq(perspective_m(pm, 0, 0), f64_from(10), "perspective_set_m writes m[0][0]");
+assert_eq(perspective_m(pm, 0, 2), f64_from(12), "and m[0][2]");
+assert_eq(perspective_m(pm, 1, 0), f64_from(13), "row-major: m[1][0] follows m[0][2]");
+assert_eq(perspective_m(pm, 2, 1), f64_from(17), "m[2][1]");
+assert_eq(perspective_m(pm, 2, 2), f64_from(18), "and m[2][2]");
+var pc = perspective_clone(pm);
+assert_eq(pc != pm, 1, "perspective_clone returns a new record");
+assert_eq(perspective_eq(pm, pc), 1, "which equals its source");
+var pdiff = 0;
+var pk = 0;
+while (pk < 9) {
+    perspective_set_m(pc, pk / 3, pk % 3, 99.0);
+    if (perspective_eq(pm, pc) == 0) { pdiff = pdiff + 1; }
+    perspective_set_m(pc, pk / 3, pk % 3, f64_from(10 + pk));
+    pk = pk + 1;
+}
+assert_eq(pdiff, 9, "all nine elements take part in perspective_eq");
+assert_eq(perspective_eq(pm, pc), 1, "and restoring them makes the two equal again");
+assert_eq(perspective_m(pm, 1, 1), f64_from(14), "the source was never written through the clone");
+perspective_set_m(pm, 1, 1, 0);
+perspective_set_m(pc, 1, 1, TNZ);
+assert_eq(perspective_eq(pm, pc), 1, "-0.0 equals +0.0");
+perspective_set_m(pm, 2, 2, TNAN);
+assert_eq(perspective_eq(pm, pm), 0, "a NaN element makes a Perspective unequal to itself");
+assert_eq(perspective_eq(0, pm), 0, "a null Perspective equals nothing");
+assert_eq(perspective_clone(0), 0, "and cloning null gives null");
+perspective_free(pc);
+perspective_free(pm);
 
 var exit_code = assert_summary();
 if (exit_code > 0) { exit_code = 1; }

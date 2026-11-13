@@ -20,8 +20,9 @@
 #   CIE_1931_2DEG  -> cie_1931_table()        (a function, not a const)
 #   VISIBLE_MIN_NM -> spec_visible_min_nm()
 #   VISIBLE_MAX_NM -> spec_visible_max_nm()
-# Every other item keeps its Rust name. Whether ranga should also provide the
-# Rust names is tracked in docs/development/roadmap.md (2.4.x).
+# Every other item keeps its Rust name. Since 2.4.0 ranga ALSO provides the
+# three under their Rust names (below), so a port from the Rust API needs no
+# renaming. prakash's own names keep working.
 #
 # So this file is exactly the six convenience functions and the two `From`
 # conversions — the only things rust-old/src/spectral.rs actually implemented.
@@ -62,6 +63,25 @@
 # `prakash-fft` and hisab itself, and must then rename around the collision.
 # That is its problem to solve, not one ranga silently inflicts on everyone.
 include "lib/prakash.cyr"
+
+# ── Rust's names for prakash's three renamed re-exports ────────
+
+# The visible range, in nanometres: Rust's `pub const VISIBLE_MIN_NM: f64` and
+# VISIBLE_MAX_NM. Plain values, as Rust's consts are; tests/spectral.tcyr pins
+# them to spec_visible_min_nm() / spec_visible_max_nm().
+var VISIBLE_MIN_NM = 380.0;
+var VISIBLE_MAX_NM = 780.0;
+
+# Rust's CIE_1931_2DEG: the CIE 1931 2-degree colour-matching functions, 81 rows
+# (380..780 nm in 5 nm steps) of (x-bar, y-bar, z-bar), 24 bytes a row.
+#
+# ⚠ A FUNCTION, not a constant. Rust's is a `const` array. prakash builds the table
+# on first use with its bump allocator, and a load-time initializer would run
+# before the program's alloc_init(). So `CIE_1931_2DEG[i]` in Rust is row i of
+# `CIE_1931_2DEG()` here, and `CIE_1931_2DEG.len()` is CIE_1931_2DEG_LEN.
+#must_use
+fn CIE_1931_2DEG() { return cie_1931_table(); }
+var CIE_1931_2DEG_LEN = 81;
 
 # ── prakash Xyz <-> ranga CieXyz ────────
 

@@ -51,8 +51,8 @@ fn max_diff(p, q, n) {
 test_group("integration.rs");
 
 # pixel_buffer_new_and_access
-var nb = bv_zeroed(8);
-rgba4(bv_data(nb), 10, 20, 30, 255); rgba4(bv_data(nb) + 4, 40, 50, 60, 128);
+var nb = rg_bv_zeroed(8);
+rgba4(rg_bv_data(nb), 10, 20, 30, 255); rgba4(rg_bv_data(nb) + 4, 40, 50, 60, 128);
 var nbuf = pixel_buffer_new(nb, 2, 1, PF_RGBA8, err);
 assert_eq(pixel_buffer_width(nbuf) == 2 && pixel_buffer_height(nbuf) == 1 && pixel_buffer_format(nbuf) == PF_RGBA8
   && pixel_buffer_pixel_count(nbuf) == 2 && load8(pixel_buffer_data(nbuf) + 7) == 128, 1,
@@ -61,8 +61,8 @@ pixel_buffer_free(nbuf);
 
 # pixel_buffer_zeroed_roundtrip
 var zb8 = pixel_buffer_zeroed(8, 8, PF_RGBA8, err);
-var zcopy = bv_zeroed(256);
-memcpy(bv_data(zcopy), pixel_buffer_data(zb8), 256);
+var zcopy = rg_bv_zeroed(256);
+memcpy(rg_bv_data(zcopy), pixel_buffer_data(zb8), 256);
 var zb8b = pixel_buffer_new(zcopy, 8, 8, PF_RGBA8, err);
 assert_eq(pixel_buffer_len(zb8) == 256 && max_diff(pixel_buffer_data(zb8), pixel_buffer_data(zb8b), 256) == 0
   && load8(pixel_buffer_data(zb8) + 255) == 0, 1, "pixel_buffer_zeroed_roundtrip");
@@ -157,10 +157,10 @@ assert_eq(f64_lt(f64_abs(chi_squared(ca4, cb4, err)), 0.0000000001), 1, "chi_squ
 hist_free(ca4); hist_free(cb4);
 
 # pixel_buffer_dimension_mismatch: 10 bytes for a 2 x 2 RGBA8 buffer.
-var short10 = bv_zeroed(10);
+var short10 = rg_bv_zeroed(10);
 assert_eq(pixel_buffer_new(short10, 2, 2, PF_RGBA8, err), 0, "pixel_buffer_dimension_mismatch is refused");
 assert_eq(load64(err), RG_ERR_DIMENSION_MISMATCH, "as DimensionMismatch");
-bv_free(short10);
+rg_bv_free(short10);
 
 # filter_rejects_wrong_format
 var rgb44 = pixel_buffer_zeroed(4, 4, PF_RGB8, err);

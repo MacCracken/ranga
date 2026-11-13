@@ -55,6 +55,9 @@ Replace the Vulkan compute shader with ranga's wgpu pipeline:
 
 ### 3D LUT (tazama/crates/gpu/src/lut.rs)
 Replace custom .cube parser with `ranga::filter::Lut3d::from_cube()` + `apply_lut3d()`.
+In the Cyrius port (since 2.4.0) that is `lut3d_from_cube(text, len, err_out)` +
+`apply_lut3d(buf, lut)`. It also honours the file's `DOMAIN_MIN`/`DOMAIN_MAX` and
+Resolve's `LUT_3D_INPUT_RANGE`, which the Rust parser skipped or rejected (ADR 007).
 Same trilinear interpolation algorithm.
 
 ### Buffer management

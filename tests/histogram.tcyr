@@ -19,7 +19,7 @@ fn approx(a, b, eps) {
 
 # Fill every byte of an Rgba8 buffer with `v` — Rust's `vec![v; w * h * 4]`.
 fn fill_all(b, v) {
-    bv_fill(pixel_buffer_bv(b), v);
+    rg_bv_fill(pixel_buffer_bv(b), v);
     return 0;
 }
 
