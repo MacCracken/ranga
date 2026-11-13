@@ -2,6 +2,126 @@
 
 ## [Unreleased]
 
+## [2.3.3] - 2026-11-13
+
+Closes milestone 2.3.x. ranga no longer hands its SPIR-V to a backend that cannot
+compile it: on an NVIDIA context every compute operation returns UNSUPPORTED before
+anything reaches the card, where 2.3.2 had nouveau kill the channel. A new
+NVIDIA-gated suite proves it on `chew` (GTX 1660 SUPER), 53 of 53. The two GPU test
+helpers that segfaulted after a failed dispatch now fail their assertions and run
+to the end. prakash moves to 2.15.2, which removes the last compiler warnings in a
+ranga build. The toolchain stays at cyrius 6.7.18, which is still the newest
+release.
+
+### Changed
+
+- **GPU compute runs only on the native AMD backend**
+  ([ADR 005](docs/adr/005-gpu-compute-runs-only-on-native-amd.md)). `_gp_kernel`
+  checks the context's backend first, before it emits SPIR-V or calls
+  `gpu_shader_module_create_spirv`. On any other backend it reports
+  `RG_GPU_ERR_UNSUPPORTED` and returns. Every `gpu_*` operation reaches the GPU
+  through it, before any buffer is uploaded. It is an allowlist:
+  - **NVIDIA:** mabda 4.2.0 takes SM75 SASS, and its SPIR-V→SASS compiler (phase N9)
+    is unshipped. Given SPIR-V, it uploaded the words as machine code. The eleven
+    native operations returned `BUFFER_OP` after a channel fault (`Xid 13`). They
+    now return UNSUPPORTED, and nothing is uploaded.
+  - **wgpu:** mabda's context-level dispatch returns `GPU_ERR_OTHER`
+    unconditionally, so every operation already failed, with `BUFFER_OP` after the
+    upload. It now fails with UNSUPPORTED before the upload. Whether wgpu dispatches
+    at all is still the open 2.5.x decision.
+  - **AMD:** unchanged. Every AMD assertion passes as before.
+  - Buffer upload and download are not guarded: they work on NVIDIA.
+  - A degenerate `gpu_crop` still succeeds everywhere, because it dispatches
+    nothing.
+
+### Added
+
+- **`gpu_context_supports_compute(ctx)`**: 1 on the native AMD backend, 0 on any
+  other backend or a null context. A consumer can pick the CPU path up front
+  instead of learning it from the first operation's error. It has no Rust
+  counterpart: wgpu ran every operation on every adapter.
+- **`tests/gpu_nvidia.tcyr`**, gated on `gpu_context_new_nvidia` instead of the AMD
+  constructor. It checks the following:
+  - the backend name, and that the context does not support compute;
+  - a buffer round trip, byte for byte, with shape and format;
+  - that all eleven native operations are refused, each with UNSUPPORTED through
+    `err_out` and its buffers untouched;
+  - that the stubs and the format guard answer as they do on AMD;
+  - that the context's shader cache is still empty at the end, so no SPIR-V reached
+    the backend at all.
+
+  Without an NVIDIA card it prints `SKIPPED: 53 hardware assertions` and passes.
+  That is what it does on the dev host and in CI.
+
+### Fixed
+
+- **The GPU test helpers fail instead of crashing.** `run_kernel` and `run2` in
+  `gpu_kernels.tcyr` returned 0 when a step failed, and every caller then read
+  through it. The geometry checks in `gpu_pipeline.tcyr` did the same with a null
+  `PixelBuffer`. Now a failed step is a failed assertion that names the step, and
+  the caller reads poison (`GPU_HW_POISON`, new in `tests/gpu_hw.cyr`) of the same
+  size. Each later check fails on its own line, and the suite reaches its summary.
+  `run2` also never checked its three buffer creates; now it does.
+  - With every kernel compile forced to fail on the AMD host, `gpu_kernels.tcyr`
+    reports 54 failures and exits 1. The 2.3.2 helpers segfault (exit 139) on the
+    first one.
+  - With compute forced off, `gpu_pipeline.tcyr` reports 65 failures out of an
+    unchanged 102. The 2.3.2 version segfaults at `gpu_flip_horizontal`.
+  - The geometry results go through `got()`, which keeps each call site's one
+    "returns a buffer" assertion, so `HW_N` is unchanged at 83.
+
+### Verified on NVIDIA hardware
+
+On `chew` (GeForce GTX 1660 SUPER, TU116, SM75, nouveau + NVK), from static binaries
+built on the dev host:
+
+| Binary | Result |
+| --- | --- |
+| `gpu_nvidia.tcyr` | 54 of 54 (53 hardware assertions plus the count check) |
+| `gpu.tcyr` built against the NVIDIA constructor | 46 of 48: the two AMD-only checks (backend name, `supports_compute`) fail, as they should |
+| `gpu_pipeline.tcyr` built against the NVIDIA constructor | runs to its summary, 37 of 102: every operation refused. In 2.3.2 it segfaulted and `Xid 13`'d the channel |
+
+The kernel log shows no nouveau or Xid message from any of the three runs.
+`gpu_kernels.tcyr` was not run there. It calls mabda directly to test the kernels
+themselves, so it bypasses the guard and would fault the channel again.
+
+### Dependencies
+
+- **prakash 2.15.1 → 2.15.2** (pins cyrius 6.7.18). prakash moved its 2D-FFT entry
+  points into a separate `prakash-fft` bundle. Those were its only calls into hisab,
+  and ranga calls none of them. As a result:
+  - the three compiler warnings a ranga build used to show, all from the vendored
+    prakash, are gone: two "comparison mixes f64 and integer operands" (at
+    `prakash.cyr:9213-9214`) and `undefined function 'num_fft'`. The spectral suite
+    now compiles with no warnings at all, against those three under 2.15.1;
+  - `cyrius distlib` no longer reports `num_fft` undefined in `ranga-spectral.cyr`;
+  - `dist/ranga-spectral.deps` is `freelist` alone, down from `sakshi`, `ganita` and
+    `freelist`. Its `# Requires` block drops the `sakshi` and `ganita` includes;
+  - hisab is now a test-scope dependency of prakash, so a ranga resolve no longer
+    fetches hisab, or the sakshi package that came with it. `cyrius.lock` keeps 69
+    entries, with 5 commit pins instead of 7. `lib/sakshi.cyr` stays: it is a
+    declared stdlib leaf, byte-identical to hisab's copy;
+  - `lib/hisab.cyr` (3.6 MB) is no longer in the declared footprint, and nothing
+    includes it. It is still in `lib/` and the lock, pending removal by
+    `rm lib/hisab.cyr && cyrius deps --lock`.
+- `cyrius deps --verify --features spectral,hwaccel,gpu`: 69 verified, 0 failed.
+- Unchanged, because each is still its newest release: cyrius 6.7.18, mabda 4.2.0,
+  ai-hwaccel 2.5.6.
+
+### Bundles
+
+- `ranga-gpu.cyr` gains 41 lines: the guard, the predicate and their comments.
+- `ranga-spectral.cyr` gains 1 line: the rewritten hisab comment. Its `# Requires`
+  block loses 2.
+- `ranga.cyr` and `ranga-hwaccel.cyr` change only in the `# Version:` line.
+
+### Docs
+
+- **ADR 005**, and [architecture note 001](docs/architecture/001-mabda-native-gpu-constraints.md),
+  which no longer claims that mabda lowers ranga's SPIR-V to SM75. It now records
+  what the NVIDIA backend does with SPIR-V, and the three mabda filings that are still
+  open.
+
 ## [2.3.2] - 2026-11-02
 
 `bilateral` no longer darkens: it rounds its weighted mean, the same class of fix as

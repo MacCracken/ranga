@@ -37,6 +37,24 @@ fn seed4(b) {
     return 0;
 }
 
+# FAIL, DON'T CRASH (tests/gpu_hw.cyr). The geometry ops return a new buffer,
+# or 0 when they fail, and each check below reads the result. This asserts the
+# result is non-zero under `name` (the one assertion the call site always made)
+# and on failure returns a 64x3 RGBA8 buffer of GPU_HW_POISON in its place.
+# 64x3 matches no shape any check expects, and it is large enough for every
+# offset read (the largest is 124), so each later check fails rather than
+# faulting. Up to 2.3.2 a failed op on NVIDIA segfaulted the suite here.
+fn got(b, name) {
+    assert_eq(b != 0, 1, name);
+    if (b != 0) { return b; }
+    var p = pixel_buffer_zeroed(64, 3, PF_RGBA8, perr);
+    if (p == 0) { return 0; }
+    var d = pixel_buffer_data(p);
+    var i = 0;
+    while (i < 64 * 3) { store32(d + i * 4, GPU_HW_POISON); i = i + 1; }
+    return p;
+}
+
 fn eq4(b, a0, a1, a2, a3, name) {
     var r = pixel_buffer_data(b);
     var ok = 1;
@@ -220,8 +238,7 @@ if (ctx != 0) {
     di = 0;
     while (di < 8) { store32(gr + di * 4, di + 1); di = di + 1; }
 
-    var fh = gpu_flip_horizontal(ctx, geo, err);
-    assert_eq(fh != 0, 1, "gpu_flip_horizontal returns a buffer");
+    var fh = got(gpu_flip_horizontal(ctx, geo, err), "gpu_flip_horizontal returns a buffer");
     assert_eq(load64(err), RG_GPU_ERR_NONE, "with no error");
     var fr = pixel_buffer_data(fh);
     assert_eq(load32(fr + 0), 4, "row 0 is mirrored");
@@ -232,8 +249,7 @@ if (ctx != 0) {
     assert_eq(load32(gr + 0), 1, "and the source is left alone");
     pixel_buffer_free(fh);
 
-    var fv = gpu_flip_vertical(ctx, geo, err);
-    assert_eq(fv != 0, 1, "gpu_flip_vertical returns a buffer");
+    var fv = got(gpu_flip_vertical(ctx, geo, err), "gpu_flip_vertical returns a buffer");
     var vr = pixel_buffer_data(fv);
     assert_eq(load32(vr + 0), 5, "the rows are exchanged");
     assert_eq(load32(vr + 16), 1, "both ways");
@@ -242,8 +258,7 @@ if (ctx != 0) {
     # geo is 4x2 holding 1..8: row 0 is 1 2 3 4, row 1 is 5 6 7 8.
     # ⚠ The arguments are a RECTANGLE (left, top, right, bottom), matching Rust
     # and ranga's own CPU crop() — not an offset and a size.
-    var cr = gpu_crop(ctx, geo, 1, 0, 3, 1, err);
-    assert_eq(cr != 0, 1, "gpu_crop returns a buffer");
+    var cr = got(gpu_crop(ctx, geo, 1, 0, 3, 1, err), "gpu_crop returns a buffer");
     assert_eq(pixel_buffer_width(cr), 2, "right - left wide");
     assert_eq(pixel_buffer_height(cr), 1, "and bottom - top high");
     var crr = pixel_buffer_data(cr);
@@ -254,8 +269,8 @@ if (ctx != 0) {
     # ⚠ An out-of-range rectangle CLAMPS, it does not fail — `r.min(width)` in
     # Rust, and the same in ranga's CPU crop. A version that hard-rejected here
     # would diverge from both.
-    var cclamp = gpu_crop(ctx, geo, 2, 0, 99, 99, err);
-    assert_eq(cclamp != 0, 1, "an oversized rectangle clamps rather than failing");
+    var cclamp = got(gpu_crop(ctx, geo, 2, 0, 99, 99, err),
+      "an oversized rectangle clamps rather than failing");
     assert_eq(load64(err), RG_GPU_ERR_NONE, "with no error reported");
     assert_eq(pixel_buffer_width(cclamp), 2, "clamped to the source width");
     assert_eq(pixel_buffer_height(cclamp), 2, "and the source height");
@@ -268,8 +283,8 @@ if (ctx != 0) {
 
     # A degenerate rectangle — right clamped below left — yields an EMPTY
     # buffer, as Rust's `.max(l)` does, not an error.
-    var cempty = gpu_crop(ctx, geo, 2, 0, 1, 1, err);
-    assert_eq(cempty != 0, 1, "a degenerate rectangle still returns a buffer");
+    var cempty = got(gpu_crop(ctx, geo, 2, 0, 1, 1, err),
+      "a degenerate rectangle still returns a buffer");
     assert_eq(pixel_buffer_width(cempty), 0, "of zero width");
     assert_eq(load64(err), RG_GPU_ERR_NONE, "and reports success, as Rust does");
     pixel_buffer_free(cempty);
@@ -277,15 +292,15 @@ if (ctx != 0) {
     # ⚠ src_y is exercised here and nowhere else: every other crop in this
     # suite uses top = 0, which zeroes the (src_y + gy) * src_w term and leaves
     # that wiring unconstrained.
-    var crow1 = gpu_crop(ctx, geo, 0, 1, 2, 2, err);
-    assert_eq(crow1 != 0, 1, "a crop from the second row returns a buffer");
+    var crow1 = got(gpu_crop(ctx, geo, 0, 1, 2, 2, err),
+      "a crop from the second row returns a buffer");
     var c1r = pixel_buffer_data(crow1);
     assert_eq(load32(c1r + 0), 5, "and reads row 1, not row 0");
     assert_eq(load32(c1r + 4), 6, "across the window");
     pixel_buffer_free(crow1);
 
-    var rz = gpu_resize(ctx, geo, 8, 4, SF_NEAREST, err);
-    assert_eq(rz != 0, 1, "gpu_resize with SF_NEAREST returns a buffer");
+    var rz = got(gpu_resize(ctx, geo, 8, 4, SF_NEAREST, err),
+      "gpu_resize with SF_NEAREST returns a buffer");
     assert_eq(pixel_buffer_width(rz), 8, "at the requested width");
     assert_eq(pixel_buffer_height(rz), 4, "and height");
     var rr = pixel_buffer_data(rz);

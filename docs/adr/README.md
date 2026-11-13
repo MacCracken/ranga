@@ -23,5 +23,6 @@ Decisions about ranga — what we chose, the context, and the consequences we ac
 - [002 — f32 transcendentals follow correct rounding, not the oracle host's libm](002-f32-transcendentals-follow-correct-rounding-not-glibc.md)
 - [003 — The separable blurs keep an f32 intermediate and round once](003-blur-keeps-an-f32-intermediate-and-rounds-once.md)
 - [004 — `bilateral` rounds its weighted mean](004-bilateral-rounds-its-weighted-mean.md)
+- [005 — GPU compute runs only on the native AMD backend](005-gpu-compute-runs-only-on-native-amd.md)
 
 The first two ADRs use three-digit numbers. New ones continue that series (`003-…`).

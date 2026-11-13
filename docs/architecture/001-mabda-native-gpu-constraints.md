@@ -1,7 +1,8 @@
 # 001 — What mabda's native GPU path accepts (as of mabda 4.2.0)
 
 ranga's GPU layer (`src/gpu_*.cyr`) runs on mabda. ranga emits SPIR-V itself
-(`gpu_spirv.cyr`), and mabda lowers it to GFX9 (AMD) or SM75 (NVIDIA). The rules
+(`gpu_spirv.cyr`), and mabda lowers it to GFX9 on the native AMD backend. No other
+backend compiles it (below, and ADR 005). The rules
 below cannot be derived from ranga's code. Most of them fail silently or with a bare
 0 when broken. Symbols are named rather than given line numbers, because the
 vendored `lib/mabda.cyr` moves with every bump. Re-check this note whenever the
@@ -15,6 +16,20 @@ mabda pin moves.
   (`gpu_shaders.cyr`), but nothing in `src/` dispatches them. On a wgpu context every
   `gpu_*` operation fails. The only wgpu compute route in mabda is the older
   `compute_dispatch(device, queue, …)`, which takes the device and queue directly.
+- **The native NVIDIA backend runs SASS, not SPIR-V, and does not refuse SPIR-V.**
+  Its shader-module create takes precompiled SM75 SASS (`SHADER_SRC_SASS`). The
+  SPIR-V→SASS compiler is mabda phase N9, unshipped. Handed SPIR-V through
+  `gpu_shader_module_create_spirv`, it uploads the words verbatim, and the dispatch
+  runs them as machine code. On a GTX 1660 SUPER, nouveau then kills the channel
+  (`Xid 13 … Out Of Range Register`). Its dispatch also reads `bp` as one output
+  buffer, not the count-prefixed binding array AMD reads. Context creation and the
+  buffer calls do work. ranga refuses every compute operation on any backend but
+  native AMD before a module is created (`gpu_context_supports_compute`,
+  [ADR 005](../adr/005-gpu-compute-runs-only-on-native-amd.md)). Filed in mabda's
+  `docs/development/issues/`, all still open at mabda 4.2.0:
+  - `2026-11-02-n9-spirv-to-sass-compiler-request.md`;
+  - `2026-11-02-compute-dispatch-bindings-differ-amd-nvidia.md`;
+  - `2026-11-02-nvidia-shader-module-create-ignores-source-kind.md`.
 - **Only the context-taking surface is backend-agnostic:**
   - `gpu_buffer_create`, `_write`, `_read` and `_release`;
   - `gpu_compute_dispatch`.

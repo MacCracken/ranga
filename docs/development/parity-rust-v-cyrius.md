@@ -32,6 +32,10 @@
 > **Updated for 2.3.2.** `bilateral` moves from PARITY to IMPROVED: it rounds its
 > weighted mean, where Rust truncated
 > ([ADR 004](../adr/004-bilateral-rounds-its-weighted-mean.md)).
+>
+> **Updated for 2.3.3.** No status changes. GPU compute is refused on every backend but
+> native AMD ([ADR 005](../adr/005-gpu-compute-runs-only-on-native-amd.md)), and the
+> GPU table's statuses describe the AMD backend.
 
 ## How each item is classified
 
@@ -255,6 +259,11 @@ That is counted as PARITY.
 | `GpuError` Display | `gpu_error_message` | SUSPECT | FORMAT and UNSUPPORTED both render "no error". |
 
 **Also found:**
+- **Since 2.3.3, all fourteen operations are refused on every backend but native AMD**
+  ([ADR 005](../adr/005-gpu-compute-runs-only-on-native-amd.md)). Rust ran them on any
+  adapter wgpu found. mabda 4.2.0's NVIDIA backend executed ranga's SPIR-V as SASS
+  and faulted the channel. The statuses in this table describe the AMD backend.
+  `gpu_context_supports_compute` is a ranga addition with no Rust counterpart.
 - Guards run in a different order from Rust: buffers are read before the null checks.
 - `err_out` is set inconsistently on dimension mismatch.
 - The cache vecs are never freed.
@@ -275,14 +284,17 @@ That is counted as PARITY.
 | 11 examples | **0.** `docs/examples/` is empty, and the guides are Rust-era. |
 
 Further detail on test coverage:
-- **GPU coverage depends on the host.** 162 GPU assertions (22 + 49 + 83 + 8 across
-  the four gated suites) run only when an AMD context opens. Since 2.3.0 a host
+- **GPU coverage depends on the host.** 163 GPU assertions (23 + 49 + 83 + 8 across
+  the four AMD-gated suites) run only when an AMD context opens. Since 2.3.0 a host
   without one prints `SKIPPED: N hardware assertions` per suite, and the checks that
   need no context (stubs, guards, null context, workgroup arithmetic) run
-  everywhere. Assertion totals in `state.md` are **AMD-host** counts. The NVIDIA
-  backend has no checked-in test. A hardware run on a GTX 1660 SUPER (2026-11-02)
-  found context and buffers working and compute blocked on mabda's SPIR-V→SASS
-  compiler (roadmap 2.3.x).
+  everywhere. Assertion totals in `state.md` are **AMD-host** counts.
+  - **NVIDIA has its own gated suite since 2.3.3.** `gpu_nvidia.tcyr` has 53
+    assertions, and it passes on a GTX 1660 SUPER (`chew`). It checks:
+    - the context and a buffer round trip;
+    - that all eleven native operations are refused (ADR 005);
+    - that no shader module was created.
+  - Compute on NVIDIA waits on mabda's SPIR-V→SASS compiler (N9).
 - **Some tests pin behaviour that contradicts Rust,** with no ADR:
   - the error strings;
   - bilateral's error codes;

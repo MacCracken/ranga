@@ -35,25 +35,30 @@ fn seed(host) {
     return 0;
 }
 
-# Build, compile, dispatch, read back. Returns the result buffer, or 0.
+# Build, compile, dispatch, read back. Returns the result buffer. If a step
+# fails it records that as a failed assertion and returns poison of the same
+# size (gpu_hw_failed), so the checks that follow fail instead of reading
+# through 0.
 fn run_kernel(m, s, p1, p2) {
+    var nb = (NPX + 1) * 4;
     var n = spv_finish(s, outp);
-    if (n == 0) { return 0; }
+    if (n == 0) { return gpu_hw_failed(nb, "run_kernel: spv_finish emitted no module"); }
     var shmod = gpu_shader_module_create_spirv(m, load64(outp), n);
-    if (shmod == 0) { return 0; }
+    if (shmod == 0) { return gpu_hw_failed(nb, "run_kernel: the shader module was not created"); }
 
     # NPX + 1 elements: the extra one is a SENTINEL past the range the kernel
     # is told about. `count` stays NPX, so a correct guard never touches it and
     # an off-by-one guard overwrites it. Without this the buffer is oversized by
     # 64 KiB alignment and a one-past write is invisible.
     var pbuf = gpu_buffer_create(m, (NPX + 1) * 4, 0x0080 | 0x0008 | 0x0004);
-    if (pbuf == 0) { return 0; }
+    if (pbuf == 0) { return gpu_hw_failed(nb, "run_kernel: the pixel buffer was not created"); }
     var host = fl_alloc((NPX + 1) * 4);
     seed(host);
     store32(host + NPX * 4, 0x5A5A5A5A);
     gpu_buffer_write(m, pbuf, 0, host, (NPX + 1) * 4);
 
     var prm = gpu_buffer_create(m, 16, 0x0080 | 0x0008 | 0x0004);
+    if (prm == 0) { return gpu_hw_failed(nb, "run_kernel: the params buffer was not created"); }
     var ph = fl_alloc(16);
     store32(ph + 0, NPX);
     store32(ph + 4, p1);
@@ -70,10 +75,14 @@ fn run_kernel(m, s, p1, p2) {
     native_buf_pair_write(&bp + 8,  load64(pbuf + NATIVE_BUF_FIELD_HANDLE), load64(pbuf + NATIVE_BUF_FIELD_VA));
     native_buf_pair_write(&bp + 24, load64(prm + NATIVE_BUF_FIELD_HANDLE), load64(prm + NATIVE_BUF_FIELD_VA));
     native_buf_pair_write(&bp + 40, load64(prm + NATIVE_BUF_FIELD_HANDLE), load64(prm + NATIVE_BUF_FIELD_VA));
-    if (gpu_compute_dispatch(m, shmod, 1, 1, 1, &bp) != 0) { return 0; }
+    if (gpu_compute_dispatch(m, shmod, 1, 1, 1, &bp) != 0) {
+        return gpu_hw_failed(nb, "run_kernel: the dispatch failed");
+    }
 
     var back = fl_alloc((NPX + 1) * 4);
-    if (gpu_buffer_read(m, pbuf, 0, back, (NPX + 1) * 4) != 0) { return 0; }
+    if (gpu_buffer_read(m, pbuf, 0, back, (NPX + 1) * 4) != 0) {
+        return gpu_hw_failed(nb, "run_kernel: the readback failed");
+    }
     gpu_buffer_release(m, pbuf);
     gpu_buffer_release(m, prm);
     return back;
@@ -272,14 +281,19 @@ if (ctx != 0) {
         return 0;
     }
 
+    # As run_kernel: a failed step is a failed assertion plus 28 bytes of
+    # poison, never a 0 for the caller to read through.
     fn run2(sv, srcv, dstv, p) {
         var wl = spv_finish(sv, outp);
-        if (wl == 0) { return 0; }
+        if (wl == 0) { return gpu_hw_failed(28, "run2: spv_finish emitted no module"); }
         var sh = gpu_shader_module_create_spirv(m, load64(outp), wl);
-        if (sh == 0) { return 0; }
+        if (sh == 0) { return gpu_hw_failed(28, "run2: the shader module was not created"); }
         var sb = gpu_buffer_create(m, 28, U);
         var db = gpu_buffer_create(m, 28, U);
         var pb = gpu_buffer_create(m, 32, U);
+        if (sb == 0 || db == 0 || pb == 0) {
+            return gpu_hw_failed(28, "run2: a buffer was not created");
+        }
         # A seventh word past everything any of these kernels is told about.
         # The guards compare STRICTLY (`bound > value`); a loose comparison
         # lets the invocation at index == count through and clobbers it. The
@@ -300,9 +314,13 @@ if (ctx != 0) {
         native_buf_pair_write(&bp + 24, load64(db + NATIVE_BUF_FIELD_HANDLE), load64(db + NATIVE_BUF_FIELD_VA));
         native_buf_pair_write(&bp + 40, load64(pb + NATIVE_BUF_FIELD_HANDLE), load64(pb + NATIVE_BUF_FIELD_VA));
         native_buf_pair_write(&bp + 56, load64(pb + NATIVE_BUF_FIELD_HANDLE), load64(pb + NATIVE_BUF_FIELD_VA));
-        if (gpu_compute_dispatch(m, sh, 1, 1, 1, &bp) != 0) { return 0; }
+        if (gpu_compute_dispatch(m, sh, 1, 1, 1, &bp) != 0) {
+            return gpu_hw_failed(28, "run2: the dispatch failed");
+        }
         var back = fl_alloc(28);
-        if (gpu_buffer_read(m, db, 0, back, 28) != 0) { return 0; }
+        if (gpu_buffer_read(m, db, 0, back, 28) != 0) {
+            return gpu_hw_failed(28, "run2: the readback failed");
+        }
         gpu_buffer_release(m, sb);
         gpu_buffer_release(m, db);
         gpu_buffer_release(m, pb);

@@ -151,7 +151,7 @@ stdlib = [
 # locally and bypasses the commit-pin verification cyrius.lock records.
 [deps.prakash]
 git = "https://github.com/MacCracken/prakash.git"
-tag = "2.15.1"
+tag = "2.15.2"
 modules = ["dist/prakash.cyr"]
 optional = true
 

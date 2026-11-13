@@ -26,6 +26,12 @@
 # All of this is tracked in docs/development/roadmap.md (2.5.x). The original
 # filing is archived as resolved in mabda's
 # docs/development/issues/archived/2026-08-19-native-spirv-compile-limits.md.
+#
+# ⚠ ONLY THE NATIVE AMD BACKEND RUNS ANY OF THEM. On an NVIDIA or wgpu context
+# every operation returns RG_GPU_ERR_UNSUPPORTED before a shader module is
+# created or a buffer uploaded (`gpu_context_supports_compute`, ADR 005). mabda
+# 4.2.0's NVIDIA backend runs SASS, not SPIR-V, and executed ranga's SPIR-V as
+# machine code until 2.3.3 put the guard in.
 
 # Every per-pixel kernel declares @workgroup_size(256).
 var _GP_WG = 256;
@@ -90,6 +96,17 @@ fn _gp_build_kernel(s, kind) {
 #must_use
 fn _gp_kernel(ctx, kind, err_out) {
     if (ctx == 0) { store64(err_out, RG_GPU_ERR_NO_ADAPTER); return 0; }
+    # ⚠ THE NVIDIA GUARD (ADR 005), and it must stay ahead of the shader-module
+    # create below. On mabda 4.2.0's NVIDIA backend that create does not refuse
+    # SPIR-V: it uploads the words as SASS, the dispatch runs them as machine
+    # code, and nouveau kills the channel. Every operation reaches the GPU
+    # through this function, and it runs before any buffer is uploaded, so one
+    # check here means nothing ranga emits reaches a backend that cannot compile
+    # it.
+    if (gpu_context_supports_compute(ctx) == 0) {
+        store64(err_out, RG_GPU_ERR_UNSUPPORTED);
+        return 0;
+    }
     var cache = gpu_context_shader_cache(ctx);
     if (cache == 0) { store64(err_out, RG_GPU_ERR_BUFFER_OP); return 0; }
     var i = 0;

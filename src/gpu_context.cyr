@@ -143,6 +143,30 @@ fn gpu_context_has_adapter_name(c) {
 #must_use
 fn gpu_context_backend_name(c) { return load64(c + 40); }
 
+# Whether ranga's compute operations can run on this context: 1 on the native
+# AMD backend, 0 on every other backend and on a null context.
+#
+# ⚠ AN ALLOWLIST, NOT A DENYLIST (ADR 005). ranga's kernels are SPIR-V, and in
+# mabda 4.2.0 only the native AMD backend compiles SPIR-V. The others either
+# cannot run it or do worse than refuse it:
+#   * NVIDIA takes precompiled SM75 SASS; its SPIR-V→SASS compiler (mabda N9)
+#     is unshipped. `gpu_shader_module_create_spirv` does not refuse SPIR-V
+#     there: it uploads the words verbatim, the GPU executes them as machine
+#     code, and nouveau kills the channel (Xid 13, measured on a GTX 1660 SUPER).
+#   * wgpu's context-level dispatch slot returns GPU_ERR_OTHER unconditionally.
+#   * Intel is a reserved kind with no backend behind it.
+# A backend that is not known to compile SPIR-V does not get any. Buffers are
+# unaffected: upload and download work on NVIDIA and need no guard.
+#
+# A consumer can ask this before choosing the GPU, rather than finding out from
+# RG_GPU_ERR_UNSUPPORTED on its first operation.
+#must_use
+fn gpu_context_supports_compute(c) {
+    if (c == 0) { return 0; }
+    if (backend_kind(gpu_ctx_backend(load64(c))) == BACKEND_KIND_AMD) { return 1; }
+    return 0;
+}
+
 # Wrap a mabda context RESULT. `owns` decides whether gpu_context_free releases
 # the mabda context too — a context handed in by a launcher belongs to the
 # launcher.

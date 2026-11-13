@@ -16,7 +16,7 @@
 # them is ALREADY callable once this profile is built. Re-declaring them here
 # would be a name collision, not a re-export.
 #
-# ⚠ Three have different names in the Cyrius prakash (checked at 2.15.1):
+# ⚠ Three have different names in the Cyrius prakash (checked at 2.15.2):
 #   CIE_1931_2DEG  -> cie_1931_table()        (a function, not a const)
 #   VISIBLE_MIN_NM -> spec_visible_min_nm()
 #   VISIBLE_MAX_NM -> spec_visible_max_nm()
@@ -46,20 +46,21 @@
 # propagate into dist/ranga-spectral.cyr — a consumer of that bundle declares
 # prakash in its own manifest, which is what keeps the dep opt-in downstream.
 #
-# ⚠ hisab is deliberately NOT included, even though prakash's bundle references
-# `num_fft` from it. Including it produced three DUPLICATE FUNCTION warnings —
-# `linear_to_srgb`, `premultiply_alpha`, `unpremultiply_alpha` — and Cyrius
-# resolves duplicates as LAST DEFINITION WINS, so hisab's four-argument
-# `premultiply_alpha(r, g, b, a)` silently replaced ranga's one-argument
-# `premultiply_alpha(buf)` from composite.cyr. Every existing call site would
-# have passed a PixelBuffer to a function expecting four doubles, with no
-# diagnostic beyond a warning in the bundle log.
+# ⚠ hisab is deliberately NOT included. Including it produced three DUPLICATE
+# FUNCTION warnings — `linear_to_srgb`, `premultiply_alpha`,
+# `unpremultiply_alpha` — and Cyrius resolves duplicates as LAST DEFINITION
+# WINS, so hisab's four-argument `premultiply_alpha(r, g, b, a)` silently
+# replaced ranga's one-argument `premultiply_alpha(buf)` from composite.cyr.
+# Every existing call site would have passed a PixelBuffer to a function
+# expecting four doubles, with no diagnostic beyond a warning in the bundle log.
 #
-# hisab is only needed by prakash's `wave_pattern` module, which this bridge
-# never calls, so `num_fft` links as an unreachable reference and DCE drops it.
-# A consumer that DOES want prakash's wave surface declares hisab itself — and
-# must then rename around the collision, which is its problem to solve rather
-# than one ranga silently inflicts on everyone.
+# Since prakash 2.15.2 nothing here needs it. prakash's only hisab calls (the
+# 2D-FFT entry points, through `num_fft`) moved to a separate `prakash-fft`
+# bundle, and `dist/prakash.cyr` no longer names `num_fft` at all. Up to 2.15.1
+# it did, so `cyrius distlib` reported `num_fft` undefined in
+# ranga-spectral.cyr. A consumer that wants prakash's FFT surface takes
+# `prakash-fft` and hisab itself, and must then rename around the collision.
+# That is its problem to solve, not one ranga silently inflicts on everyone.
 include "lib/prakash.cyr"
 
 # ── prakash Xyz <-> ranga CieXyz ────────

@@ -70,6 +70,8 @@ assert_eq(load64(err), RG_GPU_ERR_NO_ADAPTER, "and reports NoAdapter");
 assert_eq(gpu_buffer_download(0, 0, err), 0, "downloading a null buffer fails");
 assert_eq(gpu_context_free(0), RG_ERR_NONE, "freeing a null context is a no-op");
 assert_eq(gpu_buffer_free(0, 0), RG_ERR_NONE, "freeing a null buffer is a no-op");
+# ADR 005: compute is an allowlist, and a null context is not on it.
+assert_eq(gpu_context_supports_compute(0), 0, "a null context does not support compute");
 
 # ================================================================
 test_group("gpu hardware");
@@ -79,7 +81,7 @@ test_group("gpu hardware");
 # entered from a launcher that builds a wgpu function table — a structure a
 # test suite cannot impose.
 # HW_N: the assertions below that need a GPU context (tests/gpu_hw.cyr).
-var HW_N = 22;
+var HW_N = 23;
 var ctx = gpu_context_new_amd(err);
 
 if (ctx == 0) {
@@ -101,6 +103,9 @@ if (ctx != 0) {
     assert_eq(streq(gpu_context_backend_name(ctx), "unknown"), 0,
       "a backend of 'unknown' means the context Result was never unwrapped");
     assert_eq(gpu_context_mabda(ctx) != 0, 1, "the unwrapped mabda context is non-null");
+    # ADR 005: native AMD is the one backend that compiles ranga's SPIR-V. If
+    # this fails, every gpu_* operation below returns UNSUPPORTED.
+    assert_eq(gpu_context_supports_compute(ctx), 1, "the native AMD backend supports compute");
 
     # ⚠ adapter_name is a STUB, and this pins that rather than hiding it. Rust
     # returned the real adapter string; mabda exposes no live adapter query, so

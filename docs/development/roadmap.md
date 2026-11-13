@@ -8,7 +8,7 @@
 
 ## Where things stand
 
-The port shipped as **2.0.0** and is at **2.3.2** on cyrius 6.7.18. The 2026-11-02 review
+The port shipped as **2.0.0** and is at **2.3.3** on cyrius 6.7.18. The 2026-11-02 review
 of all 303 public Rust items, updated for 2.1.2 and 2.2.0, found:
 
 - 207 at parity;
@@ -34,7 +34,9 @@ allocator redzones, its 31 properties, its integration, edge-case and Photoshop 
 golden vectors that capture the oracle's Rust outputs in `tests/`, and all 134 of its
 benchmarks. Five GPU benchmarks print `MISSING`, because their operations are not
 ported yet (2.5.x). The blurs (ADR 003) and `bilateral` (ADR 004) no longer reproduce
-Rust's darkening. Still missing: examples, and any Cyrius consumer.
+Rust's darkening. **2.3.3 closed the milestone:** NVIDIA contexts are guarded
+(ADR 005) and tested on real hardware. Still missing: examples, and any Cyrius
+consumer.
 
 Several of the original 2.0.0 criteria were never met, and they are carried below.
 
@@ -85,29 +87,36 @@ SM75) on nouveau and NVK, which is exactly what mabda's NVIDIA backend targets:
 - **Harmful today:** ranga's SPIR-V is uploaded verbatim and executed as machine
   code, and nouveau kills the channel (`Xid:13 … Out Of Range Register`).
 
-What is left:
+2.3.3 closed what was left:
 
-- [ ] **(S) Guard NVIDIA contexts.** Until mabda compiles SPIR-V for SM75, every
-      `gpu_*` compute operation on an NVIDIA context should return
-      `RG_GPU_ERR_UNSUPPORTED` before anything is uploaded, as the four missing AMD
-      kernels do. Record this in an ADR.
-- [ ] **(S) An NVIDIA-gated test** that opens `gpu_context_new_nvidia`, round-trips a
-      buffer and checks that the guard holds. It prints SKIPPED without an NVIDIA
-      GPU, and runs on `chew` from a binary built here.
-- [ ] **(S) Fail, don't crash.** `run_kernel` in `gpu_kernels.tcyr` and the geometry
-      checks in `gpu_pipeline.tcyr` read through a null result after a failed
-      dispatch.
+- [x] **(S) Guard NVIDIA contexts.**
+      [ADR 005](../adr/005-gpu-compute-runs-only-on-native-amd.md): compute runs only on
+      the native AMD backend, an allowlist. `_gp_kernel` checks
+      `gpu_context_supports_compute` before it emits SPIR-V or creates a module, so
+      on NVIDIA or wgpu every operation returns `RG_GPU_ERR_UNSUPPORTED` with nothing
+      uploaded.
+- [x] **(S) An NVIDIA-gated test.** `tests/gpu_nvidia.tcyr` opens
+      `gpu_context_new_nvidia`, round-trips a buffer and checks that all eleven
+      native operations are refused. It also checks that the shader cache is still
+      empty at the end. It passes 53 of 53 on `chew` with a clean kernel log, and
+      prints SKIPPED elsewhere.
+- [x] **(S) Fail, don't crash.** `run_kernel` and `run2` in `gpu_kernels.tcyr`, and
+      the geometry checks in `gpu_pipeline.tcyr`, now record a failed step as a
+      failed assertion and read poison in its place. With every dispatch forced to
+      fail, both suites run to their summary, where 2.3.2's segfaulted.
 - **Blocked upstream in mabda,** filed 2026-11-02 in mabda's
-  `docs/development/issues/`:
+  `docs/development/issues/` and still open at 4.2.0:
   - `2026-11-02-n9-spirv-to-sass-compiler-request.md`: the SPIR-V→SASS compiler;
   - `2026-11-02-compute-dispatch-bindings-differ-amd-nvidia.md`: NVIDIA reads
     `gpu_compute_dispatch`'s `bp` as one buffer, AMD as a binding array;
   - `2026-11-02-nvidia-shader-module-create-ignores-source-kind.md`: SPIR-V is
     accepted as SASS instead of being refused.
 
-  When the first two land, run the four GPU suites on `chew`.
+  When the first two land, lift the guard for NVIDIA (ADR 005's follow-up). Flip
+  `gpu_nvidia.tcyr`'s refused rows to the AMD suites' values, and run the GPU suites
+  on `chew`.
 
-**Done when** NVIDIA contexts are guarded and tested on `chew`.
+**Done when** NVIDIA contexts are guarded and tested on `chew`. **Met in 2.3.3.**
 
 ## 2.4.x — Surface completion (CPU)
 
@@ -208,9 +217,10 @@ run.
 - [ ] **(S–M) `memcpy` and `memset` are byte loops** in the 6.7.18 stdlib (the x86
       `rep movsb` path was removed for aarch64's sake). That is most of
       `buffer_pool_acquire_release` (127×), `crop` (53×), `flip_vertical` (32×),
-      `flip_horizontal` (18×) and `fill_solid` (18.5×). File an architecture-guarded
-      fast path upstream, and meanwhile use a word-at-a-time copy and fill in ranga's
-      hot paths.
+      `flip_horizontal` (18×) and `fill_solid` (18.5×). Filed upstream as
+      `cyrius/docs/development/issues/2026-11-02-memcpy-memset-byte-loops-dominate-frame-copies.md`
+      (8-byte chunks measured 6.5× faster for copy and 6.9× for fill on a 1080p
+      frame). Meanwhile, use a word-at-a-time copy and fill in ranga's hot paths.
       - **It is also the whole cost of a GPU call.** mabda's native
         `gpu_buffer_write` and `gpu_buffer_read` are each one stdlib `memcpy`, so a
         1080p GPU operation spends about 30 ms copying 16 MB at about 530 MB/s. Rust's
@@ -300,8 +310,9 @@ first, for 6.6.9 → 6.7.18, is
    the old and new pins, shows exactly what a bump changed. Run
    `scripts/oracle/run.sh` too: a bump that moves a computation away from Rust fails
    it.
-6. Until 2.3.x lands, `cyrius fuzz` runs the scaffold stub. **Do not report it as
-   verification.**
+6. Run `cyrius fuzz --poison`. Since 2.3.0 it runs the eight real harnesses under
+   allocator redzones. Before that it ran the scaffold stub, which was not
+   verification.
 
 ## Out of scope
 

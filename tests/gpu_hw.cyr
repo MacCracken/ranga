@@ -17,3 +17,39 @@ fn gpu_hw_check(from, n) {
     assert_eq(_assert_total - from, n, "HW_N is the number of hardware assertions that ran");
     return 0;
 }
+
+# The NVIDIA suite's skip line. Its gate is a different context constructor, so
+# the AMD wording above would misreport which card was missing.
+fn gpu_hw_skipped_nvidia(n) {
+    print("  SKIPPED: ", 11);
+    fmt_int(n);
+    println(" hardware assertions (no NVIDIA GPU context on this host)");
+    return 0;
+}
+
+# The poison word a failed helper fills its stand-in result with. It matches no
+# expected value in the GPU suites, its four bytes all differ (so "R equals G"
+# style checks fail on it too), and it is not either sentinel (0x5A5A5A5A,
+# 0xA5A5A5A5).
+var GPU_HW_POISON = 0xDEADBEEF;
+
+# FAIL, DON'T CRASH. A helper that dispatches and reads back used to return 0
+# when any step failed, and every caller then read through that 0. On the AMD
+# host nothing ever failed, so nothing showed it. On NVIDIA (2.3.2) every
+# dispatch failed and two suites segfaulted mid-run, losing every assertion after
+# the fault, the count check included.
+#
+# This records the failure as an assertion named after the step that failed,
+# then returns `nbytes` of fresh poison for the caller to read instead. Every
+# later check on that result fails on its own line, and the suite runs to its
+# summary. The extra failed assertion also moves the HW_N count, so
+# gpu_hw_check fails as well, which is correct: the section did not run as
+# written.
+fn gpu_hw_failed(nbytes, what) {
+    assert_eq(0, 1, what);
+    var p = fl_alloc(nbytes);
+    if (p == 0) { return 0; }
+    var i = 0;
+    while (i + 4 <= nbytes) { store32(p + i, GPU_HW_POISON); i = i + 4; }
+    return p;
+}
